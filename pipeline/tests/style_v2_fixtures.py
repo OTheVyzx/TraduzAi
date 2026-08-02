@@ -168,6 +168,13 @@ def valid_owner_style_raster_contract_v2(
     result: np.ndarray | None = None,
     glyph_mask: np.ndarray | None = None,
     component_geometry_sha256: str | None = None,
+    visual_profile_sha256: str | None = None,
+    profile_component_geometry_sha256: str | None = None,
+    source_artifact_sha256: str | None = None,
+    source_glyph_mask_sha256: str | None = None,
+    style_decision: dict[str, Any] | None = None,
+    resolved_style_intent: dict[str, Any] | None = None,
+    materialization_plan: dict[str, Any] | None = None,
 ):
     from ownership import model as ownership_model
     from typesetter.style_materialization import (
@@ -175,6 +182,7 @@ def valid_owner_style_raster_contract_v2(
         build_materialization_plan,
         build_resolved_style_intent,
         compare_materialization,
+        materialization_plan_from_dict,
     )
 
     v2_type = getattr(ownership_model, "OwnerStyleRasterContractV2")
@@ -185,35 +193,74 @@ def valid_owner_style_raster_contract_v2(
         result=result,
         glyph_mask=glyph_mask,
         component_geometry_sha256=component_geometry_sha256,
+        visual_profile_sha256=visual_profile_sha256,
+        profile_component_geometry_sha256=profile_component_geometry_sha256,
+        source_artifact_sha256=source_artifact_sha256,
+        source_glyph_mask_sha256=source_glyph_mask_sha256,
+        style_decision=style_decision,
     ).to_dict()
+    raw_intent = resolved_style_intent or {}
     intent = build_resolved_style_intent(
-        owner_id=owner_id,
-        page_id=page_id,
-        visual_profile_sha256=base["visual_profile_sha256"],
-        decision_sha256="a" * 64,
-        group_resolution_sha256="b" * 64,
-        approved={"fill": "#fff"},
-        approved_abstentions={},
-        attribute_provenance={"fill": {"evidence_id": "fixture-fill"}},
+        owner_id=str(raw_intent.get("owner_id") or owner_id),
+        page_id=str(raw_intent.get("page_id") or page_id),
+        visual_profile_sha256=str(
+            raw_intent.get("visual_profile_sha256")
+            or base["visual_profile_sha256"]
+        ),
+        decision_sha256=str(raw_intent.get("decision_sha256") or "a" * 64),
+        group_resolution_sha256=str(
+            raw_intent.get("group_resolution_sha256") or "b" * 64
+        ),
+        approved=dict(raw_intent.get("approved_attributes") or {"fill": "#fff"}),
+        approved_abstentions=dict(raw_intent.get("approved_abstentions") or {}),
+        attribute_provenance=dict(
+            raw_intent.get("attribute_provenance")
+            or {"fill": {"evidence_id": "fixture-fill"}}
+        ),
     )
-    plan = build_materialization_plan(
-        intent=intent,
-        render_layout_contract_sha256="c" * 64,
-        targets={"fill": "#FFFFFF"},
-        resolution_kinds={"fill": "exact"},
-        rendered_x_height_px=20,
-    )
+    if materialization_plan is not None:
+        plan = materialization_plan_from_dict(materialization_plan)
+    elif resolved_style_intent is not None:
+        approved = dict(intent.approved_attributes)
+        abstained = dict(intent.approved_abstentions)
+        plan = build_materialization_plan(
+            intent=intent,
+            render_layout_contract_sha256="c" * 64,
+            targets={},
+            resolution_kinds={
+                **{name: "abstained" for name in approved},
+                **{name: "abstained" for name in abstained},
+            },
+            resolution_reasons={
+                **{name: "fixture_renderer_abstention" for name in approved},
+                **abstained,
+            },
+            rendered_x_height_px=20,
+        )
+    else:
+        plan = build_materialization_plan(
+            intent=intent,
+            render_layout_contract_sha256="c" * 64,
+            targets={"fill": "#FFFFFF"},
+            resolution_kinds={"fill": "exact"},
+            rendered_x_height_px=20,
+        )
+    domain_observations: dict[str, dict[str, dict[str, Any]]] = {}
+    for name, attribute_plan in plan.attribute_plans.items():
+        if attribute_plan.resolution_kind in {
+            "abstained",
+            "superseded",
+            "review_required",
+        }:
+            continue
+        domain_observations.setdefault(attribute_plan.domain, {})[name] = {
+            "value": attribute_plan.target_value,
+            "evidence_kind": "fixture_observable_backend",
+            "evidence_sha256": "d" * 64,
+        }
     observation = build_materialization_observation(
         plan=plan,
-        domain_observations={
-            "raster": {
-                "fill": {
-                    "value": "#FFFFFF",
-                    "evidence_kind": "layer_pixels_and_mask",
-                    "evidence_sha256": "d" * 64,
-                }
-            }
-        },
+        domain_observations=domain_observations,
         render_completed=True,
     )
     comparison = compare_materialization(plan, observation)
@@ -230,9 +277,28 @@ def valid_owner_style_raster_contract_v2(
             "materialization_observation": observation.to_dict(),
             "materialization_comparison": comparison.to_dict(),
             "backend_selection_reason": "fixture_observable_backend",
-            "requested_attributes": {"fill": "#fff"},
-            "applied_attributes": {"fill": "#FFFFFF"},
-            "abstained_attributes": {},
+            "requested_attributes": {
+                name: attribute_plan.intent_value
+                for name, attribute_plan in plan.attribute_plans.items()
+            },
+            "applied_attributes": {
+                name: attribute_plan.target_value
+                for name, attribute_plan in plan.attribute_plans.items()
+                if attribute_plan.resolution_kind not in {
+                    "abstained",
+                    "superseded",
+                    "review_required",
+                }
+            },
+            "abstained_attributes": {
+                name: attribute_plan.reason or attribute_plan.resolution_kind
+                for name, attribute_plan in plan.attribute_plans.items()
+                if attribute_plan.resolution_kind in {
+                    "abstained",
+                    "superseded",
+                    "review_required",
+                }
+            },
         }
     )
     base["contract_sha256"] = owner_style_raster_contract_sha256(base)

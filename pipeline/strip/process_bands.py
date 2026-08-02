@@ -10135,7 +10135,29 @@ def _owner_glyph_raster(
     ).astype(np.uint8)
     local_support = support[y1:y2, x1:x2]
     foreground[local_support == 0] = 0
-    foreground[local_support == 0] = 0
+    support_pixels = int(np.count_nonzero(local_support))
+    foreground_pixels = int(np.count_nonzero(foreground))
+    if support_pixels > 0 and foreground_pixels / float(support_pixels) > 0.55:
+        # Tight OCR polygons can place cap-height strokes on most crop edges.
+        # In that case the border median describes the ink, not the card or
+        # balloon, and distance-from-border selects the background. Recover
+        # the less frequent intensity class inside the authoritative support.
+        supported_gray = gray[local_support > 0]
+        intensity_threshold, _ = cv2.threshold(
+            supported_gray,
+            0,
+            255,
+            cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+        )
+        dark_class = (gray <= float(intensity_threshold)) & (local_support > 0)
+        light_class = (gray > float(intensity_threshold)) & (local_support > 0)
+        minority = (
+            dark_class
+            if int(np.count_nonzero(dark_class))
+            <= int(np.count_nonzero(light_class))
+            else light_class
+        )
+        foreground = np.where(minority, 255, 0).astype(np.uint8)
     raster = np.zeros(page_rgb.shape[:2], dtype=np.uint8)
     raster[y1:y2, x1:x2] = foreground
     if not np.any(raster):
@@ -10362,19 +10384,35 @@ def _owner_layout_regions(
         else None
     )
     regions: list[dict[str, Any]] = []
+
+    def _scale_evidence_confidence(
+        observation: Any,
+        *,
+        assume_complete_coverage: bool = False,
+    ) -> float:
+        try:
+            observation_confidence = max(
+                0.0,
+                min(1.0, float(observation.confidence)),
+            )
+            raw_coverage = observation.coverage_score
+            coverage_confidence = (
+                1.0 if raw_coverage is None and assume_complete_coverage
+                else 0.0
+                if raw_coverage is None
+                else max(0.0, min(1.0, float(raw_coverage)))
+            )
+            return observation_confidence * coverage_confidence
+        except (TypeError, ValueError):
+            return 0.0
+
     for order, component_id in enumerate(owner.component_ids):
         component = components[component_id]
         scale_entries: list[tuple[int, int, int, str, float]] = []
         for observation in selected_observations:
             if component_id not in set(observation.component_ids):
                 continue
-            try:
-                evidence_confidence = max(0.0, min(1.0, float(observation.confidence))) * max(
-                    0.0,
-                    min(1.0, float(observation.coverage_score)),
-                )
-            except (TypeError, ValueError):
-                evidence_confidence = 0.0
+            evidence_confidence = _scale_evidence_confidence(observation)
             for polygon_index, source_polygon in enumerate(observation.polygons_page):
                 if not isinstance(source_polygon, (list, tuple)) or len(source_polygon) < 3:
                     continue
@@ -10525,6 +10563,87 @@ def _owner_layout_regions(
                 ),
             }
         )
+    shared_safe_boxes = {
+        tuple(int(value) for value in region.get("safe_bbox_page") or ())
+        for region in regions
+    }
+    if (
+        layout_container_bbox is not None
+        and len(regions) > 1
+        and len(shared_safe_boxes) == 1
+    ):
+        atomic = copy.deepcopy(regions[0])
+        owner_component_ids = set(owner.component_ids)
+        atomic_evidence: dict[
+            tuple[int, int, int, int], tuple[str, int, float]
+        ] = {}
+        for observation in selected_observations:
+            if set(observation.component_ids) != owner_component_ids:
+                continue
+            evidence_confidence = _scale_evidence_confidence(
+                observation,
+                assume_complete_coverage=True,
+            )
+            for polygon_index, source_polygon in enumerate(observation.polygons_page):
+                if not isinstance(source_polygon, (list, tuple)) or len(source_polygon) < 3:
+                    continue
+                try:
+                    points = tuple(
+                        (int(point[0]), int(point[1])) for point in source_polygon
+                    )
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if len(set(points)) < 3 or abs(
+                    float(cv2.contourArea(np.asarray(points, dtype=np.int32)))
+                ) <= 0.0:
+                    continue
+                x1 = max(int(layout_safe_bbox[0]), min(point[0] for point in points))
+                y1 = max(int(layout_safe_bbox[1]), min(point[1] for point in points))
+                x2 = min(int(layout_safe_bbox[2]), max(point[0] for point in points))
+                y2 = min(int(layout_safe_bbox[3]), max(point[1] for point in points))
+                height = y2 - y1
+                if x2 <= x1 or height <= 0:
+                    continue
+                geometry = (x1, y1, x2, y2)
+                candidate = (
+                    f"{observation.observation_id}:{polygon_index}",
+                    height,
+                    evidence_confidence,
+                )
+                current = atomic_evidence.get(geometry)
+                if current is None or (candidate[2], candidate[0]) > (
+                    current[2],
+                    current[0],
+                ):
+                    atomic_evidence[geometry] = candidate
+        ordered_evidence = [
+            atomic_evidence[key]
+            for key in sorted(atomic_evidence, key=lambda item: (item[1], item[0], item))
+        ]
+        evidence_ids = [item[0] for item in ordered_evidence]
+        source_heights = [item[1] for item in ordered_evidence]
+        source_x_heights = [round(float(height) * 0.70, 3) for height in source_heights]
+        confidences = [item[2] for item in ordered_evidence]
+        atomic.update(
+            {
+                "layout_region_id": f"{owner.owner_id}__shared_container",
+                "order": 0,
+                "component_ids": list(owner.component_ids),
+                "source_ink_heights_px": source_heights,
+                "source_x_heights_px": source_x_heights,
+                "source_ink_height_median_px": (
+                    float(median(source_heights)) if source_heights else None
+                ),
+                "source_x_height_median_px": (
+                    float(median(source_x_heights)) if source_x_heights else None
+                ),
+                "source_scale_evidence_confidence": (
+                    round(float(median(confidences)), 6) if confidences else 0.0
+                ),
+                "source_scale_evidence_ids": evidence_ids,
+            }
+        )
+        return [atomic]
     return regions
 
 
@@ -10584,6 +10703,37 @@ def _owner_non_rendering_record(
         }
     )
     return record
+
+
+def _owner_execution_review_seed(
+    record: dict[str, Any],
+    reason: str,
+    *,
+    mutation: OwnerMutation | Any | None = None,
+) -> dict[str, Any]:
+    """Preserve the exact atomic rollback cause on the non-rendering record."""
+
+    seed = copy.deepcopy(record)
+    seed["owner_execution_rejection_reason"] = str(reason or "owner execution rolled back")
+    seed["qa_flags"] = list(
+        dict.fromkeys([*(seed.get("qa_flags") or []), "owner_execution_rollback"])
+    )
+    if mutation is not None:
+        seed["residual_cleanup_contract"] = {
+            "residual_verified": bool(mutation.residual_verified),
+            "residual_score": float(mutation.residual_score),
+            "residual_threshold": float(mutation.residual_threshold),
+            "residual_method": str(mutation.residual_method),
+            "residual_flags": list(mutation.residual_flags),
+        }
+        seed["owner_mutation_diagnostics"] = {
+            "mask_pixels": int(mutation.mask_pixels),
+            "changed_pixels": int(mutation.changed_pixels),
+            "engine": str(mutation.engine),
+            "engine_crop_bbox_page": list(mutation.engine_crop_bbox_page),
+            "owner_bbox_page": list(mutation.owner_bbox_page),
+        }
+    return seed
 
 
 def _owner_protected_evidence(
@@ -10647,11 +10797,9 @@ def _owner_protected_evidence(
         foreground[
             (gray.astype(np.float32) <= local_median - 28.0) | (glyph > 0)
         ] = 255
-        foreground = cv2.morphologyEx(
-            foreground,
-            cv2.MORPH_CLOSE,
-            np.ones((3, 3), dtype=np.uint8),
-        )
+        component_geometry = np.zeros(shape, dtype=np.uint8)
+        component_geometry[y1:y2, x1:x2] = 255
+        foreground[component_geometry == 0] = 0
         count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
             foreground,
             connectivity=8,
@@ -10672,13 +10820,22 @@ def _owner_protected_evidence(
             left, top, width, height, _area = (int(value) for value in stats[label])
             right = left + width
             bottom = top + height
+            glyph_overlap_pixels = int(np.count_nonzero(component & (glyph > 0)))
+            outside_glyph_pixels = int(np.count_nonzero(component)) - glyph_overlap_pixels
             crosses_support = (
                 left < glyph_bbox[0] - margin
                 or top < glyph_bbox[1] - margin
                 or right > glyph_bbox[2] + margin
                 or bottom > glyph_bbox[3] + margin
             )
-            if crosses_support:
+            escapes_by_mass = bool(
+                glyph_overlap_pixels > 0
+                and outside_glyph_pixels
+                >= max(24, int(math.ceil(glyph_overlap_pixels * 0.50)))
+                and glyph_overlap_pixels / float(max(1, int(np.count_nonzero(component))))
+                < 0.55
+            )
+            if crosses_support or escapes_by_mass:
                 protected[component] = 255
                 provenance.add("connected_foreground_crosses_support")
                 confidence = 0.0
@@ -10686,6 +10843,156 @@ def _owner_protected_evidence(
     protected = np.ascontiguousarray(protected, dtype=np.uint8)
     protected.setflags(write=False)
     return protected, tuple(sorted(provenance)), confidence
+
+
+def _owner_positive_evidence_excluding_protected(
+    positive_mask: np.ndarray,
+    protected_mask: np.ndarray,
+) -> np.ndarray:
+    """Revoke ambiguous connected-art pixels without authorizing partial art."""
+
+    positive = _canonical_owner_mask(
+        positive_mask,
+        shape=tuple(protected_mask.shape[:2]),
+        label="owner positive evidence",
+    )
+    protected = _canonical_owner_mask(
+        protected_mask,
+        shape=tuple(positive.shape[:2]),
+        label="owner protected evidence",
+    )
+    safe = positive.copy()
+    safe[protected > 0] = 0
+    return np.ascontiguousarray(safe, dtype=np.uint8)
+
+
+def _owner_source_replacement_bbox(
+    selected_observations: list[TextObservation],
+    *,
+    component_bbox_page: tuple[int, int, int, int],
+    shape: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    """Bound rendering to the page-space footprint already occupied by source text."""
+
+    boxes: list[tuple[int, int, int, int]] = []
+    for observation in selected_observations:
+        if observation.polygons_page:
+            for polygon in observation.polygons_page:
+                xs = [int(point[0]) for point in polygon]
+                ys = [int(point[1]) for point in polygon]
+                if xs and ys:
+                    boxes.append((min(xs), min(ys), max(xs) + 1, max(ys) + 1))
+        else:
+            boxes.append(tuple(int(value) for value in observation.bbox_page))
+    if not boxes:
+        raise ValueError("owner source replacement footprint has no selected geometry")
+    height, width = shape
+    cx1, cy1, cx2, cy2 = component_bbox_page
+    bbox = (
+        max(0, cx1, min(box[0] for box in boxes) - 2),
+        max(0, cy1, min(box[1] for box in boxes) - 2),
+        min(width, cx2, max(box[2] for box in boxes) + 2),
+        min(height, cy2, max(box[3] for box in boxes) + 2),
+    )
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        raise ValueError("owner source replacement footprint is empty")
+    return bbox
+
+
+def _owner_protection_outside_source_replacement(
+    protected_mask: np.ndarray,
+    *,
+    source_replacement_bbox: tuple[int, int, int, int],
+    foreign_component_masks: tuple[tuple[str, np.ndarray], ...] | tuple = (),
+) -> np.ndarray:
+    """Release prior text footprint while retaining every foreign-owner pixel."""
+
+    return _owner_protection_outside_authorized_regions(
+        protected_mask,
+        authorized_bboxes=(source_replacement_bbox,),
+        foreign_component_masks=foreign_component_masks,
+    )
+
+
+def _owner_protection_outside_authorized_regions(
+    protected_mask: np.ndarray,
+    *,
+    authorized_bboxes: tuple[tuple[int, int, int, int], ...],
+    foreign_component_masks: tuple[tuple[str, np.ndarray], ...] | tuple = (),
+) -> np.ndarray:
+    """Release verified text-safe regions, then restore every foreign owner."""
+
+    protected = _canonical_owner_mask(
+        protected_mask,
+        shape=tuple(protected_mask.shape[:2]),
+        label="owner protected evidence",
+    ).copy()
+    if not authorized_bboxes:
+        raise ValueError("owner has no authorized text-safe regions")
+    for raw_bbox in authorized_bboxes:
+        x1, y1, x2, y2 = _canonical_owner_bbox(
+            raw_bbox,
+            shape=tuple(protected.shape[:2]),
+            label="owner authorized text-safe region",
+        )
+        protected[y1:y2, x1:x2] = 0
+    for evidence_id, raw_mask in foreign_component_masks:
+        _canonical_owner_identity(evidence_id, label="foreign component evidence id")
+        foreign = _canonical_owner_mask(
+            raw_mask,
+            shape=tuple(protected.shape[:2]),
+            label="foreign component evidence mask",
+        )
+        protected = np.maximum(protected, foreign)
+    return np.ascontiguousarray(protected, dtype=np.uint8)
+
+
+def _owner_foreign_component_masks(
+    source_rgb: np.ndarray,
+    graph: OwnerGraph,
+    *,
+    owner_component_ids: set[str],
+) -> tuple[tuple[str, np.ndarray], ...]:
+    """Rasterize only foreign components backed by actual OCR line geometry."""
+
+    source = _canonical_owner_rgb(source_rgb, label="foreign mask source")
+    dispositions = {
+        disposition.component_id: disposition
+        for disposition in graph.component_dispositions
+    }
+    masks: list[tuple[str, np.ndarray]] = []
+    for foreign_component in graph.components:
+        if foreign_component.component_id in owner_component_ids:
+            continue
+        disposition = dispositions.get(foreign_component.component_id)
+        if (
+            disposition is not None
+            and disposition.decision == "suppress"
+            and disposition.reason == "redundant_container_without_ocr_evidence"
+        ):
+            continue
+        foreign_observations = [
+            observation
+            for observation in graph.observations
+            if foreign_component.component_id in observation.component_ids
+        ]
+        support_polygons = tuple(
+            polygon
+            for observation in foreign_observations
+            for polygon in observation.polygons_page
+        )
+        if not support_polygons:
+            continue
+        try:
+            foreign_mask = _owner_component_glyph_raster(
+                source,
+                component=foreign_component,
+                support_polygons=support_polygons,
+            )
+        except ValueError:
+            continue
+        masks.append((foreign_component.component_id, foreign_mask))
+    return tuple(masks)
 
 
 def _capture_owner_glyph_masks_before_inpaint(
@@ -11008,46 +11315,24 @@ def execute_owner_page_graph(
                 f"renderable owner {owner.owner_id} is missing pre-inpaint visual profile"
             )
         record = attach_owner_visual_profile(record, owner_visual_profile)
-        foreign_component_masks: list[tuple[str, np.ndarray]] = []
-        for foreign_component in executed_graph.components:
-            if foreign_component.component_id in set(owner.component_ids):
-                continue
-            foreign_observations = [
-                observation
-                for observation in executed_graph.observations
-                if foreign_component.component_id in observation.component_ids
-            ]
-            support_polygons = tuple(
-                polygon
-                for observation in foreign_observations
-                for polygon in observation.polygons_page
-            )
-            if not support_polygons:
-                support_polygons = (foreign_component.polygon_page,)
-            try:
-                foreign_mask = _owner_component_glyph_raster(
-                    source,
-                    component=foreign_component,
-                    support_polygons=support_polygons,
-                )
-            except ValueError:
-                continue
-            foreign_component_masks.append(
-                (foreign_component.component_id, foreign_mask)
-            )
+        foreign_component_masks = _owner_foreign_component_masks(
+            source,
+            executed_graph,
+            owner_component_ids=set(owner.component_ids),
+        )
         owner_component_bbox = (
             min(value[0] for value in component_bboxes.values()),
             min(value[1] for value in component_bboxes.values()),
             max(value[2] for value in component_bboxes.values()),
             max(value[3] for value in component_bboxes.values()),
         )
-        protected_mask, protected_provenance, protection_confidence = (
+        raw_protected_mask, protected_provenance, protection_confidence = (
             _owner_protected_evidence(
                 source,
                 owner_component_ids=set(owner.component_ids),
                 source_glyph_mask=source_glyph_mask,
                 component_bbox_page=owner_component_bbox,
-                foreign_component_masks=tuple(foreign_component_masks),
+                foreign_component_masks=foreign_component_masks,
                 explicit_protected_masks=(),
             )
         )
@@ -11055,11 +11340,15 @@ def execute_owner_page_graph(
             single,
             owner.owner_id,
         )
-        protected_mask = release_source_replacement_from_protection(
-            protected_mask,
-            source_replacement_bbox,
-            source_replacement_mask=source_glyph_mask,
-            foreign_component_masks=foreign_component_masks,
+        protected_mask = (
+            release_source_replacement_from_protection(
+                raw_protected_mask,
+                source_replacement_bbox,
+                source_replacement_mask=source_glyph_mask,
+                foreign_component_masks=foreign_component_masks,
+            )
+            if np.any(source_glyph_mask)
+            else raw_protected_mask
         )
         container_evidence = [
             {
@@ -11285,11 +11574,7 @@ def execute_owner_page_graph(
                 "texts": [record],
             },
             owner_graph=single,
-            layout_regions=_owner_layout_regions(
-                single,
-                page_width=int(source.shape[1]),
-                page_height=int(source.shape[0]),
-            ),
+            layout_regions=owner_layout_regions,
         )
         layout_page["texts"][0]["owner_style_capture"] = copy.deepcopy(
             record["owner_style_capture"]
@@ -11418,11 +11703,22 @@ def execute_owner_page_graph(
             final_records.append(rendered_record)
         else:
             _transition_owner_to_review(executed_graph, owner.owner_id)
+            review_seed = _owner_execution_review_seed(
+                record,
+                commit.reason,
+                mutation=mutation,
+            )
+            logger.warning(
+                "owner execution rolled back: page_id=%s owner_id=%s reason=%s",
+                owner.page_id,
+                owner.owner_id,
+                commit.reason,
+            )
             final_records.append(
                 _owner_non_rendering_record(
                     executed_graph,
                     owner,
-                    seed=record,
+                    seed=review_seed,
                 )
             )
 

@@ -313,7 +313,7 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
                 OwnerTextExecutionAuthority,
                 build_owner_text_delivery_contract,
             )
-            from style_v2_fixtures import valid_owner_style_raster_contract
+            from style_v2_fixtures import valid_owner_style_raster_contract_v2
             from typesetter.owner_render_quality import OwnerRenderQuality
 
             owner = owner_graph.owners[0]
@@ -331,7 +331,7 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
             authority = OwnerTextExecutionAuthority.from_dict(
                 profile_record["owner_text_execution_authority"]
             )
-            style_contract = valid_owner_style_raster_contract(
+            style_contract = valid_owner_style_raster_contract_v2(
                 owner_id=owner.owner_id,
                 page_id=owner.page_id,
                 before=image,
@@ -353,6 +353,12 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
                 style_decision=visual_profile[
                     "style_application_decision_v2"
                 ],
+                resolved_style_intent=profile_record[
+                    "style_resolved_intent_v1"
+                ],
+                )
+            profile_record["_sealed_materialization_plan_v1"] = (
+                style_contract.to_dict()["materialization_plan"]
             )
             run = GlyphRunObservation.build(
                 text=authority.translated_payload,
@@ -447,8 +453,8 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
     assert execution.records[0]["style_v2_raster_contract"] == (
         execution.commits[0].glyph_patch.style_raster_contract.to_dict()
     )
-    assert execution.records[0]["safe_text_box"] == [4, 3, 48, 32]
-    assert execution.records[0]["target_bbox"] == [4, 3, 48, 32]
+    assert execution.records[0]["safe_text_box"] == [11, 8, 40, 26]
+    assert execution.records[0]["target_bbox"] == [11, 8, 40, 26]
     assert execution.records[0]["owner_mask_coverage"] == {
         "selected_observation_ids": ["observation_a"],
         "expected_line_ids": [["observation_a", 0]],
@@ -467,7 +473,7 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
 
     normalized = _drop_stale_final_render_geometry(dict(execution.records[0]))
     assert normalized["render_bbox"] == [16, 12, 25, 15]
-    assert normalized["safe_text_box"] == [4, 3, 48, 32]
+    assert normalized["safe_text_box"] == [11, 8, 40, 26]
     assert normalized["_final_band_render_contract_preserved"] is True
 
 
@@ -524,6 +530,61 @@ def test_owner_source_glyph_raster_includes_bounded_cleanup_halo():
     assert not raster[10, 14]
     assert not np.any(raster[:, :14])
     assert not np.any(raster[:, 22:])
+
+
+def test_tight_white_text_polygon_uses_minority_ink_not_colored_background():
+    from inpainter.owner_mask import _positive_mask_is_overbroad
+    from strip.process_bands import _owner_glyph_raster
+
+    page = np.full((50, 180, 3), (42, 128, 190), dtype=np.uint8)
+    page[12:14, 25:121] = 248
+    page[34:37, 25:121] = 248
+    for x in range(25, 121, 16):
+        page[12:36, x : x + 4] = 248
+    support = ((20, 12), (126, 12), (126, 36), (20, 36))
+
+    raster = _owner_glyph_raster(page, support_polygons=[support])
+
+    assert not _positive_mask_is_overbroad(
+        raster,
+        allow_dense_single_glyph=True,
+    )
+    assert raster[20, 22] == 0
+    assert raster[20, 26] == 255
+    assert np.count_nonzero(raster[12:36, 20:126]) < (106 * 24 * 0.55)
+
+
+def test_foreign_mask_collection_ignores_suppressed_container_without_ocr():
+    from types import SimpleNamespace
+
+    from strip.process_bands import _owner_foreign_component_masks
+
+    source = np.full((80, 120, 3), 255, dtype=np.uint8)
+    source[20:60, 20:100] = 0
+    suppressed = SimpleNamespace(
+        component_id="container",
+        bbox_page=(20, 20, 100, 60),
+        polygon_page=((20, 20), (100, 20), (100, 60), (20, 60)),
+    )
+    graph = SimpleNamespace(
+        components=(suppressed,),
+        observations=(),
+        component_dispositions=(
+            SimpleNamespace(
+                component_id="container",
+                decision="suppress",
+                reason="redundant_container_without_ocr_evidence",
+            ),
+        ),
+    )
+
+    masks = _owner_foreign_component_masks(
+        source,
+        graph,
+        owner_component_ids={"owned"},
+    )
+
+    assert masks == ()
 
 
 def test_atomic_rejection_revokes_all_owner_write_authority():
@@ -583,10 +644,59 @@ def test_owner_layout_uses_selected_observation_container_not_source_glyph_bbox(
 
     assert regions[0]["bbox_page"] == [2, 3, 36, 24]
     assert regions[0]["safe_polygon_page"] == [
-        [2, 3],
-        [35, 3],
-        [35, 23],
-        [2, 23],
+        [8, 7],
+        [29, 7],
+        [29, 19],
+        [8, 19],
+    ]
+
+
+def test_dialogue_owner_insets_rectangular_container_to_ellipse_safe_chord():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _graph()
+    graph.owners[0] = replace(graph.owners[0], semantic_role="dialogue_body")
+    graph.observations[0] = replace(
+        graph.observations[0],
+        layout_bbox_page=(0, 0, 200, 100),
+    )
+
+    region = _owner_layout_regions(graph, page_width=240, page_height=150)[0]
+
+    assert region["bbox_page"] == [0, 0, 200, 100]
+    assert region["safe_polygon_page"] == [
+        [30, 15],
+        [169, 15],
+        [169, 84],
+        [30, 84],
+    ]
+
+
+def test_source_replacement_does_not_shrink_a_verified_layout_container() -> None:
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _graph()
+    graph.owners[0] = replace(graph.owners[0], semantic_role="dialogue_body")
+    graph.observations[0] = replace(
+        graph.observations[0],
+        layout_bbox_page=(0, 0, 40, 30),
+    )
+
+    region = _owner_layout_regions(
+        graph,
+        page_width=40,
+        page_height=30,
+        source_replacement_bbox=(7, 9, 33, 22),
+    )[0]
+
+    assert region["bbox_page"] == [0, 0, 40, 30]
+    assert region["safe_polygon_page"] == [
+        [6, 5],
+        [33, 5],
+        [33, 24],
+        [6, 24],
     ]
 
 
@@ -629,6 +739,7 @@ def test_owner_layout_ignores_overbroad_container_height_as_source_scale():
     assert region["bbox_page"] == [1, 1, 39, 29]
     assert region["source_ink_height_median_px"] == 8.0
     assert region["source_ink_height_median_px"] != 28.0
+    assert region["source_scale_evidence_confidence"] == 0.0
 
 
 def test_connected_owner_uses_complete_selected_ocr_bbox_as_explicit_container():
@@ -677,6 +788,45 @@ def test_connected_owner_uses_complete_selected_ocr_bbox_as_explicit_container()
     ]
 
 
+def test_connected_owner_with_one_verified_container_renders_as_one_atomic_region():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _graph()
+    first = graph.components[0]
+    second = replace(
+        first,
+        component_id="component_b",
+        bbox_page=(8, 14, 28, 19),
+        polygon_page=((8, 14), (28, 14), (28, 19), (8, 19)),
+    )
+    graph.components.append(second)
+    graph.owners[0] = replace(
+        graph.owners[0],
+        component_ids=(first.component_id, second.component_id),
+    )
+    graph.observations[0] = replace(
+        graph.observations[0],
+        component_ids=(first.component_id, second.component_id),
+        bbox_page=(4, 3, 32, 22),
+        polygons_page=(
+            ((6, 6), (29, 6), (29, 12), (6, 12)),
+            ((9, 14), (27, 14), (27, 20), (9, 20)),
+        ),
+        layout_bbox_page=(2, 1, 38, 28),
+    )
+
+    regions = _owner_layout_regions(graph, page_width=40, page_height=30)
+
+    assert len(regions) == 1
+    assert regions[0]["layout_region_id"].endswith("__shared_container")
+    assert regions[0]["component_ids"] == [first.component_id, second.component_id]
+    assert regions[0]["bbox_page"] == [2, 1, 38, 28]
+    assert regions[0]["source_ink_heights_px"] == [6, 6]
+    assert regions[0]["source_ink_height_median_px"] == 6.0
+    assert regions[0]["source_scale_evidence_confidence"] == 0.9
+
+
 def test_review_owner_is_materialized_as_non_rendering_project_record():
     from test_final_pixel_qa import _graph
     from strip.process_bands import (
@@ -695,6 +845,48 @@ def test_review_owner_is_materialized_as_non_rendering_project_record():
     assert record["visible"] is False
     assert record["action_mask_ref"] is None
     assert record["layout_region_ids"] == []
+
+
+def test_atomic_rollback_reason_is_preserved_in_review_seed():
+    from types import SimpleNamespace
+
+    from strip.process_bands import _owner_execution_review_seed
+
+    seed = _owner_execution_review_seed(
+        {"qa_flags": ["existing_flag"]},
+        "render_contract_invalid:render was not completed",
+        mutation=SimpleNamespace(
+            residual_verified=True,
+            residual_score=0.037,
+            residual_threshold=0.01,
+            residual_method="detect_residual_text.v1",
+            residual_flags=("dark_residual_pixels",),
+            mask_pixels=1200,
+            changed_pixels=1190,
+            engine="aot+context_guard_median",
+            engine_crop_bbox_page=(10, 20, 90, 70),
+            owner_bbox_page=(8, 18, 92, 72),
+        ),
+    )
+
+    assert seed["owner_execution_rejection_reason"] == (
+        "render_contract_invalid:render was not completed"
+    )
+    assert seed["qa_flags"] == ["existing_flag", "owner_execution_rollback"]
+    assert seed["residual_cleanup_contract"] == {
+        "residual_verified": True,
+        "residual_score": 0.037,
+        "residual_threshold": 0.01,
+        "residual_method": "detect_residual_text.v1",
+        "residual_flags": ["dark_residual_pixels"],
+    }
+    assert seed["owner_mutation_diagnostics"] == {
+        "mask_pixels": 1200,
+        "changed_pixels": 1190,
+        "engine": "aot+context_guard_median",
+        "engine_crop_bbox_page": [10, 20, 90, 70],
+        "owner_bbox_page": [8, 18, 92, 72],
+    }
 
 
 def test_unsafe_owner_mask_fails_closed_as_review_without_crashing_page(monkeypatch):
