@@ -8494,20 +8494,25 @@ def _write_debug_export_gate_artifacts(recorder, project_data: dict) -> dict:
         qa = {}
     summary = qa.get("summary") if isinstance(qa.get("summary"), dict) else {}
     export_gate = qa.get("export_gate") if isinstance(qa.get("export_gate"), dict) else {}
-    owner_first_rows = [
+    gate_rows = [
         issue
         for issue in export_gate.get("issues") or []
         if isinstance(issue, dict)
-        and (issue.get("owner_id") is not None or issue.get("source") == "final_pixel_qa")
     ]
-    if owner_first_rows:
+    owner_first_rows = [
+        issue
+        for issue in gate_rows
+        if issue.get("owner_id") is not None or issue.get("source") == "final_pixel_qa"
+    ]
+    if gate_rows:
         from ownership.artifacts import validate_gate_integrity
         from qa.export_gate import append_qa_integrity_failure
 
         integrity_failures = validate_gate_integrity(
             summary=summary,
             gate=export_gate,
-            rows=owner_first_rows,
+            rows=gate_rows,
+            row_contract_rows=owner_first_rows,
         )
         if integrity_failures:
             append_qa_integrity_failure(export_gate, integrity_failures)

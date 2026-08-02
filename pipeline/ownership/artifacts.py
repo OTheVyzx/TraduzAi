@@ -109,6 +109,7 @@ def validate_gate_integrity(
     summary: Mapping[str, Any],
     gate: Mapping[str, Any],
     rows: Iterable[Mapping[str, Any]],
+    row_contract_rows: Iterable[Mapping[str, Any]] | None = None,
 ) -> list[str]:
     rows = list(rows)
     failures: list[str] = []
@@ -118,11 +119,19 @@ def validate_gate_integrity(
         for row in rows
     )
     for source_name, source in (("summary", summary), ("gate", gate)):
-        if int(source.get("critical_issue_count", 0) or 0) != critical_count:
+        if (
+            "critical_issue_count" in source
+            and int(source.get("critical_issue_count", 0) or 0) != critical_count
+        ):
             failures.append("critical_issue_count_mismatch")
-        if int(source.get("blocking_issue_count", 0) or 0) != blocking_count:
+        if (
+            "blocking_issue_count" in source
+            and int(source.get("blocking_issue_count", 0) or 0) != blocking_count
+        ):
             failures.append("blocking_issue_count_mismatch")
-    failures.extend(validate_qa_rows(rows))
+    failures.extend(
+        validate_qa_rows(rows if row_contract_rows is None else row_contract_rows)
+    )
     return list(dict.fromkeys(failures))
 
 
@@ -301,15 +310,40 @@ class OwnerArtifactPublisher:
             page_id = str(_field(execution, "page_id") or "")
             owner_id = str(_field(execution, "owner_id") or "")
             action_mask = _field(execution, "action_mask")
+            mutation = _field(execution, "mutation")
             if action_mask is None:
-                mutation = _field(execution, "mutation")
                 action_mask = _field(mutation, "action_mask")
             if page_id and owner_id and action_mask is not None:
+                artifact_root = (
+                    "06_mask_segmentation/owner_masks/"
+                    f"{_safe_owner_segment(owner_id)}"
+                )
                 self.recorder.write_image(
-                    f"06_mask_segmentation/owner_masks/{_safe_owner_segment(owner_id)}/action_mask.png",
+                    f"{artifact_root}/action_mask.png",
                     action_mask,
                     color_space="GRAY",
                 )
+                changed_mask = _field(mutation, "changed_mask")
+                if changed_mask is not None:
+                    self.recorder.write_image(
+                        f"{artifact_root}/changed_mask.png",
+                        changed_mask,
+                        color_space="GRAY",
+                    )
+                protected_art_mask = _field(mutation, "protected_art_mask")
+                if protected_art_mask is not None:
+                    self.recorder.write_image(
+                        f"{artifact_root}/protected_art_mask.png",
+                        protected_art_mask,
+                        color_space="GRAY",
+                    )
+                candidate = _field(mutation, "result_rgb")
+                if candidate is not None:
+                    self.recorder.write_image(
+                        f"{artifact_root}/candidate_after_inpaint.png",
+                        candidate,
+                        color_space="RGB",
+                    )
                 execution_count += 1
             glyph_patch = _field(execution, "glyph_patch")
             quality = _field(glyph_patch, "render_quality_contract")

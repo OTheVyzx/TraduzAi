@@ -131,6 +131,39 @@ def test_every_artifact_row_has_schema_run_page_owner_and_coordinate_space(tmp_p
     assert (root / "11_qa_export_gate/owner_invariant_report.json").is_file()
 
 
+def test_rolled_back_execution_publishes_inpaint_evidence_for_diagnosis(tmp_path):
+    from debug_tools import DebugRecorder
+    from ownership.artifacts import OwnerArtifactPublisher
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-rollback")
+    mask = np.zeros((12, 16), dtype=np.uint8)
+    mask[3:9, 4:12] = 255
+    before = np.full((12, 16, 3), 240, dtype=np.uint8)
+    candidate = before.copy()
+    candidate[mask > 0] = 200
+    OwnerArtifactPublisher(recorder).publish(
+        executions=[
+            {
+                "page_id": "page_002",
+                "owner_id": "owner_rollback",
+                "committed": False,
+                "mutation": {
+                    "action_mask": mask,
+                    "changed_mask": mask,
+                    "protected_art_mask": np.zeros_like(mask),
+                    "result_rgb": candidate,
+                },
+            }
+        ]
+    )
+
+    root = tmp_path / "debug" / "e2e" / "06_mask_segmentation" / "owner_masks" / "owner_rollback"
+    assert (root / "action_mask.png").is_file()
+    assert (root / "changed_mask.png").is_file()
+    assert (root / "protected_art_mask.png").is_file()
+    assert (root / "candidate_after_inpaint.png").is_file()
+
+
 def test_source_evidence_ledger_is_derived_and_hash_linked(tmp_path):
     rows = _jsonl(
         _publish(tmp_path)
@@ -189,6 +222,33 @@ def test_summary_row_and_gate_counts_match_exactly():
     assert "critical_issue_count_mismatch" in validate_gate_integrity(
         summary={**summary, "critical_issue_count": 0}, gate=gate, rows=rows
     )
+
+
+def test_gate_integrity_counts_all_issues_but_scopes_owner_row_shape_contract():
+    from ownership.artifacts import validate_gate_integrity
+
+    owner_row = {
+        "trace_id": "page_001:owner_a:issue_a",
+        "offenders": ["SOURCE BODY"],
+        "severity": "critical",
+        "blocks_export": True,
+    }
+    legacy_row = {
+        "trace_id": "",
+        "offenders": [],
+        "severity": "critical",
+        "blocks_export": True,
+    }
+    rows = [owner_row, legacy_row]
+    summary = {"critical_issue_count": 2, "blocking_issue_count": 2}
+    gate = {**summary, "issues": rows}
+
+    assert validate_gate_integrity(
+        summary=summary,
+        gate=gate,
+        rows=rows,
+        row_contract_rows=[owner_row],
+    ) == []
 
 
 def test_debug_artifacts_are_not_read_by_production_composer():
