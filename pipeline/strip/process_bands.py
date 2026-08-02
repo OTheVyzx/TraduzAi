@@ -10261,9 +10261,26 @@ def _owner_layout_regions(
             else None
         )
         layout_container_polygon = None
+    if layout_container_bbox is not None and layout_container_polygon is not None:
+        layout_container_polygon = tuple(
+            (
+                int(point[0]) - 1
+                if int(point[0]) == int(layout_container_bbox[2])
+                else int(point[0]),
+                int(point[1]) - 1
+                if int(point[1]) == int(layout_container_bbox[3])
+                else int(point[1]),
+            )
+            for point in layout_container_polygon
+        )
     semantic_role = str(owner.semantic_role or "").strip().casefold()
     visual_card_owner = any(
         str(observation.provider or "").casefold().startswith("visual_card")
+        for observation in selected_observations
+    ) and any(
+        str(observation.provider or "").casefold().startswith(
+            "candidate_crop_direct_paddle"
+        )
         for observation in selected_observations
     )
     verified_visual_container = bool(layout_container_candidates) or bool(

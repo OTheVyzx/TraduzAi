@@ -1064,6 +1064,14 @@ def test_visual_card_evidence_uses_full_capacity_without_changing_owner_role() -
         graph.observations[0],
         provider="visual_card_full_page_raw",
     )
+    candidate_observation = replace(
+        graph.observations[0],
+        observation_id="obs_owner_card_candidate",
+        provider="candidate_crop_direct_paddle_native",
+    )
+    graph.observations.append(candidate_observation)
+    graph.owners[0].observation_ids.append(candidate_observation.observation_id)
+    graph.owners[0].selected_observation_ids.append(candidate_observation.observation_id)
     geometry = build_owner_render_geometry(
         graph,
         "owner_card",
@@ -1087,10 +1095,45 @@ def test_visual_card_evidence_uses_full_capacity_without_changing_owner_role() -
     assert region["bbox_page"] == [10, 10, 299, 102]
     assert region["safe_bbox_page"] == [10, 10, 299, 102]
     assert region["safe_polygon_page"] == [
-        [10, 10], [299, 10], [299, 102], [10, 102]
+        [10, 10], [298, 10], [298, 101], [10, 101]
     ]
+    assert region["paint_safe_polygon_page"] == region["safe_polygon_page"]
     assert graph.owners[0].owner_id == original_owner_id
     assert graph.owners[0].semantic_role == "dialogue_body"
+
+
+def test_visual_card_provider_alone_does_not_expand_dialogue_chord() -> None:
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _owner_graph([("owner_dialogue", "Wow.", "Uau.")])
+    graph.observations[0] = replace(
+        graph.observations[0],
+        provider="visual_card_full_page_raw",
+    )
+    geometry = build_owner_render_geometry(
+        graph,
+        "owner_dialogue",
+        page_width=PAGE_WIDTH,
+        page_height=PAGE_HEIGHT,
+        container_evidence={
+            "evidence_id": "owner_dialogue:full_page_visual_container:test",
+            "source": "full_page_visual_container",
+            "bbox_page": (10, 10, 200, 120),
+            "confidence": 0.8,
+        },
+    )
+
+    region = _owner_layout_regions(
+        graph,
+        page_width=PAGE_WIDTH,
+        page_height=PAGE_HEIGHT,
+        owner_render_geometry=geometry,
+    )[0]
+
+    assert region["safe_bbox_page"] == [39, 27, 171, 103]
+    assert region["safe_polygon_page"] == [
+        [39, 27], [170, 27], [170, 102], [39, 102]
+    ]
 
 
 def test_system_card_title_renders_in_verified_full_capacity() -> None:
