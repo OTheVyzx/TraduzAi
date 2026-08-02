@@ -44,6 +44,18 @@ def _check_sha256(value: str, label: str) -> str:
     return canonical
 
 
+def _ndarray_sha256(value: np.ndarray) -> str:
+    array = np.ascontiguousarray(value)
+    digest = sha256()
+    digest.update(b"traduzai.ndarray.v1\0")
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(",".join(str(dimension) for dimension in array.shape).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
 def _bbox(value: Sequence[Any], *, width: int, height: int, label: str) -> BBox:
     if isinstance(value, (str, bytes)) or len(value) != 4:
         raise ValueError(f"{label} must contain four coordinates")
@@ -425,6 +437,109 @@ def _container_candidates(value: Any, *, width: int, height: int) -> tuple[dict[
     return tuple(candidates)
 
 
+def _partition_container_from_foreign_components(
+    graph: OwnerGraph,
+    *,
+    owner_component_ids: set[str],
+    semantic_bbox: BBox,
+    container_bbox: BBox,
+) -> tuple[BBox, tuple[str, ...], bool]:
+    """Clip a verified container at adjacent foreign OCR geometry boundaries."""
+
+    suppressed = {
+        disposition.component_id
+        for disposition in graph.component_dispositions
+        if disposition.decision == "suppress"
+        and disposition.reason == "redundant_container_without_ocr_evidence"
+    }
+    observed = {
+        component_id
+        for observation in graph.observations
+        if observation.polygons_page
+        for component_id in observation.component_ids
+    }
+    foreign = [
+        component
+        for component in sorted(graph.components, key=lambda item: item.component_id)
+        if component.component_id not in owner_component_ids
+        and component.component_id not in suppressed
+        and component.component_id in observed
+        and not (
+            component.bbox_page[2] <= container_bbox[0]
+            or component.bbox_page[0] >= container_bbox[2]
+            or component.bbox_page[3] <= container_bbox[1]
+            or component.bbox_page[1] >= container_bbox[3]
+        )
+    ]
+    left, top, right, bottom = container_bbox
+    sx1, sy1, sx2, sy2 = semantic_bbox
+    exclusions: list[str] = []
+    conflict = False
+    for component in foreign:
+        fx1, fy1, fx2, fy2 = component.bbox_page
+        horizontal_overlap = min(fx2, sx2) > max(fx1, sx1)
+        vertical_overlap = min(fy2, sy2) > max(fy1, sy1)
+        if horizontal_overlap and vertical_overlap:
+            conflict = True
+            exclusions.append(f"foreign_component:{component.component_id}")
+            continue
+        clipped = False
+        if horizontal_overlap and fy2 <= sy1:
+            top = max(top, fy2)
+            clipped = True
+        elif horizontal_overlap and fy1 >= sy2:
+            bottom = min(bottom, fy1)
+            clipped = True
+        elif vertical_overlap and fx2 <= sx1:
+            left = max(left, fx2)
+            clipped = True
+        elif vertical_overlap and fx1 >= sx2:
+            right = min(right, fx1)
+            clipped = True
+        if clipped:
+            exclusions.append(f"foreign_component:{component.component_id}")
+    result = (left, top, right, bottom)
+    if not _contains(result, semantic_bbox):
+        conflict = True
+    return result, tuple(sorted(set(exclusions))), conflict
+
+
+def _maximal_protected_safe_bbox(
+    protected_art_mask: np.ndarray,
+    *,
+    source_bbox: BBox,
+    container_bbox: BBox,
+) -> BBox | None:
+    """Grow a source-backed safe rectangle without crossing protected pixels."""
+
+    protected = np.asarray(protected_art_mask) > 0
+    left, top, right, bottom = source_bbox
+    cx1, cy1, cx2, cy2 = container_bbox
+    if np.any(protected[top:bottom, left:right]):
+        return None
+    while True:
+        candidates: list[tuple[int, int, BBox]] = []
+        if left > cx1 and not np.any(protected[top:bottom, left - 1 : left]):
+            candidate = (left - 1, top, right, bottom)
+            candidates.append(((right - left + 1) * (bottom - top), 0, candidate))
+        if right < cx2 and not np.any(protected[top:bottom, right : right + 1]):
+            candidate = (left, top, right + 1, bottom)
+            candidates.append(((right - left + 1) * (bottom - top), 1, candidate))
+        if top > cy1 and not np.any(protected[top - 1 : top, left:right]):
+            candidate = (left, top - 1, right, bottom)
+            candidates.append(((right - left) * (bottom - top + 1), 2, candidate))
+        if bottom < cy2 and not np.any(protected[bottom : bottom + 1, left:right]):
+            candidate = (left, top, right, bottom + 1)
+            candidates.append(((right - left) * (bottom - top + 1), 3, candidate))
+        if not candidates:
+            break
+        _area, _order, (left, top, right, bottom) = max(
+            candidates,
+            key=lambda item: (item[0], -item[1]),
+        )
+    return (left, top, right, bottom)
+
+
 def build_owner_render_geometry(
     graph: OwnerGraph,
     owner_id: str,
@@ -432,6 +547,7 @@ def build_owner_render_geometry(
     page_width: int,
     page_height: int,
     container_evidence: Any = None,
+    protected_art_mask: np.ndarray | None = None,
     protected_art_mask_sha256: str | None = None,
 ) -> OwnerRenderGeometry:
     """Build the sole geometry authority used after owner reconciliation."""
@@ -462,6 +578,28 @@ def build_owner_render_geometry(
     if tuple(item.observation_id for item in observations) != tuple(sorted(selected_ids)):
         raise ValueError("owner render geometry is missing selected observation geometry")
     source_bbox = _union_bbox(tuple(item.bbox_page for item in observations))
+    protected_hash = (
+        _check_sha256(protected_art_mask_sha256, "protected art mask hash")
+        if protected_art_mask_sha256
+        else _json_sha256(
+            {
+                "kind": "unbound_protected_art_mask",
+                "owner_id": owner_id,
+                "page_id": graph.page_id,
+            }
+        )
+    )
+    if protected_art_mask is not None:
+        protected = np.asarray(protected_art_mask)
+        if (
+            protected.shape != (height, width)
+            or protected.dtype != np.uint8
+            or protected.ndim != 2
+            or not np.all((protected == 0) | (protected == 255))
+        ):
+            raise ValueError("protected art mask must be canonical logical-page uint8")
+        if _ndarray_sha256(protected) != protected_hash:
+            raise ValueError("protected art mask content hash mismatch")
 
     projections = []
     for projection in sorted(graph.projections, key=lambda item: (item.tile_id, item.role, item.offset_xy)):
@@ -487,6 +625,42 @@ def build_owner_render_geometry(
         status, reason = "ready", "independent_container_verified"
         evidence_ids = tuple(sorted(candidate["evidence_id"] for candidate in candidates))
         evidence_confidence = max(candidate["confidence"] for candidate in candidates)
+        exclusive_bbox, exclusion_ids, exclusion_conflict = (
+            _partition_container_from_foreign_components(
+                graph,
+                owner_component_ids=component_set,
+                semantic_bbox=semantic_bbox,
+                container_bbox=layout_bbox,
+            )
+        )
+        if exclusion_conflict:
+            layout_bbox = layout_polygon = None
+            layout_source = "none"
+            status = "review_required"
+            reason = "foreign_owner_geometry_overlaps_semantic_body"
+        elif exclusive_bbox != layout_bbox:
+            layout_bbox = exclusive_bbox
+            layout_polygon = _rect_polygon(layout_bbox)
+            layout_source = f"{layout_source}:owner_exclusive"
+            evidence_ids = tuple(sorted({*evidence_ids, *exclusion_ids}))
+        if status == "ready" and protected_art_mask is not None:
+            safe_bbox = _maximal_protected_safe_bbox(
+                protected_art_mask,
+                source_bbox=source_bbox,
+                container_bbox=layout_bbox,
+            )
+            if safe_bbox is None:
+                layout_bbox = layout_polygon = None
+                layout_source = "none"
+                status = "review_required"
+                reason = "source_replacement_overlaps_protected_art"
+            elif safe_bbox != layout_bbox:
+                layout_bbox = safe_bbox
+                layout_polygon = _rect_polygon(layout_bbox)
+                layout_source = f"{layout_source}:protected_mask_safe"
+                evidence_ids = tuple(
+                    sorted({*evidence_ids, f"protected_art_mask:{protected_hash}"})
+                )
     elif freeform:
         layout_bbox, layout_polygon, layout_source = semantic_bbox, _rect_polygon(semantic_bbox), "freeform_component_union"
         status, reason, evidence_ids, evidence_confidence = "ready", "typed_freeform_component_union", (), 1.0
@@ -515,7 +689,6 @@ def build_owner_render_geometry(
         subregions.append(replace(item, subregion_sha256=_json_sha256(item.payload())))
 
     component_hash = _json_sha256([item.to_dict() for item in components])
-    protected_hash = _check_sha256(protected_art_mask_sha256, "protected art mask hash") if protected_art_mask_sha256 else _json_sha256({"kind": "unbound_protected_art_mask", "owner_id": owner_id, "page_id": graph.page_id})
     draft = OwnerRenderGeometry(
         schema_version=1, owner_id=str(owner_id), page_id=str(graph.page_id), logical_space="logical_page",
         page_width=width, page_height=height, component_ids=tuple(item.component_id for item in components),

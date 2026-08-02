@@ -11019,11 +11019,12 @@ def execute_owner_page_graph(
             if observation.layout_bbox_page is not None
         ]
         owner_render_geometry = build_owner_render_geometry(
-            single,
+            executed_graph,
             owner.owner_id,
             page_width=int(source.shape[1]),
             page_height=int(source.shape[0]),
             container_evidence=container_evidence,
+            protected_art_mask=protected_mask,
             protected_art_mask_sha256=_owner_array_sha256(protected_mask),
         )
         if owner_render_geometry.reason in {
@@ -11040,11 +11041,12 @@ def execute_owner_page_graph(
             if recovered_container is not None:
                 container_evidence.append(recovered_container)
                 owner_render_geometry = build_owner_render_geometry(
-                    single,
+                    executed_graph,
                     owner.owner_id,
                     page_width=int(source.shape[1]),
                     page_height=int(source.shape[0]),
                     container_evidence=container_evidence,
+                    protected_art_mask=protected_mask,
                     protected_art_mask_sha256=_owner_array_sha256(protected_mask),
                 )
         if owner_render_geometry.source_replacement_bbox_page != source_replacement_bbox:

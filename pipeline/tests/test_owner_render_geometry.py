@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from hashlib import sha256
 import importlib.util
 
+import numpy as np
 import pytest
 
 from ownership.model import (
@@ -61,6 +63,18 @@ def _container():
     }
 
 
+def _mask_sha256(mask: np.ndarray) -> str:
+    array = np.ascontiguousarray(mask)
+    digest = sha256()
+    digest.update(b"traduzai.ndarray.v1\0")
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(",".join(str(item) for item in array.shape).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
 def test_owner_render_geometry_contract_is_importable_before_behavioral_checks():
     assert importlib.util.find_spec("ownership.render_geometry") is not None
 
@@ -85,6 +99,88 @@ def test_owner_render_geometry_contains_complete_page_space_owner_evidence():
     assert geometry.container_evidence_ids == ("balloon_7",)
     assert geometry.container_evidence_confidence == 0.91
     assert len(geometry.geometry_sha256) == 64
+
+
+def test_verified_container_is_partitioned_away_from_adjacent_foreign_owner():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    graph = _graph()
+    graph.components.append(
+        SourceTextComponent(
+            "component_foreign",
+            "page_1",
+            (25, 15, 75, 28),
+            _polygon((25, 15, 75, 28)),
+            ("detector",),
+            evidence_ids=("det_foreign",),
+        )
+    )
+    graph.observations.append(
+        TextObservation(
+            "observation_foreign",
+            "page_1",
+            ("component_foreign",),
+            "FOREIGN",
+            0.9,
+            "paddle",
+            (25, 15, 75, 28),
+            polygons_page=(_polygon((25, 15, 75, 28)),),
+        )
+    )
+    graph.owners.append(
+        TextOwner(
+            "owner_foreign",
+            "page_1",
+            ["component_foreign"],
+            ["observation_foreign"],
+            ["observation_foreign"],
+            "dialogue",
+            "FOREIGN",
+            "ESTRANGEIRO",
+            "review",
+            "review_required",
+            "review_required",
+            None,
+        )
+    )
+
+    geometry = build_owner_render_geometry(
+        graph,
+        "owner_a",
+        page_width=100,
+        page_height=120,
+        container_evidence=_container(),
+        protected_art_mask_sha256="a" * 64,
+    )
+
+    assert geometry.status == "ready"
+    assert geometry.layout_container_bbox_page == (10, 28, 95, 100)
+    assert geometry.layout_container_polygon_page == _polygon((10, 28, 95, 100))
+    assert geometry.layout_container_source == "balloon_inner_polygon:owner_exclusive"
+    assert "foreign_component:component_foreign" in geometry.container_evidence_ids
+
+
+def test_verified_container_expands_only_through_protected_mask_safe_pixels():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    protected = np.zeros((120, 100), dtype=np.uint8)
+    protected[15:100, 80:95] = 255
+    protected[88:100, 10:95] = 255
+
+    geometry = build_owner_render_geometry(
+        _graph(),
+        "owner_a",
+        page_width=100,
+        page_height=120,
+        container_evidence=_container(),
+        protected_art_mask=protected,
+        protected_art_mask_sha256=_mask_sha256(protected),
+    )
+
+    assert geometry.status == "ready"
+    assert geometry.layout_container_bbox_page == (10, 15, 80, 88)
+    assert geometry.layout_container_polygon_page == _polygon((10, 15, 80, 88))
+    assert geometry.layout_container_source.endswith(":protected_mask_safe")
 
 
 def test_source_replacement_never_becomes_dialogue_layout_container_without_evidence():
