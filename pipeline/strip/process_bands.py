@@ -9339,7 +9339,17 @@ def apply_atomic_owner_execution(
             raise ValueError("glyph render changed no pixels")
         if np.any(changed_outside_glyph):
             raise ValueError("glyph render changed pixels outside its mask")
-        if np.any((paint_mask > 0) & (protected_art_mask > 0)):
+        protected_paint_overlap = (paint_mask > 0) & (protected_art_mask > 0)
+        source_x1, source_y1, source_x2, source_y2 = _canonical_owner_bbox(
+            owner_render_geometry.source_replacement_bbox_page,
+            shape=page_shape,
+            label="owner source replacement bbox",
+        )
+        protected_paint_overlap[
+            source_y1:source_y2,
+            source_x1:source_x2,
+        ] = False
+        if np.any(protected_paint_overlap):
             raise ValueError("glyph patch overlaps protected art")
         changed_outside_glyph_count = _canonical_owner_counter(
             glyph_patch.changed_outside_glyph_mask_pixels,
@@ -11028,6 +11038,7 @@ def execute_owner_page_graph(
         protected_mask = release_source_replacement_from_protection(
             protected_mask,
             source_replacement_bbox,
+            source_replacement_mask=source_glyph_mask,
             foreign_component_masks=foreign_component_masks,
         )
         container_evidence = [

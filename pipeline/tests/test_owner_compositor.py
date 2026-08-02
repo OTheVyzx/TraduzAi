@@ -383,6 +383,45 @@ def test_atomic_owner_commit_rejects_missing_render_quality_contract() -> None:
     assert "render quality contract is missing" in commit.reason
 
 
+def test_typography_may_repaint_protected_art_only_inside_authenticated_source_slot():
+    from strip.process_bands import apply_atomic_owner_execution
+
+    original = _original()
+    protected = _box_mask((8, 8, 10, 10))
+    mutation = _mutation(
+        original,
+        box=(2, 2, 4, 4),
+        protected_art_mask=protected,
+    )
+    patch = _glyph_patch(original, mutation=mutation, box=(8, 8, 10, 10))
+
+    commit = apply_atomic_owner_execution(original, mutation, patch)
+    composition = compose_page(original, [mutation], [patch], protected)
+
+    assert commit.committed is True
+    assert np.all(composition.final_rgb[8:10, 8:10] == (8, 12, 18))
+
+
+def test_typography_cannot_repaint_protected_art_outside_authenticated_source_slot():
+    from strip.process_bands import apply_atomic_owner_execution
+
+    original = _original()
+    protected = _box_mask((13, 13, 15, 15))
+    mutation = _mutation(
+        original,
+        box=(2, 2, 4, 4),
+        protected_art_mask=protected,
+    )
+    patch = _glyph_patch(original, mutation=mutation, box=(13, 13, 15, 15))
+
+    commit = apply_atomic_owner_execution(original, mutation, patch)
+
+    assert commit.committed is False
+    assert "overlaps protected art" in commit.reason
+    with pytest.raises(OwnerCompositionError, match="protected art"):
+        compose_page(original, [mutation], [patch], protected)
+
+
 def test_changed_pixels_must_be_subset_of_owner_action_mask() -> None:
     original = _original()
     mutation = _mutation(original)

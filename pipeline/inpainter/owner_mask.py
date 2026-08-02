@@ -460,9 +460,43 @@ def _stroke_expansion_radii(mask: np.ndarray) -> tuple[int, ...]:
     positive_y, positive_x = np.nonzero(mask)
     if positive_x.size <= 0:
         return (3,)
-    tight_width = int(positive_x.max() - positive_x.min() + 1)
-    tight_height = int(positive_y.max() - positive_y.min() + 1)
-    proportional_radius = int(np.ceil(min(tight_width, tight_height) * 0.30))
+    distance = cv2.distanceTransform(
+        (np.asarray(mask) > 0).astype(np.uint8),
+        cv2.DIST_L2,
+        5,
+    )
+    positive_distance = distance[distance > 0]
+    if positive_distance.size <= 0:
+        return (3,)
+    # Component height measures glyph or line height, not stroke thickness.
+    # The upper distance-transform quantile scales with the actual painted
+    # stroke/halo while remaining small for connected script and multiline
+    # text whose component bbox is tall or wide.
+    proportional_radius = int(round(float(np.percentile(positive_distance, 90.0))))
+    component_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        (np.asarray(mask) > 0).astype(np.uint8),
+        connectivity=8,
+    )
+    component_dimensions = [
+        (
+            int(stats[index, cv2.CC_STAT_WIDTH]),
+            int(stats[index, cv2.CC_STAT_HEIGHT]),
+        )
+        for index in range(1, component_count)
+        if int(stats[index, cv2.CC_STAT_AREA]) >= 4
+    ]
+    if len(component_dimensions) >= 2:
+        minor_axes = [min(width, height) for width, height in component_dimensions]
+        major_axes = [max(width, height) for width, height in component_dimensions]
+        aspect_ratios = [
+            major / float(max(1, minor))
+            for major, minor in zip(major_axes, minor_axes)
+        ]
+        if float(np.median(minor_axes)) <= 3.0 and float(np.median(aspect_ratios)) >= 6.0:
+            proportional_radius = max(
+                proportional_radius,
+                int(np.ceil(float(np.median(major_axes)) * 0.30)),
+            )
     maximum_radius = max(3, min(18, proportional_radius))
     return tuple(range(maximum_radius, 2, -1))
 

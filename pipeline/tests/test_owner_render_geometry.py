@@ -244,6 +244,27 @@ def test_verified_container_expands_only_through_protected_mask_safe_pixels():
     assert geometry.layout_container_source.endswith(":protected_mask_safe")
 
 
+def test_protected_art_inside_source_slot_keeps_authenticated_typography_slot():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    protected = np.zeros((120, 100), dtype=np.uint8)
+    protected[48:58, 50:60] = 255
+
+    geometry = build_owner_render_geometry(
+        _graph(),
+        "owner_a",
+        page_width=100,
+        page_height=120,
+        container_evidence=_container(),
+        protected_art_mask=protected,
+        protected_art_mask_sha256=_mask_sha256(protected),
+    )
+
+    assert geometry.status == "ready"
+    assert geometry.layout_container_bbox_page == geometry.source_replacement_bbox_page
+    assert geometry.layout_container_source.endswith(":protected_mask_safe")
+
+
 def test_legacy_layout_bbox_never_expands_source_replacement_beyond_text_pixels():
     from ownership.render_geometry import (
         build_owner_render_geometry,
@@ -291,6 +312,44 @@ def test_coarse_foreign_mask_never_reprotects_authorized_source_replacement():
 
     assert not np.any(released[7:13, 10:20])
     assert np.any(released[5:7, 8:22])
+
+
+def test_source_glyph_mask_releases_text_without_unprotecting_crossing_art():
+    from ownership.render_geometry import release_source_replacement_from_protection
+
+    protected = np.zeros((24, 36), dtype=np.uint8)
+    protected[8:16, 4:32] = 255
+    source_glyph = np.zeros_like(protected)
+    source_glyph[10:14, 12:24] = 255
+
+    released = release_source_replacement_from_protection(
+        protected,
+        (8, 6, 28, 18),
+        source_replacement_mask=source_glyph,
+    )
+
+    assert not np.any(released[10:14, 12:24])
+    assert np.all(released[8:10, 4:32] == 255)
+    assert np.all(released[14:16, 4:32] == 255)
+
+
+def test_source_slot_ignores_coarse_foreign_union_when_glyph_mask_is_precise():
+    from ownership.render_geometry import release_source_replacement_from_protection
+
+    protected = np.zeros((24, 36), dtype=np.uint8)
+    source_glyph = np.zeros_like(protected)
+    source_glyph[10:14, 12:24] = 255
+    coarse_foreign = np.zeros_like(protected)
+    coarse_foreign[6:18, 8:28] = 255
+
+    released = release_source_replacement_from_protection(
+        protected,
+        (8, 6, 28, 18),
+        source_replacement_mask=source_glyph,
+        foreign_component_masks=(("coarse_foreign", coarse_foreign),),
+    )
+
+    assert not np.any(released[6:18, 8:28])
 
 
 def test_source_replacement_never_becomes_dialogue_layout_container_without_evidence():

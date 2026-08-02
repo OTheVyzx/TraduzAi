@@ -544,7 +544,9 @@ def _maximal_protected_safe_bbox(
     left, top, right, bottom = source_bbox
     cx1, cy1, cx2, cy2 = container_bbox
     if np.any(protected[top:bottom, left:right]):
-        return None
+        # Cleanup remains forbidden on protected art. Typography is a separate
+        # overlay and may reuse only the authenticated prior text footprint.
+        return source_bbox
     while True:
         candidates: list[tuple[int, int, BBox]] = []
         if left > cx1 and not np.any(protected[top:bottom, left - 1 : left]):
@@ -782,9 +784,10 @@ def release_source_replacement_from_protection(
     protected_mask: np.ndarray,
     source_replacement_bbox: BBox,
     *,
+    source_replacement_mask: np.ndarray | None = None,
     foreign_component_masks: Sequence[tuple[str, np.ndarray]] = (),
 ) -> np.ndarray:
-    """Release cleanup pixels and then restore every foreign-owner pixel."""
+    """Release authenticated source ink and then restore foreign-owner pixels."""
 
     protected = np.asarray(protected_mask)
     if protected.dtype != np.uint8 or protected.ndim != 2:
@@ -797,7 +800,24 @@ def release_source_replacement_from_protection(
         label="source replacement bbox",
     )
     result = np.where(protected > 0, 255, 0).astype(np.uint8)
-    result[y1:y2, x1:x2] = 0
+    if source_replacement_mask is None:
+        authorized = np.zeros_like(result)
+        authorized[y1:y2, x1:x2] = 255
+    else:
+        replacement = np.asarray(source_replacement_mask)
+        if (
+            replacement.shape != result.shape
+            or replacement.dtype != np.uint8
+            or replacement.ndim != 2
+        ):
+            raise ValueError("source replacement mask does not match logical page")
+        authorized = np.where(replacement > 0, 255, 0).astype(np.uint8)
+        clipped = np.zeros_like(authorized)
+        clipped[y1:y2, x1:x2] = authorized[y1:y2, x1:x2]
+        authorized = clipped
+        if not np.any(authorized):
+            raise ValueError("source replacement mask is empty")
+    result[authorized > 0] = 0
     for evidence_id, raw_mask in foreign_component_masks:
         if not str(evidence_id or "").strip():
             raise ValueError("foreign component evidence id is empty")

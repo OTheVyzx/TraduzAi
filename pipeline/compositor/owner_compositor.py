@@ -583,11 +583,29 @@ def _validate_glyph_patch(
     )
     if outside_count != int(np.count_nonzero(changed_outside)):
         raise OwnerCompositionError("glyph outside-mask counter mismatch")
-    if np.any((paint_mask > 0) & (global_protected > 0)):
+    source_bbox = _canonical_bbox(
+        render_geometry.source_replacement_bbox_page,
+        label="owner source replacement bbox",
+        shape=page_shape,
+    )
+    source_x1, source_y1, source_x2, source_y2 = source_bbox
+    global_protected_overlap = (paint_mask > 0) & (global_protected > 0)
+    global_protected_overlap[
+        source_y1:source_y2,
+        source_x1:source_x2,
+    ] = False
+    if np.any(global_protected_overlap):
         raise OwnerCompositionError("glyph paint mask touches global protected art")
-    if mutation is not None and np.any(
+    owner_protected_overlap = (
         (paint_mask > 0) & (mutation.protected_art_mask > 0)
-    ):
+        if mutation is not None
+        else np.zeros(page_shape, dtype=bool)
+    )
+    owner_protected_overlap[
+        source_y1:source_y2,
+        source_x1:source_x2,
+    ] = False
+    if np.any(owner_protected_overlap):
         raise OwnerCompositionError("glyph paint mask touches owner protected art")
 
     raw_authority = glyph_patch.text_execution_authority
