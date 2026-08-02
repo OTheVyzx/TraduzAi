@@ -11053,6 +11053,7 @@ def execute_owner_page_graph(
             "missing_independent_dialogue_container",
             "missing_verified_card_container",
             "missing_independent_layout_container",
+            "typed_visual_card_text_slot",
         }:
             recovered_container = recover_full_page_visual_container(
                 source,

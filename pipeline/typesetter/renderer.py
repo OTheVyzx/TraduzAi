@@ -18710,13 +18710,26 @@ def _render_single_owner_proportionally(
         accepted_ok = bool(
             child.get("render_completed")
             and quality.get("status") == "ok"
+            and (
+                not isinstance(raster_result, GlyphRasterResult)
+                or raster_result.status == "applied"
+            )
             and _owner_bbox_is_within(core_bbox, child_plan.get("safe_text_box"))
         )
         attempts.append(
             {
                 "font_px": candidate_size,
                 "status": "ok" if accepted_ok else "rejected",
-                "reason": "ok" if accepted_ok else str(quality.get("status") or "invalid"),
+                "reason": (
+                    "ok"
+                    if accepted_ok
+                    else (
+                        "raster_materialization_unavailable"
+                        if isinstance(raster_result, GlyphRasterResult)
+                        and raster_result.status != "applied"
+                        else str(quality.get("status") or "invalid")
+                    )
+                ),
             }
         )
         if accepted_ok:

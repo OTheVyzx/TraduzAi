@@ -554,6 +554,92 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(block["route_action"], "review_required")
         self.assertTrue(np.array_equal(np.asarray(image), canvas))
 
+    def test_owner_renderer_retries_smaller_size_when_effect_envelope_does_not_fit(self):
+        canvas = np.full((120, 220, 3), 20, dtype=np.uint8)
+        image = Image.fromarray(canvas.copy(), mode="RGB")
+        block = {
+            "owner_id": "owner_glow_fit",
+            "translated": "DEPRESSA, DEPRESSA!",
+            "translated_payload": "DEPRESSA, DEPRESSA!",
+            "render_safe_polygon_page": [[20, 20], [200, 20], [200, 100], [20, 100]],
+            "paint_safe_polygon_page": [[10, 10], [210, 10], [210, 110], [10, 110]],
+            "safe_text_box": [20, 20, 200, 100],
+            "bbox": [20, 20, 200, 100],
+            "layout_regions": [],
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "glow": True, "glow_px": 5},
+            "_owner_render_mode": True,
+        }
+        attempted_sizes = []
+
+        def plan(candidate):
+            bounds = candidate.get("source_font_bounds_px") or [19, 20]
+            return {
+                "font_size_bounds_px": list(bounds),
+                "safe_text_box": [20, 20, 200, 100],
+                "target_bbox": [20, 20, 200, 100],
+                "max_width": 180,
+                "max_height": 80,
+                "font_name": "ComicNeue-Bold.ttf",
+                "line_spacing_ratio": 0.2,
+                "layout_profile": "dark_bubble",
+                "trusted_container": True,
+            }
+
+        def render_candidate(trial_image, child, _plan, **_kwargs):
+            size = int(child["source_font_bounds_px"][0])
+            attempted_sizes.append(size)
+            child.update(
+                {
+                    "fit_status": "ok",
+                    "render_bbox": [60, 45, 160, 75],
+                    "font_size_final": size,
+                    "minimum_legible_font_px": 19,
+                }
+            )
+            core = np.zeros(canvas.shape[:2], dtype=np.uint8)
+            core[45:75, 60:160] = 255
+            rgba = np.zeros((*canvas.shape[:2], 4), dtype=np.uint8)
+            rgba[core > 0] = (255, 255, 255, 255)
+            ImageDraw.Draw(trial_image).rectangle((60, 45, 159, 74), fill=(255, 255, 255))
+            return renderer_mod.GlyphRasterResult(
+                status="fallback" if size == 20 else "applied",
+                rgba=rgba,
+                glyph_core_mask=core,
+                effect_mask=np.zeros_like(core),
+                glyph_core_envelope=(60, 45, 160, 75),
+                effect_envelope=None,
+                observed_attributes={"fill": "#FFFFFF"},
+                abstained_attributes=(
+                    {"glow": "effect_envelope_outside_safe"} if size == 20 else {}
+                ),
+                metrics={"core_pixels_outside_safe": 0},
+                unavailable_attributes=(
+                    {"glow": "effect_envelope_outside_safe"} if size == 20 else {}
+                ),
+            )
+
+        quality = {
+            "status": "ok",
+            "source_scale_ratio": 1.0,
+            "safe_height_occupancy": 0.5,
+            "font_size_final": 19,
+        }
+        with (
+            patch("typesetter.renderer.plan_text_layout", side_effect=plan),
+            patch("typesetter.renderer._fits_in_box", return_value=True),
+            patch("typesetter.renderer._render_single_text_block", side_effect=render_candidate),
+            patch("typesetter.renderer._evaluate_rendered_owner_candidate", return_value=quality),
+            patch("typesetter.renderer._minimum_legible_font_px", return_value=19),
+        ):
+            result = renderer_mod._render_single_owner_proportionally(
+                image, block, pre_render_np=None
+            )
+
+        self.assertEqual(attempted_sizes, [20, 19])
+        self.assertEqual(block["font_size_final"], 19)
+        self.assertEqual(block["fit_status"], "ok")
+        self.assertEqual(result.status, "applied")
+
     def test_owner_renderer_applies_functional_contrast_on_dark_region(self):
         canvas = np.full((100, 180, 3), 8, dtype=np.uint8)
         image = Image.fromarray(canvas.copy(), mode="RGB")

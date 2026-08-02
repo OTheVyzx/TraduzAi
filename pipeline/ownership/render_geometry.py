@@ -399,12 +399,24 @@ def _hashed_observation(observation: Any, *, width: int, height: int) -> OwnerOb
         _polygon(item, width=width, height=height, label="observation polygon")
         for item in observation.polygons_page
     )
-    bbox = _bbox(observation.bbox_page, width=width, height=height, label="observation bbox")
+    raw_bbox = _bbox(
+        observation.bbox_page,
+        width=width,
+        height=height,
+        label="observation bbox",
+    )
+    bbox = _bbox(
+        observation.text_pixel_bbox_page or raw_bbox,
+        width=width,
+        height=height,
+        label="observation text pixel bbox",
+    )
     polygon = _rect_polygon(_union_bbox(tuple(_polygon_bbox(item) for item in polygons))) if polygons else _rect_polygon(bbox)
     source_sha = _json_sha256({
         "observation_id": str(observation.observation_id), "text": str(observation.text),
         "provider": str(observation.provider), "component_ids": sorted(str(item) for item in observation.component_ids),
-        "bbox_page": list(bbox), "polygons_page": [[[x, y] for x, y in item] for item in polygons],
+        "bbox_page": list(raw_bbox), "text_pixel_bbox_page": list(bbox),
+        "polygons_page": [[[x, y] for x, y in item] for item in polygons],
     })
     item = OwnerObservationGeometry(str(observation.observation_id), source_sha, bbox, polygon, round(float(observation.confidence), 6), "")
     return replace(item, observation_geometry_sha256=_json_sha256(item.payload()))
@@ -458,6 +470,11 @@ def _partition_container_from_foreign_components(
         if observation.polygons_page
         for component_id in observation.component_ids
     }
+    preserved = {
+        disposition.component_id
+        for disposition in graph.component_dispositions
+        if disposition.decision == "preserve"
+    }
     foreign = [
         component
         for component in sorted(graph.components, key=lambda item: item.component_id)
@@ -476,7 +493,18 @@ def _partition_container_from_foreign_components(
     exclusions: list[str] = []
     conflict = False
     for component in foreign:
-        fx1, fy1, fx2, fy2 = component.bbox_page
+        foreign_bbox = component.bbox_page
+        if component.component_id in preserved:
+            accepted_observation_boxes = tuple(
+                observation.text_pixel_bbox_page or observation.bbox_page
+                for observation in graph.observations
+                if component.component_id in observation.component_ids
+                and observation.rejection_reason is None
+                and observation.polygons_page
+            )
+            if accepted_observation_boxes:
+                foreign_bbox = _union_bbox(accepted_observation_boxes)
+        fx1, fy1, fx2, fy2 = foreign_bbox
         horizontal_overlap = min(fx2, sx2) > max(fx1, sx1)
         vertical_overlap = min(fy2, sy2) > max(fy1, sy1)
         if horizontal_overlap and vertical_overlap:
@@ -620,6 +648,17 @@ def build_owner_render_geometry(
     freeform = any(token in role for token in _FREEFORM_ROLE_TOKENS)
     dialogue = any(token in role for token in _DIALOGUE_ROLE_TOKENS)
     card = any(token in role for token in _CARD_ROLE_TOKENS)
+    selected_providers = {
+        str(observation.provider or "").strip().casefold()
+        for observation in graph.observations
+        if observation.observation_id in selected_ids
+    }
+    visual_card_slot = any(
+        provider.startswith("visual_card") for provider in selected_providers
+    ) and any(
+        provider.startswith("candidate_crop_direct_paddle")
+        for provider in selected_providers
+    )
     if chosen is not None:
         layout_bbox, layout_polygon, layout_source = chosen["bbox"], chosen["polygon"], chosen["source"]
         status, reason = "ready", "independent_container_verified"
@@ -661,6 +700,18 @@ def build_owner_render_geometry(
                 evidence_ids = tuple(
                     sorted({*evidence_ids, f"protected_art_mask:{protected_hash}"})
                 )
+    elif visual_card_slot:
+        layout_bbox = semantic_bbox
+        layout_polygon = _rect_polygon(semantic_bbox)
+        layout_source = "visual_card_text_slot"
+        status, reason = "ready", "typed_visual_card_text_slot"
+        evidence_ids = tuple(
+            sorted(observation.observation_id for observation in observations)
+        )
+        evidence_confidence = max(
+            (observation.confidence for observation in observations),
+            default=0.0,
+        )
     elif freeform:
         layout_bbox, layout_polygon, layout_source = semantic_bbox, _rect_polygon(semantic_bbox), "freeform_component_union"
         status, reason, evidence_ids, evidence_confidence = "ready", "typed_freeform_component_union", (), 1.0
@@ -713,7 +764,12 @@ def owner_source_replacement_bbox(graph: OwnerGraph, owner_id: str) -> BBox:
         raise ValueError(f"source replacement geometry requires one owner {owner_id!r}")
     selected_ids = set(owners[0].selected_observation_ids)
     boxes = tuple(
-        tuple(int(value) for value in observation.bbox_page)
+        tuple(
+            int(value)
+            for value in (
+                observation.text_pixel_bbox_page or observation.bbox_page
+            )
+        )
         for observation in graph.observations
         if observation.observation_id in selected_ids
     )
@@ -748,7 +804,13 @@ def release_source_replacement_from_protection(
         mask = np.asarray(raw_mask)
         if mask.shape != result.shape or mask.dtype != np.uint8 or mask.ndim != 2:
             raise ValueError("foreign component mask does not match logical page")
-        result[mask > 0] = 255
+        foreign = np.where(mask > 0, 255, 0).astype(np.uint8)
+        # A coarse detector/legacy union may geometrically overlap the source
+        # slot even when its accepted OCR ink does not.  The caller verifies
+        # true foreign semantic overlap through OwnerRenderGeometry before any
+        # mutation; do not re-protect the very source pixels being replaced.
+        foreign[y1:y2, x1:x2] = 0
+        result[foreign > 0] = 255
     return np.ascontiguousarray(result, dtype=np.uint8)
 
 

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from ownership.model import (
+    ComponentDisposition,
     OwnerGraph,
     OwnerProjection,
     SourceTextComponent,
@@ -160,6 +161,66 @@ def test_verified_container_is_partitioned_away_from_adjacent_foreign_owner():
     assert "foreign_component:component_foreign" in geometry.container_evidence_ids
 
 
+def test_preserved_foreign_component_uses_accepted_ocr_geometry_not_rejected_coarse_union():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    graph = _graph()
+    graph.components.append(
+        SourceTextComponent(
+            "component_ding",
+            "page_1",
+            (25, 15, 75, 35),
+            _polygon((25, 15, 75, 35)),
+            ("detector",),
+        )
+    )
+    graph.observations.extend(
+        [
+            TextObservation(
+                "observation_ding",
+                "page_1",
+                ("component_ding",),
+                "DING",
+                0.9,
+                "paddle_full_page",
+                (25, 15, 75, 27),
+                polygons_page=(_polygon((25, 15, 75, 27)),),
+            ),
+            TextObservation(
+                "observation_ding_elixir",
+                "page_1",
+                ("component_ding",),
+                "DING ELIXIR",
+                0.94,
+                "candidate_crop_direct_paddle",
+                (25, 15, 75, 35),
+                polygons_page=(_polygon((25, 15, 75, 35)),),
+                rejection_reason="cross_region_same_role_observation",
+            ),
+        ]
+    )
+    graph.component_dispositions.append(
+        ComponentDisposition(
+            component_id="component_ding",
+            decision="preserve",
+            reason="policy:short_noop_display_sfx",
+        )
+    )
+
+    geometry = build_owner_render_geometry(
+        graph,
+        "owner_a",
+        page_width=100,
+        page_height=120,
+        container_evidence=_container(),
+        protected_art_mask_sha256="a" * 64,
+    )
+
+    assert geometry.status == "ready"
+    assert geometry.layout_container_bbox_page == (10, 27, 95, 100)
+    assert "foreign_component:component_ding" in geometry.container_evidence_ids
+
+
 def test_verified_container_expands_only_through_protected_mask_safe_pixels():
     from ownership.render_geometry import build_owner_render_geometry
 
@@ -183,6 +244,55 @@ def test_verified_container_expands_only_through_protected_mask_safe_pixels():
     assert geometry.layout_container_source.endswith(":protected_mask_safe")
 
 
+def test_legacy_layout_bbox_never_expands_source_replacement_beyond_text_pixels():
+    from ownership.render_geometry import (
+        build_owner_render_geometry,
+        owner_source_replacement_bbox,
+    )
+
+    graph = _graph()
+    graph.observations[0] = replace(
+        graph.observations[0],
+        bbox_page=(10, 15, 95, 100),
+        text_pixel_bbox_page=(24, 32, 78, 83),
+        legacy_selected=True,
+        provider="legacy_selected",
+    )
+    protected = np.zeros((120, 100), dtype=np.uint8)
+    protected[90:100, 20:80] = 255
+
+    geometry = build_owner_render_geometry(
+        graph,
+        "owner_a",
+        page_width=100,
+        page_height=120,
+        container_evidence=_container(),
+        protected_art_mask=protected,
+        protected_art_mask_sha256=_mask_sha256(protected),
+    )
+
+    assert owner_source_replacement_bbox(graph, "owner_a") == (24, 32, 78, 83)
+    assert geometry.source_replacement_bbox_page == (24, 32, 78, 83)
+    assert geometry.status == "ready"
+
+
+def test_coarse_foreign_mask_never_reprotects_authorized_source_replacement():
+    from ownership.render_geometry import release_source_replacement_from_protection
+
+    protected = np.zeros((20, 30), dtype=np.uint8)
+    foreign = np.zeros_like(protected)
+    foreign[5:15, 8:22] = 255
+
+    released = release_source_replacement_from_protection(
+        protected,
+        (10, 7, 20, 13),
+        foreign_component_masks=(("coarse_preserved_component", foreign),),
+    )
+
+    assert not np.any(released[7:13, 10:20])
+    assert np.any(released[5:7, 8:22])
+
+
 def test_source_replacement_never_becomes_dialogue_layout_container_without_evidence():
     from ownership.render_geometry import build_owner_render_geometry
 
@@ -192,6 +302,35 @@ def test_source_replacement_never_becomes_dialogue_layout_container_without_evid
     assert geometry.layout_container_bbox_page is None
     assert geometry.status == "review_required"
     assert geometry.reason == "missing_independent_dialogue_container"
+
+
+def test_independently_detected_visual_card_text_slot_is_a_typed_local_container():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    graph = _graph()
+    graph.observations[0] = replace(
+        graph.observations[0], provider="visual_card_full_page_raw"
+    )
+    candidate = replace(
+        graph.observations[0],
+        observation_id="observation_card_candidate",
+        provider="candidate_crop_direct_paddle_native",
+    )
+    graph.observations.append(candidate)
+    graph.owners[0].observation_ids.append(candidate.observation_id)
+    graph.owners[0].selected_observation_ids.append(candidate.observation_id)
+
+    geometry = build_owner_render_geometry(
+        graph,
+        "owner_a",
+        page_width=100,
+        page_height=120,
+    )
+
+    assert geometry.status == "ready"
+    assert geometry.reason == "typed_visual_card_text_slot"
+    assert geometry.layout_container_source == "visual_card_text_slot"
+    assert geometry.layout_container_bbox_page == geometry.semantic_body_bbox_page
 
 
 def test_freeform_sfx_may_use_typed_component_union_not_cleanup_footprint():
