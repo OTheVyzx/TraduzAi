@@ -77,20 +77,7 @@ def _layer_index(pages: list[Any]) -> tuple[dict[tuple[str, str], list[dict[str,
     return layers, page_records
 
 
-def _bbox_inside(inner: Any, outer: tuple[int, int, int, int] | None) -> bool:
-    if not isinstance(inner, list) or len(inner) != 4 or outer is None:
-        return False
-    if not all(isinstance(value, int) and not isinstance(value, bool) for value in inner):
-        return False
-    x1, y1, x2, y2 = inner
-    ox1, oy1, ox2, oy2 = outer
-    return x1 >= ox1 and y1 >= oy1 and x2 <= ox2 and y2 <= oy2 and x2 > x1 and y2 > y1
-
-
-def _metric_contract_errors(
-    contract: dict[str, Any],
-    owner_bounds: tuple[int, int, int, int] | None,
-) -> list[str]:
+def _metric_contract_errors(contract: dict[str, Any]) -> list[str]:
     metrics = contract.get("render_metrics")
     if not isinstance(metrics, dict):
         return ["render_metrics"]
@@ -117,23 +104,7 @@ def _metric_contract_errors(
                 errors.append(f"{metric_name}_bbox")
         elif bbox not in ([], None):
             errors.append(f"{metric_name}_empty_bbox")
-    if isinstance(core, dict) and int(core.get("pixel_count") or 0) > 0:
-        if not _bbox_inside(core.get("bbox_page"), owner_bounds):
-            errors.append("core_containment")
     return sorted(set(errors))
-
-
-def _owner_bounds(graph: Any, owner: Any) -> tuple[int, int, int, int] | None:
-    component_ids = set(owner.component_ids)
-    boxes = [component.bbox_page for component in graph.components if component.component_id in component_ids]
-    if not boxes:
-        return None
-    return (
-        min(box[0] for box in boxes),
-        min(box[1] for box in boxes),
-        max(box[2] for box in boxes),
-        max(box[3] for box in boxes),
-    )
 
 
 def _binding_errors(profile: dict[str, Any], contract: dict[str, Any]) -> list[str]:
@@ -280,7 +251,7 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
     owners: list[dict[str, Any]] = []
     blocking: set[str] = set()
     global_findings: list[dict[str, Any]] = []
-    eligible: list[tuple[str, Any, tuple[int, int, int, int] | None]] = []
+    eligible: list[tuple[str, Any]] = []
     graphs = project.get("page_owner_graphs")
     graphs = graphs if isinstance(graphs, list) else []
     for graph_payload in graphs:
@@ -298,7 +269,7 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
                 else is_rendered_owner(owner)
             )
             if capture_eligible:
-                eligible.append((graph.page_id, owner, _owner_bounds(graph, owner)))
+                eligible.append((graph.page_id, owner))
 
     denominator = len(eligible)
     profile_count = contract_count = metrics_count = 0
@@ -318,7 +289,7 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
     below_legibility_count = 0
     unauthorized_policy_adjustments = 0
     invalid_superseded_relations = 0
-    for page_id, owner, owner_bounds in eligible:
+    for page_id, owner in eligible:
         owner_id = owner.owner_id
         semantic_role = str(owner.semantic_role or "unknown")
         category_totals[semantic_role] = category_totals.get(semantic_role, 0) + 1
@@ -406,18 +377,29 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
                     font_size_ratios.append(float(result["observed"]) / float(result["expected"]))
                     if float(result["observed"]) < MINIMUM_LEGIBLE_FONT_SIZE_PX:
                         below_legibility_count += 1
-            metric_errors = _metric_contract_errors(contract, owner_bounds)
-            if not metric_errors:
+            metric_errors = _metric_contract_errors(contract)
+            render_metrics = contract.get("render_metrics") if isinstance(contract.get("render_metrics"), dict) else {}
+            unsafe_metrics = [
+                name
+                for name in ("core_pixels_outside_safe", "effect_pixels_outside_safe")
+                if isinstance(render_metrics.get(name), int)
+                and not isinstance(render_metrics.get(name), bool)
+                and int(render_metrics[name]) > 0
+            ]
+            if not metric_errors and not unsafe_metrics:
                 metrics_count += 1
             else:
                 findings.extend(
                     {"code": "invalid_render_metric", "metric": name}
                     for name in metric_errors
                 )
+                findings.extend(
+                    {"code": "unsafe_render_metric", "metric": name}
+                    for name in unsafe_metrics
+                )
                 for name in metric_errors:
                     if name in REQUIRED_RENDER_METRICS:
                         global_findings.append({"code": "required_metric_missing", "owner_id": owner_id, "metric": name})
-            render_metrics = contract.get("render_metrics") if isinstance(contract.get("render_metrics"), dict) else {}
             core_outside = render_metrics.get("core_pixels_outside_safe")
             effect_outside = render_metrics.get("effect_pixels_outside_safe")
             if isinstance(core_outside, int) and not isinstance(core_outside, bool) and core_outside >= 0:

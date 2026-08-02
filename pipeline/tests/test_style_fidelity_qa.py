@@ -203,7 +203,7 @@ def test_missing_required_category_blocks_even_with_complete_owner(tmp_path):
     assert report["gate"]["status"] == "BLOCK"
 
 
-def test_core_envelope_outside_owner_geometry_blocks(tmp_path):
+def test_core_envelope_may_use_verified_safe_geometry_beyond_source_component(tmp_path):
     project = _project()
     contract = project["paginas"][0]["text_layers"][0]["style_v2_raster_contract"]
     contract["glyph_core_envelope"]["bbox_page"] = [0, 0, 4, 4]
@@ -211,8 +211,23 @@ def test_core_envelope_outside_owner_geometry_blocks(tmp_path):
 
     report = audit_style_fidelity(project, tmp_path, mode="enforce")
 
+    assert report["coverage"]["metrics"] == 1.0
+    assert report["gate"]["status"] == "PASS"
+
+
+def test_core_pixels_outside_verified_safe_geometry_blocks(tmp_path):
+    project = _project()
+    contract = project["paginas"][0]["text_layers"][0]["style_v2_raster_contract"]
+    contract["render_metrics"]["core_pixels_outside_safe"] = 1
+    contract["contract_sha256"] = owner_style_raster_contract_sha256(contract)
+
+    report = audit_style_fidelity(project, tmp_path, mode="enforce")
+
     assert report["coverage"]["metrics"] == 0.0
     assert report["gate"]["status"] == "BLOCK"
+    assert report["owners"][0]["findings"] == [
+        {"code": "unsafe_render_metric", "metric": "core_pixels_outside_safe"}
+    ]
 
 
 def test_missing_required_renderer_metric_blocks(tmp_path):
