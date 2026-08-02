@@ -10688,6 +10688,7 @@ def execute_owner_page_graph(
         UnsafeOwnerMaskError,
         build_owner_mask_plan,
     )
+    from ownership.container_evidence import recover_full_page_visual_container
     from layout.balloon_layout import enrich_page_layout
 
     graph.require_valid()
@@ -10952,6 +10953,27 @@ def execute_owner_page_graph(
             container_evidence=container_evidence,
             protected_art_mask_sha256=_owner_array_sha256(protected_mask),
         )
+        if owner_render_geometry.reason in {
+            "missing_independent_dialogue_container",
+            "missing_verified_card_container",
+            "missing_independent_layout_container",
+        }:
+            recovered_container = recover_full_page_visual_container(
+                source,
+                owner_id=owner.owner_id,
+                semantic_body_bbox_page=owner_render_geometry.semantic_body_bbox_page,
+                source_replacement_bbox_page=source_replacement_bbox,
+            )
+            if recovered_container is not None:
+                container_evidence.append(recovered_container)
+                owner_render_geometry = build_owner_render_geometry(
+                    single,
+                    owner.owner_id,
+                    page_width=int(source.shape[1]),
+                    page_height=int(source.shape[0]),
+                    container_evidence=container_evidence,
+                    protected_art_mask_sha256=_owner_array_sha256(protected_mask),
+                )
         if owner_render_geometry.source_replacement_bbox_page != source_replacement_bbox:
             raise ValueError("owner cleanup footprint diverged from render geometry")
         record["owner_render_geometry"] = owner_render_geometry.to_dict()
