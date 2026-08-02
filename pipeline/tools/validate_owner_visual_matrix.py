@@ -847,21 +847,35 @@ def _resolved_intent_panel(page, target, size, geometry):
     )
     if layer is None:
         raise MatrixContractError("missing_owner_materialization_intent")
-    # The render layout is the materialization intent. ``owner_render_geometry``
-    # describes the source owner's semantic/component geometry and deliberately
-    # has a different coordinate-space contract.
-    plan = layer.get("render_layout_contract") or layer.get("owner_render_geometry")
+    # Prefer the committed render layout. A review owner has no committed layout,
+    # but its independent geometry still has to remain inspectable so the matrix
+    # can report the functional NO-GO instead of crashing while building sheets.
+    render_plan = layer.get("render_layout_contract")
+    plan = render_plan or layer.get("owner_render_geometry")
     if not isinstance(plan, dict):
         raise MatrixContractError("missing_owner_materialization_plan")
     bbox = None
-    for key in ("safe_text_box", "render_bbox", "target_bbox", "bbox"):
+    bbox_keys = (
+        ("safe_text_box", "render_bbox", "target_bbox", "bbox")
+        if isinstance(render_plan, dict)
+        else (
+            "layout_container_bbox_page",
+            "semantic_body_bbox_page",
+            "source_replacement_bbox_page",
+        )
+    )
+    for key in bbox_keys:
         raw = plan.get(key) or layer.get(key)
         if isinstance(raw, (list, tuple)) and len(raw) == 4:
             bbox = tuple(int(value) for value in raw)
             break
     if bbox is None:
         raise MatrixContractError("missing_owner_materialization_bbox")
-    coordinate_space = str(plan.get("coordinate_space") or "")
+    coordinate_space = str(
+        plan.get("coordinate_space")
+        or plan.get("logical_space")
+        or ""
+    )
     if coordinate_space == "logical_page":
         bbox = geometry.logical_bbox_to_frame(bbox)
     elif coordinate_space != "framed_page":

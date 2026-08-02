@@ -439,6 +439,42 @@ def test_resolved_intent_uses_render_layout_contract_not_source_owner_geometry()
     assert metadata["render_bbox_frame"] == [15, 98, 37, 111]
 
 
+def test_resolved_intent_audits_review_owner_from_logical_render_geometry():
+    from strip.page_surface_geometry import PageSurfaceGeometry
+    from tools.validate_owner_visual_matrix import _resolved_intent_panel
+
+    geometry = PageSurfaceGeometry.build(
+        logical_width=69,
+        logical_height=160,
+        frame_width=80,
+        frame_height=160,
+        content_origin_xy=(5, 0),
+    )
+    page = {
+        "text_layers": [{
+            "owner_id": "owner_review",
+            "translated": "CORPO EM REVISAO",
+            "route_action": "review_required",
+            "owner_render_geometry": {
+                "logical_space": "logical_page",
+                "layout_container_bbox_page": [10, 98, 32, 111],
+                "geometry_sha256": "a" * 64,
+                "status": "ready",
+            },
+        }],
+    }
+
+    _, metadata = _resolved_intent_panel(
+        page,
+        {"owner_id": "owner_review"},
+        (80, 160),
+        geometry,
+    )
+
+    assert metadata["render_bbox_frame"] == [15, 98, 37, 111]
+    assert metadata["plan_sha256"] == "a" * 64
+
+
 def test_contact_sheet_blocks_logical_target_without_page_geometry(tmp_path):
     from PIL import Image
     from tools.validate_owner_visual_matrix import MatrixContractError, _write_contact_sheets
