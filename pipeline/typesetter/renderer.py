@@ -1643,7 +1643,9 @@ def _render_v2_owner_text_layer(
         return None
     safe = np.zeros(core.shape, dtype=np.uint8)
     polygon = (
-        text_data.get("render_safe_polygon_page")
+        text_data.get("paint_safe_polygon_page")
+        or plan.get("paint_safe_polygon_page")
+        or text_data.get("render_safe_polygon_page")
         or plan.get("render_safe_polygon_page")
     )
     if isinstance(polygon, (list, tuple)) and len(polygon) >= 3:
@@ -7338,6 +7340,7 @@ def _owner_record_contract(record: dict) -> str:
         "layout_region_ids",
         "layout_regions",
         "render_safe_polygon_page",
+        "paint_safe_polygon_page",
         "safe_text_box",
         "layout_safe_bbox",
         "source_font_bounds_px",
@@ -18552,9 +18555,19 @@ def _evaluate_rendered_owner_candidate(
     child: dict,
     plan: dict,
     safe_polygon: object,
+    raster_result: GlyphRasterResult | None = None,
 ) -> dict:
     after_np = np.asarray(after_image.convert("RGB"), dtype=np.uint8)
-    glyph_core_mask = np.any(after_np != before_np, axis=2).astype(np.uint8)
+    changed_mask = np.any(after_np != before_np, axis=2).astype(np.uint8)
+    if (
+        isinstance(raster_result, GlyphRasterResult)
+        and np.asarray(raster_result.glyph_core_mask).shape == changed_mask.shape
+    ):
+        glyph_core_mask = np.where(
+            np.asarray(raster_result.glyph_core_mask) > 0, 1, 0
+        ).astype(np.uint8)
+    else:
+        glyph_core_mask = changed_mask
     safe_mask = _owner_canvas_polygon_mask(
         safe_polygon,
         width=after_image.width,
@@ -18665,12 +18678,18 @@ def _render_single_owner_proportionally(
             child=child,
             plan=child_plan,
             safe_polygon=text_data.get("render_safe_polygon_page"),
+            raster_result=raster_result,
+        )
+        core_bbox = (
+            raster_result.glyph_core_envelope
+            if isinstance(raster_result, GlyphRasterResult)
+            else child.get("render_bbox")
         )
         diagnostic_quality = quality
         accepted_ok = bool(
             child.get("render_completed")
             and quality.get("status") == "ok"
-            and _owner_bbox_is_within(child.get("render_bbox"), child_plan.get("safe_text_box"))
+            and _owner_bbox_is_within(core_bbox, child_plan.get("safe_text_box"))
         )
         attempts.append(
             {
@@ -18819,6 +18838,9 @@ def _render_owner_text_block(
                     "layout_regions": [copy.deepcopy(region)],
                     "layout_region_ids": [str(region.get("layout_region_id") or "")],
                     "render_safe_polygon_page": copy.deepcopy(polygon),
+                    "paint_safe_polygon_page": copy.deepcopy(
+                        region.get("paint_safe_polygon_page") or polygon
+                    ),
                     "safe_text_box": list(bbox),
                     "layout_safe_bbox": list(bbox),
                     "layout_bbox": list(bbox),
@@ -18860,12 +18882,32 @@ def _render_owner_text_block(
                 height=img.height,
                 label=f"owner layout region {region.get('layout_region_id') or index}",
             )
+            paint_region_mask = _owner_canvas_polygon_mask(
+                region.get("paint_safe_polygon_page") or polygon,
+                width=img.width,
+                height=img.height,
+                label=(
+                    f"owner layout region {region.get('layout_region_id') or index} "
+                    "paint polygon"
+                ),
+            )
             quality = _evaluate_rendered_owner_candidate(
                 before_np=before_child,
                 after_image=trial_image,
                 child=child,
                 plan=child_plan,
                 safe_polygon=polygon,
+                raster_result=raster_result,
+            )
+            core_mask = (
+                np.where(np.asarray(raster_result.glyph_core_mask) > 0, 1, 0)
+                if isinstance(raster_result, GlyphRasterResult)
+                else changed_child.astype(np.uint8)
+            )
+            core_bbox = (
+                raster_result.glyph_core_envelope
+                if isinstance(raster_result, GlyphRasterResult)
+                else child.get("render_bbox")
             )
             child_is_valid = bool(
                 child.get("render_completed")
@@ -18873,8 +18915,9 @@ def _render_owner_text_block(
                 and int(child.get("font_size_final", 0) or 0) == candidate_size
                 and quality.get("status") == "ok"
                 and np.any(changed_child)
-                and not np.any(changed_child & (region_mask == 0))
-                and _owner_bbox_is_within(child.get("render_bbox"), bbox)
+                and not np.any(changed_child & (paint_region_mask == 0))
+                and not np.any((core_mask > 0) & (region_mask == 0))
+                and _owner_bbox_is_within(core_bbox, bbox)
             )
             if not child_is_valid:
                 candidate_reason = "render_outside_layout_region"
@@ -20958,7 +21001,8 @@ def _owner_layout_region_union_mask(
     union_mask = np.zeros(shape, dtype=np.uint8)
     for index, region in enumerate(regions):
         region_mask = _owner_canvas_polygon_mask(
-            region.get("safe_polygon_page"),
+            region.get("paint_safe_polygon_page")
+            or region.get("safe_polygon_page"),
             width=width,
             height=height,
             label=f"owner layout region {region.get('layout_region_id') or index}",
@@ -21056,8 +21100,15 @@ def _render_owner_band_image(
         != str(block.get("owner_render_geometry_sha256") or "")
     ):
         raise ValueError("owner renderer render geometry binding mismatch")
+    layout_polygon, layout_polygon_mask, _layout_polygon_sha256 = (
+        _owner_safe_polygon_evidence(
+            block.get("render_safe_polygon_page"),
+            shape=(height, width),
+        )
+    )
     polygon, polygon_mask, polygon_sha256 = _owner_safe_polygon_evidence(
-        block.get("render_safe_polygon_page"),
+        block.get("paint_safe_polygon_page")
+        or block.get("render_safe_polygon_page"),
         shape=(height, width),
     )
     layout_region_union_mask = _owner_layout_region_union_mask(
@@ -21099,18 +21150,21 @@ def _render_owner_band_image(
     if np.any(changed & (polygon_mask == 0)):
         render_completed = False
         fit_status = "render_outside_safe_polygon"
+    if np.any((glyph_core_mask > 0) & (layout_polygon_mask == 0)):
+        render_completed = False
+        fit_status = "glyph_core_outside_layout_chord"
     if np.any(changed & (layout_region_union_mask == 0)):
         render_completed = False
         fit_status = "render_outside_layout_regions"
 
-    safe_x = [point[0] for point in polygon]
-    safe_y = [point[1] for point in polygon]
+    safe_x = [point[0] for point in layout_polygon]
+    safe_y = [point[1] for point in layout_polygon]
     render_quality_contract = evaluate_owner_render_quality(
         render_bbox=list(glyph_bbox or []),
         safe_bbox=[min(safe_x), min(safe_y), max(safe_x), max(safe_y)],
-        safe_mask=np.where(polygon_mask > 0, 1, 0).astype(np.uint8),
-        glyph_core_mask=np.where(glyph_mask > 0, 1, 0).astype(np.uint8),
-        glyph_pixels=int(np.count_nonzero(glyph_mask)),
+        safe_mask=np.where(layout_polygon_mask > 0, 1, 0).astype(np.uint8),
+        glyph_core_mask=np.where(glyph_core_mask > 0, 1, 0).astype(np.uint8),
+        glyph_pixels=int(np.count_nonzero(glyph_core_mask)),
         font_size_final=int(block.get("font_size_final", 0) or 0),
         minimum_legible_font_px=int(block.get("minimum_legible_font_px", 0) or 0),
         source_ink_heights_px=tuple(block.get("source_ink_heights_px") or ()),

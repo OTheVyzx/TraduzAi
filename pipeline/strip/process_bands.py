@@ -10409,6 +10409,33 @@ def _owner_layout_regions(
             )
             for point in polygon
         )
+        paint_polygon = (
+            tuple(
+                (
+                    int(point[0]) - 1
+                    if int(point[0]) == int(region_bbox[2])
+                    else int(point[0]),
+                    int(point[1]) - 1
+                    if int(point[1]) == int(region_bbox[3])
+                    else int(point[1]),
+                )
+                for point in layout_container_polygon
+            )
+            if layout_container_polygon is not None
+            else (
+                (region_bbox[0], region_bbox[1]),
+                (region_bbox[2] - 1, region_bbox[1]),
+                (region_bbox[2] - 1, region_bbox[3] - 1),
+                (region_bbox[0], region_bbox[3] - 1),
+            )
+        )
+        raster_paint_polygon = tuple(
+            (
+                max(0, min(int(page_width) - 1, int(point[0]))),
+                max(0, min(int(page_height) - 1, int(point[1]))),
+            )
+            for point in paint_polygon
+        )
         regions.append(
             {
                 "layout_region_id": f"{owner.owner_id}__{component_id}",
@@ -10417,6 +10444,9 @@ def _owner_layout_regions(
                 "bbox_page": list(region_bbox),
                 "safe_bbox_page": list(region_safe_bbox),
                 "safe_polygon_page": [list(point) for point in raster_polygon],
+                "paint_safe_polygon_page": [
+                    list(point) for point in raster_paint_polygon
+                ],
                 "owner_render_geometry_sha256": (
                     owner_render_geometry.geometry_sha256
                     if owner_render_geometry is not None

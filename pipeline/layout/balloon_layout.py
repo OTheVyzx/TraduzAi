@@ -815,6 +815,17 @@ def _enrich_owner_page_layout(
             bbox=bbox,
             label=f"layout region {region_id} safe_polygon_page",
         )
+        raw_paint_polygon = raw_region.get("paint_safe_polygon_page")
+        paint_polygon = (
+            _owner_layout_polygon(
+                raw_paint_polygon,
+                bbox=[0, 0, width, height],
+                label=f"layout region {region_id} paint_safe_polygon_page",
+                require_within_bbox=True,
+            )
+            if raw_paint_polygon not in (None, [])
+            else None
+        )
         if any(point[0] > width or point[1] > height for point in polygon):
             raise ValueError(f"layout region {region_id} safe polygon escapes page bounds")
         raw_order = raw_region.get("order", index)
@@ -830,6 +841,8 @@ def _enrich_owner_page_layout(
                 "safe_polygon_page": polygon,
             }
         )
+        if paint_polygon is not None:
+            region["paint_safe_polygon_page"] = paint_polygon
         for key in ("source_font_bounds_px", "container_font_bounds_px"):
             bounds = _owner_font_bounds(region.get(key), label=f"{region_id}.{key}")
             if bounds is not None:
@@ -864,6 +877,17 @@ def _enrich_owner_page_layout(
                 bbox=bbox,
                 label=f"layout region {region_id} safe_polygon_page",
             )
+            raw_paint_polygon = raw_region.get("paint_safe_polygon_page")
+            paint_polygon = (
+                _owner_layout_polygon(
+                    raw_paint_polygon,
+                    bbox=[0, 0, width, height],
+                    label=f"layout region {region_id} paint_safe_polygon_page",
+                    require_within_bbox=True,
+                )
+                if raw_paint_polygon not in (None, [])
+                else None
+            )
             raw_order = raw_region.get("order", fallback_order)
             if not isinstance(raw_order, int) or isinstance(raw_order, bool):
                 raise ValueError(
@@ -879,6 +903,8 @@ def _enrich_owner_page_layout(
                     "safe_polygon_page": polygon,
                 }
             )
+            if paint_polygon is not None:
+                region["paint_safe_polygon_page"] = paint_polygon
             normalized_regions.append(region)
 
         if len(normalized_regions) == 1:
@@ -927,6 +953,40 @@ def _enrich_owner_page_layout(
 
         if any(point[0] >= width or point[1] >= height for point in safe_polygon):
             raise ValueError(f"owner {owner_id} safe polygon escapes page bounds")
+        explicit_paint_polygons = [
+            region.get("paint_safe_polygon_page")
+            for region in normalized_regions
+            if region.get("paint_safe_polygon_page") not in (None, [])
+        ]
+        if explicit_paint_polygons and len(explicit_paint_polygons) != len(normalized_regions):
+            raise ValueError(
+                f"owner {owner_id} has incomplete paint_safe_polygon_page coverage"
+            )
+        paint_safe_polygon = (
+            copy.deepcopy(explicit_paint_polygons[0])
+            if explicit_paint_polygons
+            else copy.deepcopy(safe_polygon)
+        )
+        if any(
+            polygon != paint_safe_polygon for polygon in explicit_paint_polygons[1:]
+        ):
+            raise ValueError(
+                f"connected owner {owner_id} has divergent paint_safe_polygon_page values"
+            )
+        for region in normalized_regions:
+            region["paint_safe_polygon_page"] = copy.deepcopy(paint_safe_polygon)
+        if any(
+            not _owner_polygon_is_raster_subset(
+                region["safe_polygon_page"],
+                paint_safe_polygon,
+                width=width,
+                height=height,
+            )
+            for region in normalized_regions
+        ):
+            raise ValueError(
+                f"owner {owner_id} layout chord escapes paint_safe_polygon_page"
+            )
         safe_x1 = min(point[0] for point in safe_polygon)
         safe_y1 = min(point[1] for point in safe_polygon)
         safe_x2 = max(point[0] for point in safe_polygon)
@@ -1018,6 +1078,7 @@ def _enrich_owner_page_layout(
                 ],
                 "layout_regions": copy.deepcopy(normalized_regions),
                 "render_safe_polygon_page": safe_polygon,
+                "paint_safe_polygon_page": paint_safe_polygon,
                 "render_safe_polygons_page": [
                     copy.deepcopy(region["safe_polygon_page"])
                     for region in normalized_regions

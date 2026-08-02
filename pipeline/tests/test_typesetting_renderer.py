@@ -427,6 +427,45 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertGreater(np.count_nonzero(result.rgba[:, :, 3]), 0)
         self.assertNotEqual(block.get("fit_status"), "style_attribute_not_materialized")
 
+    def test_v2_owner_effects_use_container_paint_safe_not_layout_chord(self):
+        canvas = np.zeros((120, 240, 3), dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
+        core = np.zeros((120, 240), dtype=np.uint8)
+        core[40:80, 40:200] = 255
+        block = {
+            "visual_profile_v2": {
+                "applied_style": {
+                    "cor": "#FFFFFF",
+                    "glow": True,
+                    "glow_cor": "#FFD34D",
+                    "glow_px": 3,
+                }
+            },
+            "render_safe_polygon_page": [[40, 20], [200, 20], [200, 100], [40, 100]],
+            "paint_safe_polygon_page": [[20, 0], [220, 0], [220, 119], [20, 119]],
+        }
+        plan = {
+            "safe_text_box": [40, 20, 200, 100],
+            "text_color": "#FFFFFF",
+            "glow": True,
+            "glow_cor": "#FFD34D",
+            "glow_px": 3,
+        }
+
+        result = renderer_mod._render_v2_owner_text_layer(
+            canvas,
+            block,
+            plan,
+            ["TESTE"],
+            font,
+            [(40, 35)],
+            core_override=core,
+        )
+
+        self.assertEqual(result.status, "applied")
+        self.assertIn("glow", result.observed_attributes)
+        self.assertGreater(np.count_nonzero(result.effect_mask[:, :40]), 0)
+
     def test_owner_renderer_rejects_underfilled_fit_inside_safe_box(self):
         canvas = np.full((220, 320, 3), 235, dtype=np.uint8)
         image = Image.fromarray(canvas.copy(), mode="RGB")

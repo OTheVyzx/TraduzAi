@@ -1049,6 +1049,9 @@ def test_edge_backed_dialogue_container_uses_central_safe_chord() -> None:
     assert region["owner_safe_polygon_page"] == [
         [39, 27], [170, 27], [170, 102], [39, 102]
     ]
+    assert region["paint_safe_polygon_page"] == [
+        [10, 10], [199, 10], [199, 119], [10, 119]
+    ]
 
 
 def test_same_body_lines_share_font_size_and_safe_polygon() -> None:
