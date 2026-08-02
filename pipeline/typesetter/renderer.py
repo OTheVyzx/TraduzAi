@@ -19547,6 +19547,7 @@ def _aggregate_child_glyph_raster_results(blocks: list[dict]) -> GlyphRasterResu
         observed_attributes=applied,
         abstained_attributes=abstained,
         metrics={"segment_count": len(typed_results)},
+        unavailable_attributes=copy.deepcopy(abstained),
     )
 
 

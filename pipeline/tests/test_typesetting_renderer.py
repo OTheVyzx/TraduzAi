@@ -859,6 +859,10 @@ class TypesettingRendererTests(unittest.TestCase):
 
         region_0 = child("region_0", 0, (2, 2, 10, 8))
         region_1 = child("region_1", 1, (14, 2, 22, 8))
+        for region in (region_0, region_1):
+            region["_style_v2_raster_result"].abstained_attributes["glow"] = (
+                "effect_envelope_outside_safe"
+            )
 
         forward = renderer_mod._aggregate_split_render_blocks(
             [region_0, region_1]
@@ -878,6 +882,10 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(
             forward["_style_v2_raster_result"].applied_attributes,
             {"fill": "#f4f4f4"},
+        )
+        self.assertEqual(
+            forward["_style_v2_raster_result"].unavailable_attributes,
+            {"glow": "effect_envelope_outside_safe"},
         )
 
     def test_curved_owner_uses_shared_raster_and_reports_glyph_run(self):
