@@ -1444,6 +1444,16 @@ def _seal_owner_materialization_plan(
     kinds: dict[str, str] = {}
     reasons: dict[str, str] = {}
     final_font_size = int(text_data.get("font_size_final") or font.size)
+    def _effect_width_px(value: Mapping[str, Any], layout_key: str) -> int:
+        explicit = int(layout_plan.get(layout_key) or 0)
+        if explicit > 0:
+            return explicit
+        source_px = float(value.get("width_px") or 0.0)
+        if source_px > 0:
+            return max(1, int(round(source_px)))
+        source_xh = float(value.get("width_xh") or 0.0)
+        return max(0, int(round(source_xh * x_height)))
+
     for name, value in approved.items():
         if name == "fill" and "gradient" in approved:
             kinds[name] = "superseded"
@@ -1479,12 +1489,12 @@ def _seal_owner_materialization_plan(
         elif name == "stroke" and isinstance(value, Mapping):
             targets[name] = {
                 "color": str(layout_plan.get("outline_color") or value.get("color") or ""),
-                "width_px": int(layout_plan.get("outline_px") or 0),
+                "width_px": _effect_width_px(value, "outline_px"),
             }
         elif name == "glow" and isinstance(value, Mapping):
             targets[name] = {
                 "color": str(layout_plan.get("glow_cor") or value.get("color") or ""),
-                "width_px": int(layout_plan.get("glow_px") or 0),
+                "width_px": _effect_width_px(value, "glow_px"),
             }
         elif name == "shadow" and isinstance(value, Mapping):
             executed_offset = list(
@@ -1694,6 +1704,17 @@ def _render_v2_owner_text_layer(
     gradient = plan.get("cor_gradiente")
     if isinstance(gradient, (list, tuple)) and len(gradient) >= 2:
         raster_style["gradient"] = list(gradient[:2])
+    sealed_plan = text_data.get("_sealed_materialization_plan_v1")
+    if isinstance(sealed_plan, Mapping):
+        materialization = materialization_plan_from_dict(sealed_plan)
+        for name, attribute_plan in materialization.attribute_plans.items():
+            if (
+                attribute_plan.domain == "raster"
+                and attribute_plan.resolution_kind in {"exact", "policy_adjusted", "derived"}
+            ):
+                raster_style[name] = copy.deepcopy(
+                    attribute_plan.to_dict()["target_value"]
+                )
     result = rasterize_v2_glyph_layers(
         core,
         safe,

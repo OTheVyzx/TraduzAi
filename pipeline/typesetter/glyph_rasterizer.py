@@ -661,5 +661,5 @@ def rasterize_v2_glyph_layers(
         },
         evidence,
         evidence_hashes,
-        unavailable,
+        {**unavailable, **abstained},
     )

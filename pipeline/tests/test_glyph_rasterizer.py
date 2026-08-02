@@ -150,6 +150,7 @@ def test_unsafe_effect_abstains_without_reflow_or_payload_change() -> None:
 
     assert with_unsafe_glow.status == "fallback"
     assert with_unsafe_glow.abstained_attributes["glow"] == "effect_envelope_outside_safe"
+    assert with_unsafe_glow.unavailable_attributes["glow"] == "effect_envelope_outside_safe"
     assert np.array_equal(with_unsafe_glow.glyph_core_mask, baseline.glyph_core_mask)
     assert payload == before
 

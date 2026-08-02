@@ -466,6 +466,63 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertIn("glow", result.observed_attributes)
         self.assertGreater(np.count_nonzero(result.effect_mask[:, :40]), 0)
 
+    def test_v2_owner_raster_executes_approved_intent_when_legacy_plan_omits_glow(self):
+        canvas = np.zeros((120, 240, 3), dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
+        profile_sha = "a" * 64
+        intent = build_resolved_style_intent(
+            owner_id="owner_intent_glow",
+            page_id="page_001",
+            visual_profile_sha256=profile_sha,
+            decision_sha256="b" * 64,
+            group_resolution_sha256="c" * 64,
+            approved={"glow": {"color": "#FFD34D", "width_px": 5}},
+            approved_abstentions={},
+        )
+        block = {
+            "owner_id": "owner_intent_glow",
+            "page_id": "page_001",
+            "visual_profile_sha256": profile_sha,
+            "visual_profile_v2": {
+                "visual_profile_sha256": profile_sha,
+                "applied_style": {"cor": "#FFFFFF", "glow": False},
+            },
+            "style_resolved_intent_v1": intent.to_dict(),
+            "font_size_final": 28,
+            "render_layout_contract": {
+                "font_size": 28,
+                "lines": ["TESTE"],
+                "positions": [[40, 35]],
+                "line_widths": [80],
+                "line_height": 32,
+                "block_bbox": [40, 35, 120, 67],
+                "safe_text_box": [20, 10, 220, 110],
+            },
+            "render_safe_polygon_page": [[30, 20], [210, 20], [210, 100], [30, 100]],
+            "paint_safe_polygon_page": [[10, 0], [230, 0], [230, 119], [10, 119]],
+        }
+        layout_plan = {
+            "safe_text_box": [20, 10, 220, 110],
+            "text_color": "#FFFFFF",
+            "alignment": "center",
+        }
+
+        with patch(
+            "typesetter.renderer.validate_owner_visual_profile",
+            return_value={
+                "visual_profile_sha256": profile_sha,
+                "applied_style": block["visual_profile_v2"]["applied_style"],
+            },
+        ):
+            result = renderer_mod._render_v2_owner_text_layer(
+                canvas, block, layout_plan, ["TESTE"], font, [(40, 35)]
+            )
+
+        sealed_glow = block["_sealed_materialization_plan_v1"]["attribute_plans"]["glow"]
+        self.assertEqual(sealed_glow["target_value"], {"color": "#FFD34D", "width_px": 5})
+        self.assertIn("glow", result.observed_attributes)
+        self.assertEqual(result.observed_attributes["glow"]["width_px"], 5)
+
     def test_owner_renderer_rejects_underfilled_fit_inside_safe_box(self):
         canvas = np.full((220, 320, 3), 235, dtype=np.uint8)
         image = Image.fromarray(canvas.copy(), mode="RGB")
