@@ -645,6 +645,72 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(block["fit_status"], "ok")
         self.assertEqual(result.status, "applied")
 
+    def test_owner_renderer_caps_proportional_candidate_attempts(self):
+        canvas = np.full((120, 220, 3), 20, dtype=np.uint8)
+        image = Image.fromarray(canvas.copy(), mode="RGB")
+        block = {
+            "owner_id": "owner_many_sizes",
+            "translated": "4,6 BILHOES......",
+            "translated_payload": "4,6 BILHOES......",
+            "render_safe_polygon_page": [[20, 20], [200, 20], [200, 100], [20, 100]],
+            "paint_safe_polygon_page": [[10, 10], [210, 10], [210, 110], [10, 110]],
+            "safe_text_box": [20, 20, 200, 100],
+            "bbox": [20, 20, 200, 100],
+            "layout_regions": [],
+            "estilo": {"fonte": "ComicNeue-Bold.ttf"},
+            "_owner_render_mode": True,
+        }
+        attempted_sizes = []
+
+        def plan(candidate):
+            bounds = candidate.get("source_font_bounds_px") or [6, 96]
+            return {
+                "font_size_bounds_px": list(bounds),
+                "safe_text_box": [20, 20, 200, 100],
+                "target_bbox": [20, 20, 200, 100],
+                "max_width": 180,
+                "max_height": 80,
+                "font_name": "ComicNeue-Bold.ttf",
+                "line_spacing_ratio": 0.2,
+                "layout_profile": "colored_status_panel",
+                "trusted_container": True,
+            }
+
+        def render_candidate(_trial_image, child, _plan, **_kwargs):
+            size = int(child["source_font_bounds_px"][0])
+            attempted_sizes.append(size)
+            child.update(
+                {
+                    "fit_status": "ok",
+                    "render_bbox": [18, 18, 202, 102],
+                    "font_size_final": size,
+                    "minimum_legible_font_px": 6,
+                }
+            )
+            return None
+
+        with (
+            patch("typesetter.renderer.plan_text_layout", side_effect=plan),
+            patch("typesetter.renderer._owner_candidate_font_sizes", return_value=range(96, 5, -1)),
+            patch("typesetter.renderer._fits_in_box", return_value=True),
+            patch("typesetter.renderer._render_single_text_block", side_effect=render_candidate),
+            patch(
+                "typesetter.renderer._evaluate_rendered_owner_candidate",
+                return_value={"status": "core_pixels_outside_safe_polygon", "font_size_final": 0},
+            ),
+            patch("typesetter.renderer._minimum_legible_font_px", return_value=6),
+        ):
+            result = renderer_mod._render_single_owner_proportionally(
+                image, block, pre_render_np=None
+            )
+
+        self.assertIsNone(result)
+        self.assertLessEqual(len(attempted_sizes), 16)
+        self.assertIn(96, attempted_sizes)
+        self.assertIn(6, attempted_sizes)
+        self.assertEqual(block["fit_status"], "below_proportional_legibility")
+        self.assertIn("owner_render_review_required", block["qa_flags"])
+
     def test_owner_renderer_applies_functional_contrast_on_dark_region(self):
         canvas = np.full((100, 180, 3), 8, dtype=np.uint8)
         image = Image.fromarray(canvas.copy(), mode="RGB")

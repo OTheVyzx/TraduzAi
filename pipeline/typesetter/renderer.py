@@ -18,7 +18,7 @@ from hashlib import sha256
 from functools import lru_cache
 from itertools import product
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import cv2
 import numpy as np
@@ -18557,6 +18557,9 @@ def _owner_quality_score(quality: dict) -> tuple[float, float, int]:
     return ratio_distance, -occupancy, -int(quality.get("font_size_final", 0) or 0)
 
 
+_MAX_OWNER_PROPORTIONAL_RENDER_ATTEMPTS = 16
+
+
 def _owner_candidate_font_sizes(text_data: dict, plan: dict) -> range:
     bounds = _owner_font_interval(
         plan.get("font_size_bounds_px"),
@@ -18567,6 +18570,18 @@ def _owner_candidate_font_sizes(text_data: dict, plan: dict) -> range:
     lower, upper = bounds
     minimum = max(lower, _minimum_legible_font_px(text_data, plan))
     return range(min(96, upper), minimum - 1, -1)
+
+
+def _sample_owner_candidate_font_sizes(candidate_sizes: Iterable[int]) -> list[int]:
+    sizes = [int(size) for size in candidate_sizes]
+    if len(sizes) <= _MAX_OWNER_PROPORTIONAL_RENDER_ATTEMPTS:
+        return sizes
+    last_index = len(sizes) - 1
+    sampled_indices = {
+        int(round(index * last_index / float(_MAX_OWNER_PROPORTIONAL_RENDER_ATTEMPTS - 1)))
+        for index in range(_MAX_OWNER_PROPORTIONAL_RENDER_ATTEMPTS)
+    }
+    return [sizes[index] for index in sorted(sampled_indices)]
 
 
 def _evaluate_rendered_owner_candidate(
@@ -18657,7 +18672,16 @@ def _render_single_owner_proportionally(
     pre_render_np: np.ndarray | None,
 ) -> GlyphRasterResult | None:
     owner_plan = plan_text_layout(text_data)
-    candidate_sizes = _owner_candidate_font_sizes(text_data, owner_plan)
+    raw_candidate_sizes = list(_owner_candidate_font_sizes(text_data, owner_plan))
+    candidate_sizes = _sample_owner_candidate_font_sizes(raw_candidate_sizes)
+    if len(candidate_sizes) < len(raw_candidate_sizes):
+        text_data.setdefault("_render_debug", {})[
+            "owner_proportional_candidate_sampling"
+        ] = {
+            "raw_count": len(raw_candidate_sizes),
+            "sampled_count": len(candidate_sizes),
+            "sampled_sizes": list(candidate_sizes),
+        }
     before_np = np.asarray(img.convert("RGB"), dtype=np.uint8).copy()
     accepted: list[
         tuple[
