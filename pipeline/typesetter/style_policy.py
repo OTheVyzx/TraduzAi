@@ -26,7 +26,6 @@ CANONICAL_AUTO_FONT = "ComicNeue-Bold.ttf"
 SOURCE_STYLE_CONFIDENCE_THRESHOLD = 0.70
 STYLE_V2_FUNCTIONAL_FIELDS = frozenset({"alignment", "container", "font_size_px"})
 SOURCE_STYLE_SAFE_FIELDS = {
-    "fonte",
     "cor",
     "cor_gradiente",
     "contorno",
@@ -37,15 +36,10 @@ SOURCE_STYLE_SAFE_FIELDS = {
     "sombra",
     "sombra_cor",
     "sombra_offset",
-    "curva",
-    "curva_direcao",
-    "curva_intensidade",
-    "rotacao",
-    "tracking_xh",
-    "slant_tangent",
-    "width_scale",
-    "scale_y",
 }
+SOURCE_STYLE_PAINT_ATTRIBUTES_V2 = frozenset(
+    {"fill", "stroke", "multistroke", "shadow", "glow", "gradient"}
+)
 OWNER_STYLE_FORBIDDEN_FIELDS = frozenset(
     {
         "id",
@@ -194,6 +188,8 @@ def evaluate_style_attribute(
 
     if name in STYLE_V2_FUNCTIONAL_FIELDS:
         return False, None, "functional_layout_owned"
+    if name not in SOURCE_STYLE_PAINT_ATTRIBUTES_V2:
+        return False, None, "glyph_shape_is_auto_owned"
     if evidence.value in (None, "", "unknown"):
         return False, None, evidence.abstention_reason or "attribute_not_observed"
     if evidence.abstention_reason:

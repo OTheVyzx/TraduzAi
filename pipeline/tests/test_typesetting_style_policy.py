@@ -52,7 +52,7 @@ def test_auto_style_keeps_conservative_default_without_detected_style():
     assert style["glow"] is False
 
 
-def test_auto_style_preserves_confident_detected_source_style():
+def test_auto_style_preserves_confident_detected_source_paint_only():
     style = normalize_auto_typesetting_style(
         {
             "fonte": "KOMIKAX_.ttf",
@@ -76,7 +76,7 @@ def test_auto_style_preserves_confident_detected_source_style():
         (240, 240, 240),
     )
 
-    assert style["fonte"] == "KOMIKAX_.ttf"
+    assert style["fonte"] == CANONICAL_AUTO_FONT
     assert style["cor"] == "#FFFFFF"
     assert style["cor_gradiente"] == ["#0D172E", "#07080E"]
     assert style["contorno"] == "#000000"
@@ -87,10 +87,10 @@ def test_auto_style_preserves_confident_detected_source_style():
     assert style["sombra"] is True
     assert style["sombra_cor"] == "#333333"
     assert style["sombra_offset"] == [2, 3]
-    assert style["curva"] is True
-    assert style["curva_direcao"] == "arc_up"
-    assert style["curva_intensidade"] == 0.35
-    assert style["rotacao"] == -8
+    assert style["curva"] is False
+    assert style["curva_direcao"] == ""
+    assert style["curva_intensidade"] == 0.0
+    assert style["rotacao"] == 0
 
 
 def test_auto_style_uses_normal_font_when_detected_source_has_no_gradient():
@@ -262,7 +262,9 @@ def test_normalized_visual_style_cannot_carry_owner_semantics():
     )
 
     assert set(normalized).isdisjoint(reserved)
-    assert normalized["fonte"] == "KOMIKAX_.ttf"
+    assert normalized["fonte"] == CANONICAL_AUTO_FONT
+    assert normalized["cor"] == "#FFFFFF"
+    assert normalized["cor_gradiente"] == ["#FFFFFF", "#78D7FF"]
 
 
 def test_normalized_visual_style_is_whitelisted_and_deep_copied():

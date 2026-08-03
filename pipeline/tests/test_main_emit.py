@@ -4652,7 +4652,9 @@ class MainEmitTests(unittest.TestCase):
 
         self.assertEqual(crop_shapes, [(90, 250, 3)])
         self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["estilo"]["fonte"], "KOMIKAX_.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["cor"], "#010100")
+        self.assertEqual(layer["estilo"]["cor_gradiente"], ["#010100", "#404040"])
         self.assertEqual(layer["estilo"]["contorno"], "#FFFFFE")
 
     def test_build_text_layer_skips_source_style_for_low_confidence_promoted_sfx_detector(self) -> None:
@@ -4857,9 +4859,10 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["style_origin"], "source_detected")
         self.assertEqual(layer["style_confidence"], 0.91)
         self.assertEqual(layer["style_evidence"], evidence)
-        self.assertTrue(layer["estilo"]["curva"])
-        self.assertEqual(layer["estilo"]["curva_direcao"], "arc_up")
-        self.assertEqual(layer["estilo"]["curva_intensidade"], 0.36)
+        self.assertFalse(layer["estilo"]["curva"])
+        self.assertEqual(layer["estilo"]["curva_direcao"], "")
+        self.assertEqual(layer["estilo"]["curva_intensidade"], 0.0)
+        self.assertEqual(layer["estilo"]["cor_gradiente"], ["#111111", "#666666"])
 
     def test_build_text_layer_keeps_low_confidence_style_evidence_but_uses_auto_style(self) -> None:
         evidence = {

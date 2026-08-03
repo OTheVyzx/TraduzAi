@@ -140,9 +140,36 @@ def test_each_attribute_requires_its_own_confidence():
         ),
     )
 
-    assert decision.applied_attributes["font_name"] == "ComicNeue-Bold.ttf"
+    assert "font_name" not in decision.applied_attributes
+    assert decision.abstained_attributes["font_name"] == "glyph_shape_is_auto_owned"
     assert "stroke" not in decision.applied_attributes
     assert decision.abstained_attributes["stroke"] == "attribute_confidence_below_threshold"
+
+
+def test_v2_source_style_copy_never_applies_glyph_shape_attributes():
+    decision = decide_style_copy_v2(
+        _candidate(),
+        _evidence(
+            font_name="KOMIKAX_.ttf",
+            font_confidence=0.99,
+            text_color_confidence=0.99,
+            stroke_confidence=0.99,
+            gradient=True,
+            gradient_colors=["#FFFFFF", "#78D7FF"],
+            gradient_confidence=0.99,
+        ),
+    )
+
+    assert decision.status == "applied"
+    assert decision.applied_attributes["fill"] == "#F4F4F4"
+    assert decision.applied_attributes["stroke"]["color"] == "#161616"
+    assert decision.applied_attributes["gradient"] == ["#FFFFFF", "#78D7FF"]
+    assert "font_name" not in decision.applied_attributes
+    assert "font_weight" not in decision.applied_attributes
+    assert "font_width" not in decision.applied_attributes
+    assert "slant_tangent" not in decision.applied_attributes
+    assert "width_scale" not in decision.applied_attributes
+    assert "scale_y" not in decision.applied_attributes
 
 
 def test_low_confidence_evidence_is_preserved_but_not_applied():
