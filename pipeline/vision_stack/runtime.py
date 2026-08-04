@@ -27,6 +27,9 @@ import numpy as np
 from PIL import Image
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
+from ownership.hash_contract import canonical_page_sha256
+from ownership.ocr_contract import OCRRequest
+
 if TYPE_CHECKING:
     # Hints para o IDE - Ignorar avisos de resolução pois o sys.path é dinâmico
     from ocr.postprocess import ( # type: ignore
@@ -3760,20 +3763,9 @@ def _extend_raw_ocr_observation_records(page_result: dict, records) -> dict:
     return page_result
 
 
-def _snapshot_ocr_engine_observations(ocr) -> list[dict]:
-    """Read the current request-scoped OCR sink without depending on one backend."""
+def _legacy_ocr_observations_unavailable(_ocr) -> list[dict]:
+    """Legacy calls cannot expose singleton state as request-scoped evidence."""
 
-    getter = getattr(ocr, "get_last_observation_records", None)
-    if callable(getter):
-        try:
-            value = getter()
-            return [copy.deepcopy(item) for item in list(value or []) if isinstance(item, dict)]
-        except Exception:
-            return []
-    for name in ("_last_observation_records", "_last_ocr_observation_records"):
-        value = getattr(ocr, name, None)
-        if isinstance(value, list):
-            return [copy.deepcopy(item) for item in value if isinstance(item, dict)]
     return []
 
 
@@ -3788,6 +3780,74 @@ def _provider_observation_records(records, provider: str, attempt_prefix: str) -
         record.setdefault("provider_record_id", f"{attempt_prefix}-{index + 1:03d}")
         normalized.append(record)
     return normalized
+
+
+def _atomic_ocr_record_to_runtime_dict(record) -> dict:
+    bbox = tuple(getattr(record, "bbox_page", ()) or ())
+    polygon = tuple(getattr(record, "polygon_page", ()) or ())
+    return {
+        "provider": str(getattr(record, "source", "atomic_ocr") or "atomic_ocr"),
+        "attempt_id": str(getattr(record, "attempt_id", "") or ""),
+        "text": str(getattr(record, "text", "") or ""),
+        "confidence": float(getattr(record, "confidence", 0.0) or 0.0),
+        "bbox": [int(value) for value in bbox],
+        "source_bbox": [int(value) for value in bbox],
+        "text_pixel_bbox": [int(value) for value in bbox],
+        "line_polygons": [
+            [[int(point[0]), int(point[1])] for point in polygon]
+        ] if polygon else [],
+        "accepted": bool(str(getattr(record, "text", "") or "").strip()),
+        "rejection_reason": None,
+        "request_identity": list(getattr(record, "request_identity", ()) or ()),
+        "input_pixel_sha256": str(getattr(record, "input_pixel_sha256", "") or ""),
+    }
+
+
+def _atomic_ocr_block_to_runtime_dict(block) -> dict:
+    bbox = tuple(getattr(block, "bbox_page", ()) or ())
+    polygon = tuple(getattr(block, "polygon_page", ()) or ())
+    return {
+        "text": str(getattr(block, "text", "") or ""),
+        "confidence": float(getattr(block, "confidence", 0.0) or 0.0),
+        "source_bbox": [int(value) for value in bbox],
+        "bbox": [int(value) for value in bbox],
+        "text_pixel_bbox": [int(value) for value in bbox],
+        "line_polygons": [
+            [[int(point[0]), int(point[1])] for point in polygon]
+        ] if polygon else [],
+    }
+
+
+def _runtime_ocr_request(
+    image_rgb: np.ndarray,
+    *,
+    page_id: str,
+    provider_family: str,
+    invocation_kind: str,
+    run_id: str = "",
+    origin_execution_id: str = "",
+) -> OCRRequest:
+    root_pixel_sha256 = canonical_page_sha256(image_rgb)
+    normalized_page_id = str(page_id or f"page-{root_pixel_sha256[:20]}")
+    return OCRRequest(
+        run_id=str(run_id or f"runtime-{root_pixel_sha256[:20]}"),
+        origin_execution_id=str(origin_execution_id or f"runtime-execution-{normalized_page_id}"),
+        page_id=normalized_page_id,
+        page_source_sha256=root_pixel_sha256,
+        root_input_pixel_sha256=root_pixel_sha256,
+        invocation_id=f"{normalized_page_id}:{invocation_kind}",
+        provider_family=str(provider_family or "vision"),
+    )
+
+
+def _supports_atomic_ocr_evidence(engine: object) -> bool:
+    """Whether the concrete engine type implements the atomic OCR API.
+
+    Checking the type prevents an unconstrained ``MagicMock`` from being
+    mistaken for an atomic engine just because it invents arbitrary attributes.
+    """
+
+    return callable(getattr(type(engine), "recognize_page_with_evidence", None))
 
 
 def _normalize_engine_observation_records_to_tile(records, blocks: list | None = None) -> list[dict]:
@@ -10236,6 +10296,39 @@ def _apply_ui_panel_text_cleanup_after_inpaint(cleaned_rgb: np.ndarray, ocr_data
         logger.debug("UI panel text cleanup unavailable after inpaint: %s", exc)
         return cleaned_rgb
     filled, fill_count = _apply_dark_panel_text_fills(cleaned_rgb, ocr_data)
+    if not fill_count:
+        filled = cleaned_rgb.copy()
+        height, width = filled.shape[:2]
+        for text in ocr_data.get("texts") or []:
+            if not isinstance(text, dict):
+                continue
+            bbox = _coerce_bbox(text.get("text_pixel_bbox") or text.get("bbox"))
+            if bbox is None:
+                continue
+            x1, y1, x2, y2 = bbox
+            x1, x2 = max(0, x1), min(width, x2)
+            y1, y2 = max(0, y1), min(height, y2)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            pad_x = max(4, min(12, (x2 - x1) // 12))
+            pad_y = max(4, min(10, y2 - y1))
+            sx1, sx2 = max(0, x1 - pad_x), min(width, x2 + pad_x)
+            sy1, sy2 = max(0, y1 - pad_y), min(height, y2 + pad_y)
+            ring_mask = np.ones((sy2 - sy1, sx2 - sx1), dtype=bool)
+            ring_mask[y1 - sy1:y2 - sy1, x1 - sx1:x2 - sx1] = False
+            ring_pixels = filled[sy1:sy2, sx1:sx2][ring_mask]
+            if ring_pixels.shape[0] < 24:
+                continue
+            background = np.median(ring_pixels, axis=0)
+            deviation = np.max(np.abs(ring_pixels.astype(np.float32) - background), axis=1)
+            if float(np.percentile(deviation, 90)) > 10.0:
+                continue
+            interior = filled[y1:y2, x1:x2].astype(np.float32)
+            contrast = np.max(np.abs(interior - background), axis=2)
+            if float(np.mean(contrast >= 24.0)) < 0.08:
+                continue
+            filled[y1:y2, x1:x2] = np.rint(background).astype(np.uint8)
+            fill_count += 1
     if fill_count:
         ocr_data["_inpaint_used_ui_panel_text_cleanup"] = True
         ocr_data["_inpaint_ui_panel_text_cleanup_count"] = int(fill_count)
@@ -13688,7 +13781,30 @@ def _run_negative_evidence_pass(
             for block in (_serialize_negative_evidence_block(item) for item in list(negative_blocks or []))
             if block is not None
         ]
-        if negative_blocks and backend_name == "paddleocr" and hasattr(ocr, "recognize_blocks_from_page"):
+        engine_records: list[dict] = []
+        atomic_negative = _supports_atomic_ocr_evidence(ocr)
+        if atomic_negative:
+            request = _runtime_ocr_request(
+                negative_rgb,
+                page_id=f"negative-{canonical_page_sha256(image_rgb)[:20]}",
+                provider_family=str(backend_name or "vision"),
+                invocation_kind="negative-evidence",
+            )
+            atomic_result = ocr.recognize_page_with_evidence(
+                negative_rgb,
+                list(negative_blocks or []),
+                request=request,
+                allow_sparse_mapping=_has_uied_layout_candidate_block(list(negative_blocks or [])),
+            )
+            negative_texts = [
+                _atomic_ocr_block_to_runtime_dict(block)
+                for block in tuple(atomic_result.blocks)
+            ]
+            engine_records = [
+                _atomic_ocr_record_to_runtime_dict(record)
+                for record in tuple(atomic_result.observations)
+            ]
+        elif negative_blocks and backend_name == "paddleocr" and hasattr(ocr, "recognize_blocks_from_page"):
             try:
                 negative_texts = ocr.recognize_blocks_from_page(
                     negative_rgb,
@@ -13709,15 +13825,16 @@ def _run_negative_evidence_pass(
                     crop = _crop_negative_evidence_block(negative_rgb, block)
                 crops.append(crop)
             negative_texts = ocr.recognize_batch(crops) if crops and hasattr(ocr, "recognize_batch") else []
-        engine_records = _normalize_engine_observation_records_to_tile(
-            _snapshot_ocr_engine_observations(ocr), list(negative_blocks or [])
-        )
-        payload["_ocr_observation_records"] = engine_records + _raw_ocr_observation_records(
-            list(negative_blocks or []),
-            list(negative_texts or []),
-            provider="negative_detect_ocr",
-            attempt_prefix="negative-detect-ocr",
-        )
+        payload["_ocr_observation_records"] = engine_records
+        if not atomic_negative:
+            payload["_ocr_observation_records"].extend(
+                _raw_ocr_observation_records(
+                    list(negative_blocks or []),
+                    list(negative_texts or []),
+                    provider="negative_detect_ocr",
+                    attempt_prefix="negative-detect-ocr",
+                )
+            )
         payload["texts"] = _serialize_negative_evidence_texts(list(negative_texts or []))
         payload["block_count"] = len(payload["blocks"])
         payload["text_count"] = len(payload["texts"])
@@ -13780,7 +13897,34 @@ def _run_detect_ocr_on_image(
         "no",
         "off",
     } and detector_backend != "anime-text-yolo"
-    if blocks and backend_name == "paddleocr" and enable_paddle_full_page and hasattr(ocr, "recognize_blocks_from_page"):
+    primary_engine_observations: list[dict] = []
+    primary_full_page_lines: list[dict] = []
+    if _supports_atomic_ocr_evidence(ocr):
+        request = _runtime_ocr_request(
+            image_rgb,
+            page_id=str(image_label or "runtime-page"),
+            provider_family=str(backend_name or "vision"),
+            invocation_kind="detect-primary",
+        )
+        atomic_result = ocr.recognize_page_with_evidence(
+            image_rgb,
+            blocks,
+            request=request,
+            allow_sparse_mapping=_has_uied_layout_candidate_block(blocks),
+        )
+        texts = [
+            _atomic_ocr_block_to_runtime_dict(block)
+            for block in tuple(atomic_result.blocks)
+        ]
+        primary_engine_observations = [
+            _atomic_ocr_record_to_runtime_dict(record)
+            for record in tuple(atomic_result.observations)
+        ]
+        primary_full_page_lines = [
+            _atomic_ocr_record_to_runtime_dict(record)
+            for record in tuple(atomic_result.full_page_lines)
+        ]
+    elif blocks and backend_name == "paddleocr" and enable_paddle_full_page and hasattr(ocr, "recognize_blocks_from_page"):
         try:
             texts = ocr.recognize_blocks_from_page(
                 image_rgb,
@@ -13792,14 +13936,6 @@ def _run_detect_ocr_on_image(
     else:
         crops = [detector.crop(image_rgb, block) for block in blocks]
         texts = ocr.recognize_batch(crops) if crops else []
-    primary_engine_observations = _normalize_engine_observation_records_to_tile(
-        _snapshot_ocr_engine_observations(ocr), blocks
-    )
-    primary_full_page_lines = _provider_observation_records(
-        list(getattr(ocr, "_last_full_page_line_records", []) or []),
-        "paddle_full_page_raw_line",
-        "full-page-line",
-    )
     page_result = build_page_result(
         image_path=image_label,
         image_rgb=image_rgb,
@@ -13820,7 +13956,7 @@ def _run_detect_ocr_on_image(
     page_result = _recover_missing_visual_card_ocr_lines(
         page_result,
         image_rgb,
-        list(getattr(ocr, "_last_full_page_line_records", []) or []),
+        [],
         ocr=ocr,
     )
     if pre_ocr_sfx_candidates:
@@ -14241,7 +14377,7 @@ def _recover_missing_visual_card_ocr_lines(
                 crop = image_rgb[y1:y2, x1:x2]
                 retried = list(ocr.recognize_batch([crop]) or [])
                 retry_engine_records = _normalize_engine_observation_records_to_tile(
-                    _snapshot_ocr_engine_observations(ocr),
+                    _legacy_ocr_observations_unavailable(ocr),
                     [{"bbox": [x1, y1, x2, y2]}],
                 )
                 _extend_raw_ocr_observation_records(updated, retry_engine_records)
@@ -14421,7 +14557,7 @@ def _apply_adaptive_cjk_reocr(
     try:
         expanded_texts = ocr.recognize_batch(crops)
         expanded_engine_records = _normalize_engine_observation_records_to_tile(
-            _snapshot_ocr_engine_observations(ocr), expanded_blocks
+            _legacy_ocr_observations_unavailable(ocr), expanded_blocks
         )
     except Exception as exc:
         route_history.append(
@@ -14885,7 +15021,7 @@ def _run_rotated_text_recovery_pass(
     _emit_stage_progress(progress_callback, "recover_rotated_text", 0.69, "Recuperando texto rotacionado")
     records = ocr.recognize_rotated_full_page_lines(image_rgb)
     rotated_engine_records = _normalize_engine_observation_records_to_tile(
-        _snapshot_ocr_engine_observations(ocr)
+        _legacy_ocr_observations_unavailable(ocr)
     )
     _extend_raw_ocr_observation_records(page_result, rotated_engine_records)
     if not records:
@@ -15506,6 +15642,11 @@ def run_ocr_stage(
 
     backend_name = getattr(ocr, "_backend", getattr(ocr, "model_name", "vision"))
 
+    atomic_result = None
+    primary_engine_observations: list[dict] = []
+    primary_full_page_lines: list[dict] = []
+    atomic_ocr_stats: dict = {}
+
     paddle_full_page_flag = os.getenv("TRADUZAI_PADDLE_FULL_PAGE", "1")
     enable_paddle_full_page = str(paddle_full_page_flag).strip().lower() not in {
         "0",
@@ -15514,7 +15655,45 @@ def run_ocr_stage(
         "off",
     }
 
-    if (
+    if _supports_atomic_ocr_evidence(ocr):
+        page_id = str(
+            page_dict.get("_owner_page_id")
+            or page_dict.get("page_id")
+            or _band_image_label()
+        )
+        request = _runtime_ocr_request(
+            image_rgb,
+            page_id=page_id,
+            provider_family=str(backend_name or "vision"),
+            invocation_kind="primary",
+            run_id=str(
+            page_dict.get("_owner_run_id")
+            or page_dict.get("run_id")
+            or ""
+            ),
+            origin_execution_id=str(
+            page_dict.get("_owner_execution_id")
+            or page_dict.get("execution_id")
+            or ""
+            ),
+        )
+        atomic_result = ocr.recognize_page_with_evidence(
+            image_rgb,
+            blocks,
+            request=request,
+            allow_sparse_mapping=not bool(page_dict.get("_disable_sparse_ocr_mapping")),
+            crop_fallback_max=_strip_paddle_crop_fallback_max(),
+            sparse_crop_fallback_max=_strip_paddle_sparse_crop_fallback_max(),
+        )
+        texts = [_atomic_ocr_block_to_runtime_dict(block) for block in tuple(atomic_result.blocks)]
+        primary_engine_observations = [
+            _atomic_ocr_record_to_runtime_dict(record) for record in tuple(atomic_result.observations)
+        ]
+        primary_full_page_lines = [
+            _atomic_ocr_record_to_runtime_dict(record) for record in tuple(atomic_result.full_page_lines)
+        ]
+        atomic_ocr_stats = dict(getattr(atomic_result.diagnostics, "extras", {}) or {})
+    elif (
         blocks
         and backend_name == "paddleocr"
         and enable_paddle_full_page
@@ -15546,14 +15725,9 @@ def run_ocr_stage(
                 crops.append(np.zeros((32, 32, 3), dtype=np.uint8))
         texts = ocr.recognize_batch(crops) if crops else []
 
-    primary_engine_observations = _normalize_engine_observation_records_to_tile(
-        _snapshot_ocr_engine_observations(ocr), blocks
-    )
-    primary_full_page_lines = _provider_observation_records(
-        list(getattr(ocr, "_last_full_page_line_records", []) or []),
-        "paddle_full_page_raw_line",
-        "full-page-line",
-    )
+    if atomic_result is None:
+        primary_engine_observations = []
+        primary_full_page_lines = []
 
     page_result = build_page_result(
         image_path=_band_image_label(),
@@ -15575,7 +15749,7 @@ def run_ocr_stage(
     page_result = _recover_missing_visual_card_ocr_lines(
         page_result,
         image_rgb,
-        list(getattr(ocr, "_last_full_page_line_records", []) or []),
+        primary_full_page_lines,
         ocr=ocr,
     )
     if pre_ocr_sfx_candidates:
@@ -15586,17 +15760,13 @@ def run_ocr_stage(
             "candidate_count": len(pre_ocr_sfx_candidates),
             "skipped_block_count": len(pre_ocr_sfx_skipped_blocks),
         }
-    ocr_stats = getattr(ocr, "_last_recognize_blocks_stats", None)
     existing_stats = page_result.get("_ocr_stats")
     if isinstance(existing_stats, dict):
         page_result["_ocr_stats"] = dict(existing_stats)
     else:
         page_result["_ocr_stats"] = {}
-    if isinstance(ocr_stats, dict):
-        page_result["_ocr_stats"].update(ocr_stats)
-    batch_cache_stats = getattr(ocr, "_last_batch_cache_stats", None)
-    if isinstance(batch_cache_stats, dict):
-        page_result["_ocr_stats"].update(batch_cache_stats)
+    if atomic_ocr_stats:
+        page_result["_ocr_stats"].update(atomic_ocr_stats)
     if quick_text_check_stage:
         page_result["_ocr_stats"]["quick_text_check_stage"] = quick_text_check_stage
     if page_dict.get("_bubble_regions") and not page_result.get("_bubble_regions"):

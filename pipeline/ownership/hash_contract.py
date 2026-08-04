@@ -87,6 +87,12 @@ def canonical_json_sha256(value: JSONValue) -> str:
     return sha256_bytes(_canonical_json_bytes(value))
 
 
+def canonical_json_bytes(value: JSONValue) -> bytes:
+    """Serialize a JSON value using the same canonical form used for hashing."""
+
+    return _canonical_json_bytes(value)
+
+
 def _canonical_rgb(image: object):
     """Return a C-contiguous uint8 RGB ndarray and its canonical metadata."""
 

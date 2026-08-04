@@ -1,10 +1,15 @@
 import builtins
+from concurrent.futures import ThreadPoolExecutor
+import copy
+import dataclasses
+import ast
 import os
+from pathlib import Path
 import sys
 import types
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import cv2
@@ -12,9 +17,179 @@ import cv2
 import vision_stack.ocr as ocr_mod
 from vision_stack.ocr import (
     OCREngine,
+    execute_hash_bound_provider_attempt,
     normalize_easyocr_languages,
     normalize_paddleocr_language,
 )
+from ownership.hash_contract import canonical_page_sha256, sha256_text
+from ownership.ocr_contract import (
+    OCRAttempt,
+    OCRBlock,
+    OCRDiagnostics,
+    OCRInputPixelIdentityError,
+    OCRInvocationResult,
+    OCRObservationRecord,
+    OCRRequest,
+    OCRRequestIdentityError,
+    OCRTransformOperation,
+    OCRTransformSpec,
+)
+
+
+def _contract_page(marker: int = 25) -> np.ndarray:
+    return np.full((32, 48, 3), marker, dtype=np.uint8)
+
+
+def _contract_request(
+    page_id: str = "page_001",
+    *,
+    run_id: str = "run-a",
+    origin_execution_id: str = "exec-a",
+    root: np.ndarray | None = None,
+    invocation_id: str | None = None,
+) -> OCRRequest:
+    pixels = _contract_page() if root is None else root
+    return OCRRequest(
+        run_id=run_id,
+        origin_execution_id=origin_execution_id,
+        page_id=page_id,
+        page_source_sha256=canonical_page_sha256(pixels),
+        root_input_pixel_sha256=canonical_page_sha256(pixels),
+        invocation_id=invocation_id or f"ocr-{page_id}",
+        provider_family="paddleocr",
+    )
+
+
+def _identity_spec() -> OCRTransformSpec:
+    return OCRTransformSpec.build((OCRTransformOperation(kind="identity"),))
+
+
+def _scale_2x_spec(root: np.ndarray) -> tuple[OCRTransformSpec, np.ndarray]:
+    transformed = cv2.resize(root, (root.shape[1] * 2, root.shape[0] * 2), interpolation=cv2.INTER_NEAREST)
+    return (
+        OCRTransformSpec.build((
+            OCRTransformOperation(kind="identity"),
+            OCRTransformOperation(kind="resize", output_size=(transformed.shape[1], transformed.shape[0]), interpolation="nearest"),
+        )),
+        transformed,
+    )
+
+
+def _affine_spec(root: np.ndarray, kind: str, angle: float = 7.125) -> tuple[OCRTransformSpec, np.ndarray]:
+    center = (root.shape[1] / 2.0, root.shape[0] / 2.0)
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    fixed = tuple(int(round(float(value) * 1_000_000)) for value in matrix.reshape(-1))
+    operation = OCRTransformOperation(
+        kind=kind,
+        output_size=(root.shape[1], root.shape[0]),
+        interpolation="linear",
+        border_mode="constant",
+        border_value_rgb=(255, 255, 255),
+        affine_matrix_fixed_1e6=fixed,
+        algorithm_id="opencv-warp-affine-v1",
+    )
+    spec = OCRTransformSpec.build((operation,))
+    return spec, spec.replay(root)
+
+
+def _raw_ocr(text: str):
+    return [[([[2, 3], [40, 3], [40, 18], [2, 18]], (text, 0.96))]]
+
+
+def _attempt_and_record(
+    request: OCRRequest,
+    *,
+    text: str = "TEXT",
+    origin_execution_id: str | None = None,
+) -> tuple[OCRAttempt, OCRObservationRecord]:
+    spec = _identity_spec()
+    input_hash = request.root_input_pixel_sha256
+    attempt = OCRAttempt(
+        attempt_id="attempt-1",
+        run_id=request.run_id,
+        origin_execution_id=origin_execution_id or request.origin_execution_id,
+        page_id=request.page_id,
+        page_source_sha256=request.page_source_sha256,
+        root_input_pixel_sha256=request.root_input_pixel_sha256,
+        invocation_id=request.invocation_id,
+        provider_family=request.provider_family,
+        variant_id="full_page",
+        input_pixel_sha256=input_hash,
+        parent_input_pixel_sha256=input_hash,
+        input_bbox_page=None,
+        input_kind="full_page",
+        transform_spec=spec,
+        input_width=48,
+        input_height=32,
+        input_mode="RGB",
+        provider_called=True,
+        cache_hit=False,
+    )
+    record = OCRObservationRecord(
+        observation_id="observation-1",
+        attempt_id=attempt.attempt_id,
+        run_id=attempt.run_id,
+        origin_execution_id=attempt.origin_execution_id,
+        page_id=attempt.page_id,
+        page_source_sha256=attempt.page_source_sha256,
+        root_input_pixel_sha256=attempt.root_input_pixel_sha256,
+        input_pixel_sha256=attempt.input_pixel_sha256,
+        invocation_id=attempt.invocation_id,
+        provider_family=attempt.provider_family,
+        variant_id=attempt.variant_id,
+        payload_sha256=sha256_text(text),
+        text=text,
+        confidence=0.96,
+        bbox_page=(2, 3, 40, 18),
+        polygon_page=((2, 3), (40, 3), (40, 18), (2, 18)),
+        source="paddle_full_page",
+    )
+    return attempt, record
+
+
+def _atomic_result(request: OCRRequest, text: str = "TEXT") -> OCRInvocationResult:
+    attempt, record = _attempt_and_record(request, text=text)
+    return OCRInvocationResult.build(
+        request=request,
+        blocks=(OCRBlock("block-1", text, 0.96, record.bbox_page, record.polygon_page, {"nested": {"value": 1}}),),
+        observations=(record,),
+        full_page_lines=(record,),
+        attempts=(attempt,),
+        diagnostics=OCRDiagnostics("paddleocr", {"nested": {"value": 1}}),
+    )
+
+
+def _production_ocr_modules() -> tuple[Path, ...]:
+    pipeline_root = Path(__file__).resolve().parents[1]
+    return (pipeline_root / "vision_stack" / "ocr.py", pipeline_root / "vision_stack" / "runtime.py")
+
+
+def find_direct_ocr_provider_call_sites(paths: tuple[Path, ...]) -> set[str]:
+    sites: set[str] = set()
+    pipeline_root = Path(__file__).resolve().parents[1]
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        function_stack: list[str] = []
+
+        class Visitor(ast.NodeVisitor):
+            def visit_FunctionDef(self, node):
+                function_stack.append(node.name)
+                self.generic_visit(node)
+                function_stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node):
+                function_name = function_stack[-1] if function_stack else "<module>"
+                relative = path.relative_to(pipeline_root.parent).as_posix()
+                if isinstance(node.func, ast.Attribute) and node.func.attr in {"ocr", "generate", "_processor"}:
+                    sites.add(f"{relative}:{function_name}")
+                if function_name == "execute_hash_bound_provider_attempt" and isinstance(node.func, ast.Name) and node.func.id == "provider":
+                    sites.add(f"{relative}:{function_name}")
+                self.generic_visit(node)
+
+        Visitor().visit(tree)
+    return sites
 
 
 class VisionStackOCRTests(unittest.TestCase):
@@ -182,7 +357,7 @@ class VisionStackOCRTests(unittest.TestCase):
             self.assertEqual(engine.recognize_batch([crop.copy()]), ["HELLO"])
 
         self.assertEqual(calls, [1])
-        self.assertEqual(engine._last_batch_cache_stats["ocr_cache_hits"], 1)
+        self.assertEqual(engine._observation_state().stats["ocr_cache_hits"], 1)
 
     def test_dedupe_ocr_records_clears_duplicate_lower_confidence_text(self):
         engine = OCREngine.__new__(OCREngine)
@@ -523,6 +698,137 @@ class PaddleBlockMappingTests(unittest.TestCase):
         engine.batch_size = 8
         return engine
 
+    def test_full_page_line_records_are_request_scoped_across_parallel_pages(self):
+        barrier = __import__("threading").Barrier(2)
+
+        class FakePaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del det, rec, cls
+                marker = int(image[0, 0, 0])
+                barrier.wait(timeout=5)
+                return _raw_ocr("PAGE A" if marker == 25 else "PAGE B")
+
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = FakePaddleModel()
+        engine.batch_size = 8
+        page_a = _contract_page(25)
+        page_b = _contract_page(50)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            future_a = pool.submit(engine.recognize_page_with_evidence, page_a, [], request=_contract_request("page_001", root=page_a))
+            future_b = pool.submit(engine.recognize_page_with_evidence, page_b, [], request=_contract_request("page_002", root=page_b))
+        result_a = future_a.result()
+        result_b = future_b.result()
+        self.assertEqual({line.text for line in result_a.full_page_lines}, {"PAGE A"})
+        self.assertEqual({line.text for line in result_b.full_page_lines}, {"PAGE B"})
+        self.assertEqual(result_a.page_id, "page_001")
+        self.assertEqual(result_b.page_id, "page_002")
+
+    def test_ocr_invocation_result_is_deeply_immutable(self):
+        result = _atomic_result(_contract_request(), "TEXT")
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            result.blocks[0].text = "MUTATED"
+        with self.assertRaises(TypeError):
+            result.blocks[0].extras["nested"] = "MUTATED"
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            result.diagnostics.provider = "other"
+        with self.assertRaises(TypeError):
+            result.diagnostics.extras["nested"] = "MUTATED"
+
+    def test_every_ocr_record_links_exact_logical_request_and_physical_attempt(self):
+        request = _contract_request("page_010", run_id="run-a", origin_execution_id="exec-a")
+        result = _atomic_result(request, "CURRENT PAGE")
+        attempts = {attempt.attempt_id: attempt for attempt in result.attempts}
+        for record in (*result.observations, *result.full_page_lines):
+            self.assertEqual(record.request_identity, request.identity)
+            attempt = attempts[record.attempt_id]
+            self.assertEqual(record.attempt_identity, attempt.identity)
+            self.assertEqual(record.root_input_pixel_sha256, request.root_input_pixel_sha256)
+            self.assertEqual(record.input_pixel_sha256, attempt.input_pixel_sha256)
+
+    def test_ocr_result_rejects_record_with_mismatched_request_identity(self):
+        request = _contract_request("page_010", run_id="run-a")
+        stale_request = _contract_request("page_010", run_id="run-previous")
+        attempt, stale = _attempt_and_record(stale_request)
+        with self.assertRaises(OCRRequestIdentityError):
+            OCRInvocationResult.build(request=request, observations=(stale,), attempts=(attempt,))
+
+    def test_ocr_result_rejects_record_from_other_execution_under_same_content_run(self):
+        request = _contract_request("page_010", run_id="run-a", origin_execution_id="exec-a")
+        stale_request = _contract_request("page_010", run_id="run-a", origin_execution_id="exec-b")
+        attempt, stale = _attempt_and_record(stale_request)
+        with self.assertRaises(OCRRequestIdentityError):
+            OCRInvocationResult.build(request=request, observations=(stale,), attempts=(attempt,))
+
+    def test_provider_boundary_rejects_declared_hash_b_when_pixels_a_are_passed(self):
+        pixels_a = _contract_page(25)
+        pixels_b = _contract_page(50)
+        for physical_kind in ("full_page", "anchored_crop", "native", "gray", "inverted", "scale_2x", "final_observer", "external_auditor"):
+            with self.subTest(physical_kind=physical_kind):
+                provider = MagicMock()
+                with self.assertRaises(OCRInputPixelIdentityError):
+                    execute_hash_bound_provider_attempt(
+                        request=_contract_request(root=pixels_a),
+                        root_input_rgb=pixels_a,
+                        actual_input_rgb=pixels_a,
+                        expected_input_pixel_sha256=canonical_page_sha256(pixels_b),
+                        variant_id=physical_kind,
+                        transform_spec=_identity_spec(),
+                        provider=provider,
+                    )
+                provider.assert_not_called()
+
+    def test_provider_boundary_records_hash_of_actual_array_on_success(self):
+        root = _contract_page(25)
+        spec, transformed = _scale_2x_spec(root)
+        provider = MagicMock(return_value=_raw_ocr("TEXT"))
+        attempt, records = execute_hash_bound_provider_attempt(
+            request=_contract_request(root=root),
+            root_input_rgb=root,
+            actual_input_rgb=transformed,
+            expected_input_pixel_sha256=canonical_page_sha256(transformed),
+            variant_id="scale_2x",
+            transform_spec=spec,
+            provider=provider,
+        )
+        self.assertEqual(attempt.input_pixel_sha256, canonical_page_sha256(transformed))
+        self.assertTrue(all(record.attempt_id == attempt.attempt_id for record in records))
+        self.assertTrue(all(record.input_pixel_sha256 == attempt.input_pixel_sha256 for record in records))
+        self.assertIs(attempt.provider_called, True)
+        self.assertIs(attempt.cache_hit, False)
+        provider.assert_called_once()
+
+    def test_parameterized_rotation_and_deskew_specs_replay_exact_provider_pixels(self):
+        root = _contract_page(25)
+        for kind in ("rotate_affine", "deskew_affine"):
+            with self.subTest(kind=kind):
+                spec, expected_rgb = _affine_spec(root, kind)
+                provider = MagicMock(return_value=_raw_ocr("TEXT"))
+                attempt, _ = execute_hash_bound_provider_attempt(
+                    request=_contract_request(root=root),
+                    root_input_rgb=root,
+                    actual_input_rgb=expected_rgb,
+                    expected_input_pixel_sha256=canonical_page_sha256(expected_rgb),
+                    variant_id=kind,
+                    transform_spec=spec,
+                    provider=provider,
+                )
+                self.assertTrue(np.array_equal(spec.replay(root), provider.call_args.args[0]))
+                self.assertEqual(attempt.transform_spec.canonical_json_bytes, spec.canonical_json_bytes)
+
+    def test_cache_or_dot_heuristic_attempt_is_not_fresh_physical_ocr(self):
+        request = _contract_request()
+        attempt, _ = _attempt_and_record(request)
+        cached = dataclasses.replace(attempt, provider_called=False, cache_hit=True)
+        self.assertIs(cached.qualifies_as_fresh_physical_inference, False)
+
+    def test_production_provider_calls_exist_only_inside_hash_bound_boundary(self):
+        self.assertEqual(
+            find_direct_ocr_provider_call_sites(_production_ocr_modules()),
+            {"pipeline/vision_stack/ocr.py:execute_hash_bound_provider_attempt"},
+        )
+
     def test_sparse_block_mapping_is_rejected_by_default(self):
         engine = self._engine_with_lines(
             [
@@ -666,8 +972,8 @@ class PaddleBlockMappingTests(unittest.TestCase):
         recognize.assert_called_once()
         self.assertEqual(records[0]["text"], "HELLO")
         self.assertEqual(records[1]["text"], "")
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_attempts"], 1)
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_recovered"], 1)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_attempts"], 1)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_recovered"], 1)
 
     def test_crop_fallback_shadow_records_recoveries_after_simulated_limit(self):
         engine = OCREngine.__new__(OCREngine)
@@ -714,16 +1020,16 @@ class PaddleBlockMappingTests(unittest.TestCase):
             )
 
         self.assertEqual([record["text"] for record in records], ["", "SECOND", "THIRD"])
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_attempts"], 3)
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_recovered"], 2)
-        self.assertEqual(engine._last_recognize_blocks_stats["fallback_shadow_attempt_limit"], 1)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_attempts"], 3)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_recovered"], 2)
+        self.assertEqual(engine._observation_state().stats["fallback_shadow_attempt_limit"], 1)
         self.assertEqual(
-            engine._last_recognize_blocks_stats["fallback_shadow_attempts_saved_or_would_skip"],
+            engine._observation_state().stats["fallback_shadow_attempts_saved_or_would_skip"],
             2,
         )
-        self.assertEqual(engine._last_recognize_blocks_stats["fallback_shadow_recovered_after_limit"], 2)
+        self.assertEqual(engine._observation_state().stats["fallback_shadow_recovered_after_limit"], 2)
         self.assertEqual(
-            engine._last_recognize_blocks_stats["fallback_shadow_full_page_already_resolved_count"],
+            engine._observation_state().stats["fallback_shadow_full_page_already_resolved_count"],
             0,
         )
 
@@ -769,7 +1075,7 @@ class PaddleBlockMappingTests(unittest.TestCase):
             "fallback_shadow_recovered_after_limit",
             "fallback_shadow_full_page_already_resolved_count",
         ):
-            self.assertNotIn(key, engine._last_recognize_blocks_stats)
+            self.assertNotIn(key, engine._observation_state().stats)
 
     def test_sparse_crop_fallback_can_be_disabled_separately(self):
         engine = OCREngine.__new__(OCREngine)
@@ -810,10 +1116,10 @@ class PaddleBlockMappingTests(unittest.TestCase):
         recognize.assert_not_called()
         self.assertEqual(records[0]["text"], "")
         self.assertEqual(records[1]["text"], "")
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_attempts"], 0)
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_recovered"], 0)
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_suppressed"], 2)
-        self.assertEqual(engine._last_recognize_blocks_stats["sparse_crop_fallback_max"], 0)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_attempts"], 0)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_recovered"], 0)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_suppressed"], 2)
+        self.assertEqual(engine._observation_state().stats["sparse_crop_fallback_max"], 0)
 
     def test_sparse_crop_fallback_can_be_opted_in_separately(self):
         engine = OCREngine.__new__(OCREngine)
@@ -854,9 +1160,9 @@ class PaddleBlockMappingTests(unittest.TestCase):
         recognize.assert_called_once()
         self.assertEqual(records[0]["text"], "HELLO")
         self.assertEqual(records[1]["text"], "")
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_attempts"], 1)
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_recovered"], 1)
-        self.assertEqual(engine._last_recognize_blocks_stats["sparse_crop_fallback_max"], 1)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_attempts"], 1)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_recovered"], 1)
+        self.assertEqual(engine._observation_state().stats["sparse_crop_fallback_max"], 1)
 
     def test_crop_fallback_max_limits_full_page_mapping_failures(self):
         engine = OCREngine.__new__(OCREngine)
@@ -892,9 +1198,9 @@ class PaddleBlockMappingTests(unittest.TestCase):
 
         recognize.assert_called_once()
         self.assertEqual(records, ["HELLO", "", ""])
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_max"], 1)
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_attempts"], 1)
-        self.assertEqual(engine._last_recognize_blocks_stats["crop_fallback_recovered"], 1)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_max"], 1)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_attempts"], 1)
+        self.assertEqual(engine._observation_state().stats["crop_fallback_recovered"], 1)
 
     def test_observation_records_are_reset_for_each_public_request_and_returned_as_a_copy(self):
         engine = OCREngine.__new__(OCREngine)
@@ -916,15 +1222,15 @@ class PaddleBlockMappingTests(unittest.TestCase):
         block = SimpleNamespace(xyxy=(0, 0, 100, 60), confidence=0.95)
 
         engine.recognize_blocks_from_page(image, [block], allow_sparse_mapping=True)
-        first_snapshot = engine.get_last_observation_records()
+        first_snapshot = copy.deepcopy(list(engine._observation_state().records))
         self.assertTrue(first_snapshot)
 
         first_snapshot[0]["text"] = "MUTATED"
-        self.assertEqual(engine.get_last_observation_records()[0]["text"], "HELLO")
+        self.assertEqual(engine._observation_state().records[0]["text"], "HELLO")
 
         engine.recognize_blocks_from_page(image, [])
-        self.assertEqual(engine.get_last_observation_records(), [])
-        self.assertEqual(engine._last_full_page_line_records, [])
+        self.assertEqual(engine._observation_state().records, [])
+        self.assertEqual(engine._observation_state().full_page_lines, [])
 
     def test_full_page_observations_preserve_unmapped_provider_lines_with_reason(self):
         engine = OCREngine.__new__(OCREngine)
@@ -952,7 +1258,7 @@ class PaddleBlockMappingTests(unittest.TestCase):
         mapped = engine.recognize_blocks_from_page(image, [block], allow_sparse_mapping=True)
         observations = [
             record
-            for record in engine.get_last_observation_records()
+            for record in engine._observation_state().records
             if record["provider"] == "paddle_full_page"
         ]
 
@@ -996,7 +1302,7 @@ class PaddleBlockMappingTests(unittest.TestCase):
         )
         observations = [
             record
-            for record in engine.get_last_observation_records()
+            for record in engine._observation_state().records
             if record["provider"] == "paddle_full_page"
         ]
 
@@ -1024,7 +1330,7 @@ class PaddleBlockMappingTests(unittest.TestCase):
         block = SimpleNamespace(xyxy=(0, 0, 100, 60), confidence=0.95)
 
         engine.recognize_blocks_from_page(image, [block], crop_fallback_max=0)
-        observations = engine.get_last_observation_records()
+        observations = list(engine._observation_state().records)
 
         self.assertEqual(len(observations), 1)
         self.assertEqual(observations[0]["provider"], "paddle_full_page")
@@ -1046,7 +1352,7 @@ class PaddleBlockMappingTests(unittest.TestCase):
         block = SimpleNamespace(xyxy=(0, 0, 100, 60), confidence=0.95)
 
         engine.recognize_blocks_from_page(image, [block], crop_fallback_max=0)
-        observations = engine.get_last_observation_records()
+        observations = list(engine._observation_state().records)
 
         self.assertEqual(len(observations), 1)
         self.assertEqual(observations[0]["provider"], "paddle_full_page")
@@ -1082,7 +1388,7 @@ class PaddleBlockMappingTests(unittest.TestCase):
 
         observations = [
             record
-            for record in engine.get_last_observation_records()
+            for record in engine._observation_state().records
             if record["provider"] == "paddle_crop"
         ]
         self.assertEqual(result, ["BETTER TEXT"])
@@ -1121,7 +1427,7 @@ class PaddleBlockMappingTests(unittest.TestCase):
         result = engine.recognize_batch(crops)
         accepted = [
             record
-            for record in engine.get_last_observation_records()
+            for record in engine._observation_state().records
             if record["provider"] == "paddle_crop" and record["accepted"]
         ]
 
@@ -1154,7 +1460,7 @@ class PaddleBlockMappingTests(unittest.TestCase):
 
         rejected = [
             record
-            for record in engine.get_last_observation_records()
+            for record in engine._observation_state().records
             if record["provider"] == "ocr_dedupe"
         ]
         self.assertEqual([record["text"] for record in result], ["HELLO THERE", ""])
@@ -1192,7 +1498,7 @@ class PaddleBlockMappingTests(unittest.TestCase):
         grouped = engine.recognize_rotated_full_page_lines(image, rotations=(90,), min_confidence=0.80)
         observations = [
             record
-            for record in engine.get_last_observation_records()
+            for record in engine._observation_state().records
             if record["provider"] == "paddle_rotated_full_page"
         ]
 
@@ -1243,7 +1549,7 @@ class PaddleBlockMappingTests(unittest.TestCase):
         block = SimpleNamespace(xyxy=(0, 0, 240, 220), confidence=0.95)
 
         mapped = engine.recognize_blocks_from_page(page, [block], allow_sparse_mapping=True)
-        observations = engine.get_last_observation_records()
+        observations = list(engine._observation_state().records)
         full_page = [record["text"] for record in observations if record["provider"] == "paddle_full_page"]
         deskew = [record["text"] for record in observations if record["provider"] == "paddle_skewed_recovery"]
 

@@ -132,6 +132,60 @@ from vision_stack.runtime import (
 
 
 class VisionStackRuntimeTests(unittest.TestCase):
+    def test_runtime_never_reads_last_full_page_side_channel(self):
+        image = np.full((80, 140, 3), 245, dtype=np.uint8)
+        current = SimpleNamespace(
+            text="CURRENT PAGE",
+            confidence=0.95,
+            bbox_page=(10, 12, 110, 38),
+            polygon_page=((10, 12), (110, 12), (110, 38), (10, 38)),
+            source="atomic",
+            attempt_id="attempt-current",
+        )
+        atomic = SimpleNamespace(
+            blocks=(SimpleNamespace(text="CURRENT PAGE", confidence=0.95, bbox_page=(10, 12, 110, 38), polygon_page=()),),
+            observations=(current,),
+            full_page_lines=(current,),
+            attempts=(),
+            diagnostics=SimpleNamespace(extras={"full_page_mapped": 1}),
+        )
+
+        class FakeEngine:
+            _backend = "paddleocr"
+            _last_full_page_line_records = [{"text": "STALE PAGE", "bbox": [10, 12, 110, 38]}]
+
+            def get_last_observation_records(self):
+                return [{"text": "STALE PAGE", "bbox": [10, 12, 110, 38]}]
+
+            def recognize_page_with_evidence(self, _image, _blocks, *, request, **_kwargs):
+                del request
+                return atomic
+
+        def fake_build_page_result(**kwargs):
+            texts = list(kwargs["texts"])
+            return {
+                "image": "band_010",
+                "width": 140,
+                "height": 80,
+                "texts": texts,
+                "_vision_blocks": [],
+                "_ocr_observation_records": [],
+            }
+
+        page = {"numero": 10, "_vision_blocks": [{"bbox": [10, 12, 110, 38], "confidence": 0.9}]}
+        with patch.dict(os.environ, {"TRADUZAI_STRIP_QUICK_TEXT_SKIP": "0"}, clear=False), patch(
+            "vision_stack.runtime._get_ocr_engine", return_value=FakeEngine()
+        ), patch(
+            "vision_stack.runtime.build_page_result", side_effect=fake_build_page_result
+        ), patch(
+            "vision_stack.runtime._run_negative_evidence_pass", return_value=None
+        ):
+            result = run_ocr_stage(image, page)
+
+        serialized = json.dumps(result)
+        self.assertIn("CURRENT PAGE", serialized)
+        self.assertNotIn("STALE PAGE", serialized)
+
     def test_final_probe_crops_frame_bbox_and_returns_logical_evidence(self):
         from strip.page_surface_geometry import PageSurfaceGeometry
         from vision_stack import runtime
@@ -372,22 +426,31 @@ class VisionStackRuntimeTests(unittest.TestCase):
 
         class FakeOcr:
             _backend = "paddleocr"
-            _last_recognize_blocks_stats = {"full_page_mapped": 1}
 
-            def recognize_blocks_from_page(self, _image, _blocks, **_kwargs):
-                return [{"text": "PARTIAL", "bbox": [10, 20, 72, 48], "confidence": 0.72}]
-
-            def get_last_observation_records(self):
-                return [
-                    {
-                        "provider": "paddle_full_page",
-                        "attempt_id": "primary-full-page",
-                        "text": "PARTIAL AND COMPLETE",
-                        "bbox": [10, 20, 100, 48],
-                        "confidence": 0.94,
-                        "component_ids": ["component_003"],
-                    }
-                ]
+            def recognize_page_with_evidence(self, _image, _blocks, *, request, **_kwargs):
+                record = SimpleNamespace(
+                    source="paddle_full_page",
+                    attempt_id="primary-full-page",
+                    text="PARTIAL AND COMPLETE",
+                    bbox_page=(10, 20, 100, 48),
+                    polygon_page=((10, 20), (100, 20), (100, 48), (10, 48)),
+                    confidence=0.94,
+                    request_identity=request.identity,
+                    input_pixel_sha256=request.root_input_pixel_sha256,
+                )
+                block = SimpleNamespace(
+                    text="PARTIAL",
+                    bbox_page=(10, 20, 72, 48),
+                    polygon_page=(),
+                    confidence=0.72,
+                )
+                return SimpleNamespace(
+                    blocks=(block,),
+                    observations=(record,),
+                    full_page_lines=(record,),
+                    attempts=(),
+                    diagnostics=SimpleNamespace(extras={"full_page_mapped": 1}),
+                )
 
         def fake_build_page_result(**_kwargs):
             return {
@@ -6939,7 +7002,10 @@ class VisionStackRuntimeTests(unittest.TestCase):
                 "_vision_blocks": [{"bbox": [22, 58, 278, 84], "text": "Successful candidate inquiry"}],
             }
 
-        with patch.dict(os.environ, {"TRADUZAI_UIED_LAYOUT": "1"}), patch(
+        with patch.dict(
+            os.environ,
+            {"TRADUZAI_UIED_LAYOUT": "1", "TRADUZAI_NEGATIVE_EVIDENCE_PASS": "0"},
+        ), patch(
             "vision_stack.runtime._get_ocr_engine"
         ) as get_ocr, patch(
             "vision_stack.runtime.build_page_result",
@@ -9306,18 +9372,20 @@ class VisionStackRuntimeTests(unittest.TestCase):
             "balloon_bbox": [0, 0, 96, 64],
             "bubble_mask": bubble_mask,
             "bubble_id": 3,
-            "content_class": "noise",
-            "tipo": "sfx",
+            "content_class": "dialogue",
+            "tipo": "fala",
             "balloon_type": "white",
-            "skip_processing": True,
-            "preserve_original": True,
+            "skip_processing": False,
+            "preserve_original": False,
         }
         ocr_data = {
             "texts": [dict(text)],
             "_vision_blocks": [dict(text)],
         }
 
-        with patch("inpainter._apply_fast_solid_balloon_fill", side_effect=AssertionError("legacy solid fill")), patch(
+        with patch.dict(os.environ, {"TRADUZAI_INPAINT_POLICY": "fast"}, clear=False), patch(
+            "inpainter._apply_fast_solid_balloon_fill", side_effect=AssertionError("legacy solid fill")
+        ), patch(
             "inpainter._apply_fast_white_balloon_fill",
             side_effect=AssertionError("legacy white fill"),
         ), patch(
@@ -9325,7 +9393,11 @@ class VisionStackRuntimeTests(unittest.TestCase):
             side_effect=AssertionError("legacy connected fill"),
         ), patch(
             "inpainter._apply_fast_dark_panel_text_fill",
-            side_effect=AssertionError("legacy dark fill"),
+            side_effect=lambda working, _page, blocks: (
+                working,
+                blocks,
+                {"dark_panel_fill_count": 0},
+            ),
         ), patch(
             "inpainter._apply_fast_local_balloon_fill",
             side_effect=AssertionError("legacy local fill"),
