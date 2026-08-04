@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "calibration_cross_page_isolation",
+      "category": "cross_page_ocr_leak",
+      "cohort": "calibration",
+      "recipe_id": "generic_cross_page_isolation",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    },
+    {
+      "case_id": "calibration_component_discovery",
+      "category": "no_band_component",
+      "cohort": "calibration",
+      "recipe_id": "generic_component_discovery",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    },
+    {
+      "case_id": "calibration_observation_association",
+      "category": "unassociated_full_page_observation",
+      "cohort": "calibration",
+      "recipe_id": "generic_observation_association",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    },
+    {
+      "case_id": "calibration_semantic_container",
+      "category": "semantic_container_missing",
+      "cohort": "calibration",
+      "recipe_id": "generic_semantic_container",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    },
+    {
+      "case_id": "calibration_atomic_cleanup",
+      "category": "atomic_cleanup_rollback",
+      "cohort": "calibration",
+      "recipe_id": "generic_atomic_cleanup",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    },
+    {
+      "case_id": "calibration_mixed_overlay",
+      "category": "mixed_language_overlay",
+      "cohort": "calibration",
+      "recipe_id": "generic_mixed_overlay",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    },
+    {
+      "case_id": "holdout_target_binding",
+      "category": "final_target_missing",
+      "cohort": "holdout",
+      "recipe_id": "generic_target_binding",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    },
+    {
+      "case_id": "holdout_duplicate_observer",
+      "category": "qa_duplicate_false_positive",
+      "cohort": "holdout",
+      "recipe_id": "generic_duplicate_observer",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    },
+    {
+      "case_id": "holdout_burst_container",
+      "category": "burst_container",
+      "cohort": "holdout",
+      "recipe_id": "generic_burst_container",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    },
+    {
+      "case_id": "holdout_card_table",
+      "category": "card_table_multirole",
+      "cohort": "holdout",
+      "recipe_id": "generic_card_table",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    },
+    {
+      "case_id": "holdout_protected_art",
+      "category": "text_over_protected_art",
+      "cohort": "holdout",
+      "recipe_id": "generic_protected_art",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    },
+    {
+      "case_id": "holdout_cross_tile_owner",
+      "category": "cross_tile_owner",
+      "cohort": "holdout",
+      "recipe_id": "generic_cross_tile_owner",
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    }
+  ],
+  "real_regressions": {
+    "mitch_items_ch39": {
+      "input_key": "TRADUZAI_MATRIX_MITCH39_SOURCE",
+      "source_tree_sha256": "dbeea66c4c052bc3bfc354ba73f6b7109efdef86a87c8bce680dd997d1ed3fe0",
+      "sentinel_pages": [10, 11, 19, 21, 27, 28, 30, 34, 36, 39],
+      "style_copy_modes": ["off", "render"],
+      "expected": {"english_dialogue_residual_count": 0, "source_absent": true, "target_present": true}
+    }
+  }
+}
