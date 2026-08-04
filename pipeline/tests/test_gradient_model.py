@@ -47,6 +47,7 @@ def test_structured_gradient_is_rounded_and_preserves_direction() -> None:
         [],
         ["#000000"],
         ["bad", "#FFFFFF"],
+        ["#111111", "#111111"],
         {
             "colors": ["#000000", "#FFFFFF"],
             "start": [0, 0],

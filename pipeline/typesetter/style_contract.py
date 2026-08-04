@@ -12,6 +12,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Mapping
 
+from typesetter.gradient_model import canonicalize_linear_gradient
+
 
 STYLE_V2_ATTRIBUTE_NAMES = (
     "font_name",
@@ -116,15 +118,25 @@ def style_evidence_v2_from_dict(payload: Mapping[str, Any]) -> StyleEvidenceV2:
         if not isinstance(raw, Mapping):
             attributes[name] = _unknown("missing_attribute_evidence")
             continue
+        raw_value = raw.get("value", "unknown")
+        abstention_reason = str(raw.get("abstention_reason") or "")
+        if name == "gradient" and raw_value != "unknown":
+            canonical_gradient = canonicalize_linear_gradient(raw_value)
+            if canonical_gradient is None:
+                attributes[name] = _unknown("invalid_gradient_value")
+                continue
+            raw_value = canonical_gradient
         top_k = raw.get("top_k")
         if not isinstance(top_k, (list, tuple)):
             top_k = ()
+        if name == "gradient" and raw_value != "unknown":
+            top_k = (raw_value,)
         attributes[name] = StyleAttributeEvidenceV2(
-            value=raw.get("value", "unknown"),
+            value=raw_value,
             confidence=_bounded_confidence(raw.get("confidence")),
             top_k=tuple(top_k),
             margin=_bounded_confidence(raw.get("margin")),
-            abstention_reason=str(raw.get("abstention_reason") or ""),
+            abstention_reason=abstention_reason,
         )
     raw_provenance = payload.get("attribute_provenance")
     provenance = {
@@ -236,11 +248,19 @@ def style_evidence_v2_from_v1(
             "offset": list(v1_evidence.get("shadow_offset") or [2, 2])[:2],
         },
     )
-    gradient = _effect(
-        detected=v1_evidence.get("gradient"),
-        confidence=v1_evidence.get("gradient_confidence"),
-        value=list(v1_evidence.get("gradient_colors") or [])[:2],
+    canonical_gradient = canonicalize_linear_gradient(
+        list(v1_evidence.get("gradient_colors") or [])[:2]
     )
+    if canonical_gradient is not None:
+        gradient = _effect(
+            detected=v1_evidence.get("gradient"),
+            confidence=v1_evidence.get("gradient_confidence"),
+            value=canonical_gradient,
+        )
+    elif bool(v1_evidence.get("gradient")):
+        gradient = _unknown("invalid_gradient_value")
+    else:
+        gradient = _unknown("insufficient_effect_confidence")
     curve = _effect(
         detected=v1_evidence.get("curved"),
         confidence=v1_evidence.get("curve_confidence"),

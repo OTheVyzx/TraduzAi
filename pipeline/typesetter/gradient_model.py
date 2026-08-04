@@ -79,6 +79,8 @@ def canonicalize_linear_gradient(value: object) -> dict[str, object] | None:
     colors = [_canonical_color(raw_colors[0]), _canonical_color(raw_colors[1])]
     if any(color is None for color in colors):
         return None
+    if colors[0] == colors[1]:
+        return None
     axis_length = math.hypot(end[0] - start[0], end[1] - start[1])
     if axis_length < 1e-6:
         return None

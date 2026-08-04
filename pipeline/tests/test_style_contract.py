@@ -16,6 +16,7 @@ from typesetter.style_contract import (
     StyleEvidenceV2,
     style_evidence_v2_from_dict,
     style_evidence_v2_from_v1,
+    style_evidence_v2_sha256,
 )
 from ownership import model as ownership_model
 from typesetter.style_materialization import compare_materialization_payloads
@@ -367,3 +368,57 @@ def test_shadow_v2_contract_migrates_without_losing_source_or_text_present():
     assert migrated.text_present is True
     assert migrated.source_sha256 == "a" * 64
     assert migrated.attribute_provenance["fill"]["method"] == "glyph_core"
+
+
+def test_v1_gradient_migrates_to_canonical_vertical_field() -> None:
+    evidence = style_evidence_v2_from_v1(
+        {
+            "source": "pixel_analysis",
+            "text_color": "#111111",
+            "text_color_confidence": 0.9,
+            "gradient": True,
+            "gradient_colors": ["#6633cc", "#08080a"],
+            "gradient_confidence": 0.91,
+        }
+    )
+
+    assert evidence.attributes["gradient"].value == {
+        "kind": "linear",
+        "colors": ["#6633CC", "#08080A"],
+        "stops": [0.0, 1.0],
+        "start": [0.5, 0.0],
+        "end": [0.5, 1.0],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+
+
+def test_v2_gradient_round_trip_and_hash_preserve_direction() -> None:
+    original = style_evidence_v2_from_v1(
+        {
+            "source": "pixel_analysis",
+            "text_color": "#111111",
+            "text_color_confidence": 0.9,
+        }
+    ).to_dict()
+    gradient = {
+        "kind": "linear",
+        "colors": ["#2040E0", "#20D050"],
+        "stops": [0.0, 1.0],
+        "start": [0.1, 0.2],
+        "end": [0.9, 0.8],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+    original["attributes"]["gradient"] = {
+        "value": gradient,
+        "confidence": 0.94,
+        "top_k": [gradient],
+        "margin": 0.94,
+        "abstention_reason": "",
+    }
+
+    migrated = style_evidence_v2_from_dict(original)
+    round_trip = style_evidence_v2_from_dict(migrated.to_dict())
+
+    assert migrated.attributes["gradient"].value == gradient
+    assert round_trip.attributes["gradient"].value == gradient
+    assert style_evidence_v2_sha256(round_trip) == style_evidence_v2_sha256(migrated)

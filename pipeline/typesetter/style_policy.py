@@ -20,10 +20,46 @@ from typesetter.style_contract import (
     StyleEvidenceV2,
     style_evidence_v2_sha256,
 )
+from typesetter.gradient_model import canonicalize_linear_gradient
 
 
 CANONICAL_AUTO_FONT = "ComicNeue-Bold.ttf"
 SOURCE_STYLE_CONFIDENCE_THRESHOLD = 0.70
+SOURCE_STYLE_GRADIENT_CONFIDENCE_THRESHOLD = 0.60
+FORCE_UPPER_SEMANTIC_ROLES = frozenset(
+    {
+        "body",
+        "card_body",
+        "card_footer",
+        "card_title",
+        "dialogue",
+        "dialogue_body",
+        "fala",
+        "footer",
+        "narracao",
+        "narration",
+        "pensamento",
+        "sfx",
+        "speech",
+        "system_card",
+        "text",
+        "thought",
+        "title",
+        "visual_card",
+    }
+)
+PRESERVE_CASE_SEMANTIC_ROLES = frozenset(
+    {
+        "chat",
+        "comment",
+        "credits",
+        "translator_note",
+        "ui_form",
+        "ui_text",
+        "url_watermark",
+        "watermark",
+    }
+)
 STYLE_V2_FUNCTIONAL_FIELDS = frozenset({"alignment", "container", "font_size_px"})
 SOURCE_STYLE_SAFE_FIELDS = {
     "cor",
@@ -37,8 +73,8 @@ SOURCE_STYLE_SAFE_FIELDS = {
     "sombra_cor",
     "sombra_offset",
 }
-SOURCE_STYLE_PAINT_ATTRIBUTES_V2 = frozenset(
-    {"fill", "stroke", "multistroke", "shadow", "glow", "gradient"}
+SOURCE_STYLE_COPY_ATTRIBUTES_V2 = frozenset(
+    {"font_name", "fill", "stroke", "multistroke", "shadow", "glow", "gradient"}
 )
 OWNER_STYLE_FORBIDDEN_FIELDS = frozenset(
     {
@@ -188,16 +224,28 @@ def evaluate_style_attribute(
 
     if name in STYLE_V2_FUNCTIONAL_FIELDS:
         return False, None, "functional_layout_owned"
-    if name not in SOURCE_STYLE_PAINT_ATTRIBUTES_V2:
+    if name not in SOURCE_STYLE_COPY_ATTRIBUTES_V2:
         return False, None, "glyph_shape_is_auto_owned"
     if evidence.value in (None, "", "unknown"):
         return False, None, evidence.abstention_reason or "attribute_not_observed"
     if evidence.abstention_reason:
         return False, None, evidence.abstention_reason
+    canonical_gradient = None
+    if name == "gradient":
+        canonical_gradient = canonicalize_linear_gradient(evidence.value)
+        if canonical_gradient is None:
+            return False, None, "invalid_gradient_value"
     confidence = _finite_confidence(evidence.confidence)
-    if confidence is None or confidence < SOURCE_STYLE_CONFIDENCE_THRESHOLD:
+    threshold = (
+        SOURCE_STYLE_GRADIENT_CONFIDENCE_THRESHOLD
+        if name == "gradient"
+        else SOURCE_STYLE_CONFIDENCE_THRESHOLD
+    )
+    if confidence is None or confidence < threshold:
         return False, None, "attribute_confidence_below_threshold"
-    return True, deepcopy(evidence.value), ""
+    return True, deepcopy(
+        canonical_gradient if name == "gradient" else evidence.value
+    ), ""
 
 
 def decide_style_copy_v2(
@@ -226,23 +274,6 @@ def decide_style_copy_v2(
             status="fallback",
             applied_attributes={},
             abstained_attributes={name: "candidate_confidence_missing_or_low" for name in evidence.attributes},
-            evidence_sha256=evidence_sha256,
-        )
-
-    gradient_evidence = evidence.attributes.get("gradient")
-    gradient_allowed = False
-    if gradient_evidence is not None:
-        allowed, value, _ = evaluate_style_attribute("gradient", gradient_evidence)
-        if allowed and isinstance(value, (list, tuple)) and len(value) >= 2:
-            colors = [str(item or "").strip().upper() for item in value[:2]]
-            gradient_allowed = bool(colors[0] and colors[1] and colors[0] != colors[1])
-    if not gradient_allowed:
-        return StyleApplicationDecisionV2(
-            status="fallback",
-            applied_attributes={},
-            abstained_attributes={
-                name: "authenticated_gradient_required" for name in evidence.attributes
-            },
             evidence_sha256=evidence_sha256,
         )
 
@@ -277,11 +308,7 @@ def auto_text_color_for_background(background_rgb: tuple[int, int, int]) -> str:
 
 
 def _has_authenticated_source_gradient(style: Mapping[str, object]) -> bool:
-    gradient = style.get("cor_gradiente")
-    if not isinstance(gradient, (list, tuple)) or len(gradient) < 2:
-        return False
-    colors = [str(item or "").strip().upper() for item in gradient[:2]]
-    return bool(colors[0] and colors[1] and colors[0] != colors[1])
+    return canonicalize_linear_gradient(style.get("cor_gradiente")) is not None
 
 
 def source_style_copy_allowed(
@@ -341,6 +368,10 @@ def normalize_auto_typesetting_style(
     background_rgb: tuple[int, int, int],
     *,
     force_black_text: bool = False,
+    semantic_role: object = None,
+    content_class: object = None,
+    layout_profile: object = None,
+    preserve_case: bool = False,
 ) -> dict:
     normalized = {
         key: deepcopy(value)
@@ -369,7 +400,13 @@ def normalize_auto_typesetting_style(
     normalized.setdefault("italico", False)
     normalized.setdefault("rotacao", 0)
     normalized.setdefault("alinhamento", "center")
-    normalized.setdefault("force_upper", False)
+    normalized["force_upper"] = resolve_auto_force_upper(
+        normalized,
+        semantic_role=semantic_role,
+        content_class=content_class,
+        layout_profile=layout_profile,
+        preserve_case=preserve_case,
+    )
 
     if preserve_source_style:
         source_style = style or {}
@@ -377,9 +414,49 @@ def normalize_auto_typesetting_style(
             if field == "cor" and force_black_overrides_source:
                 continue
             if field in source_style:
-                normalized[field] = deepcopy(source_style[field])
+                if field == "cor_gradiente":
+                    gradient = canonicalize_linear_gradient(source_style[field])
+                    if gradient is not None:
+                        normalized[field] = gradient
+                else:
+                    normalized[field] = deepcopy(source_style[field])
 
     return normalized
+
+
+def _case_policy_key(value: object) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def resolve_auto_force_upper(
+    style: Mapping[str, object] | None,
+    *,
+    semantic_role: object = None,
+    content_class: object = None,
+    layout_profile: object = None,
+    preserve_case: bool = False,
+) -> bool:
+    """Resolve capitalization from semantic ownership before legacy style defaults."""
+
+    source = style or {}
+    role = _case_policy_key(semantic_role)
+    content = _case_policy_key(content_class)
+    profile = _case_policy_key(layout_profile or source.get("layout_profile"))
+    text_type = _case_policy_key(source.get("tipo"))
+
+    if preserve_case or any(
+        value in PRESERVE_CASE_SEMANTIC_ROLES
+        for value in (role, content, profile, text_type)
+        if value
+    ):
+        return False
+    if any(
+        value in FORCE_UPPER_SEMANTIC_ROLES
+        for value in (role, content, text_type)
+        if value
+    ):
+        return True
+    return bool(source.get("force_upper", False))
 
 
 def _coerce_bbox(bbox: Sequence[int | float] | None) -> tuple[int, int, int, int] | None:

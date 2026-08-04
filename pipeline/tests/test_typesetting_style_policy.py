@@ -1,5 +1,6 @@
 import numpy as np
 
+from typesetter.gradient_model import canonicalize_linear_gradient
 from typesetter.style_policy import (
     CANONICAL_AUTO_FONT,
     normalize_auto_typesetting_style,
@@ -44,12 +45,46 @@ def test_auto_style_removes_effects_font_and_bad_white_on_light_background():
 def test_auto_style_keeps_conservative_default_without_detected_style():
     style = normalize_auto_typesetting_style({}, (255, 255, 255))
 
-    assert style["fonte"] == "ComicNeue-Bold.ttf"
+    assert CANONICAL_AUTO_FONT == "ComicNeue-Bold.ttf"
+    assert style["fonte"] == CANONICAL_AUTO_FONT
     assert style["cor"] == "#000000"
     assert style["contorno"] == ""
     assert style["contorno_px"] == 0
     assert style["sombra"] is False
     assert style["glow"] is False
+    assert style["bold"] is True
+
+
+def test_auto_style_uppercases_dialogue_from_semantic_role():
+    style = normalize_auto_typesetting_style(
+        {"force_upper": False},
+        (255, 255, 255),
+        semantic_role="dialogue_body",
+    )
+
+    assert style["force_upper"] is True
+
+
+def test_auto_style_uppercases_standard_generic_manga_text():
+    style = normalize_auto_typesetting_style(
+        {"tipo": "text", "force_upper": False},
+        (255, 255, 255),
+        content_class="text",
+        layout_profile="standard",
+    )
+
+    assert style["force_upper"] is True
+
+
+def test_auto_style_preserves_case_for_ui_form_even_with_uppercase_input():
+    style = normalize_auto_typesetting_style(
+        {"force_upper": True},
+        (255, 255, 255),
+        semantic_role="dialogue_body",
+        layout_profile="ui_form",
+    )
+
+    assert style["force_upper"] is False
 
 
 def test_auto_style_preserves_confident_detected_source_paint_only():
@@ -78,7 +113,9 @@ def test_auto_style_preserves_confident_detected_source_paint_only():
 
     assert style["fonte"] == CANONICAL_AUTO_FONT
     assert style["cor"] == "#FFFFFF"
-    assert style["cor_gradiente"] == ["#0D172E", "#07080E"]
+    assert style["cor_gradiente"] == canonicalize_linear_gradient(
+        ["#0D172E", "#07080E"]
+    )
     assert style["contorno"] == "#000000"
     assert style["contorno_px"] == 3
     assert style["glow"] is True
@@ -100,12 +137,6 @@ def test_auto_style_uses_normal_font_when_detected_source_has_no_gradient():
             "cor": "#FFFFFF",
             "contorno": "#000000",
             "contorno_px": 3,
-            "glow": True,
-            "glow_cor": "#FFD36A",
-            "glow_px": 4,
-            "sombra": True,
-            "sombra_cor": "#333333",
-            "sombra_offset": [2, 3],
             "style_origin": "source_detected",
             "style_confidence": 0.96,
         },
@@ -133,10 +164,11 @@ def test_auto_style_reverts_low_confidence_detected_style_to_conservative_defaul
         (240, 240, 240),
     )
 
-    assert style["fonte"] == "ComicNeue-Bold.ttf"
+    assert style["fonte"] == CANONICAL_AUTO_FONT
     assert style["cor"] == "#000000"
     assert style["contorno"] == ""
     assert style["contorno_px"] == 0
+    assert style["bold"] is True
 
 
 def test_force_black_text_uses_normal_font_without_gradient_for_white_balloon():
@@ -201,11 +233,12 @@ def test_force_black_text_uses_normal_style_for_sfx_without_gradient():
 def test_auto_style_uses_white_only_when_dark_background_needs_it():
     style = normalize_auto_typesetting_style({"cor": "#000000"}, background_rgb=(18, 18, 24))
 
-    assert style["fonte"] == "ComicNeue-Bold.ttf"
+    assert style["fonte"] == CANONICAL_AUTO_FONT
     assert style["cor"] == "#FFFFFF"
     assert style["contorno_px"] == 0
     assert style["glow"] is False
     assert style["sombra"] is False
+    assert style["bold"] is True
 
 
 def test_background_sensor_prefers_inner_balloon_region():
@@ -264,7 +297,9 @@ def test_normalized_visual_style_cannot_carry_owner_semantics():
     assert set(normalized).isdisjoint(reserved)
     assert normalized["fonte"] == CANONICAL_AUTO_FONT
     assert normalized["cor"] == "#FFFFFF"
-    assert normalized["cor_gradiente"] == ["#FFFFFF", "#78D7FF"]
+    assert normalized["cor_gradiente"] == canonicalize_linear_gradient(
+        ["#FFFFFF", "#78D7FF"]
+    )
 
 
 def test_normalized_visual_style_is_whitelisted_and_deep_copied():
@@ -296,7 +331,30 @@ def test_normalized_visual_style_is_whitelisted_and_deep_copied():
             "translation",
         }
     )
-    normalized["cor_gradiente"].append("#333333")
+    normalized["cor_gradiente"]["colors"].append("#333333")
     normalized["sombra_offset"][0] = 99
     assert source["cor_gradiente"] == ["#111111", "#222222"]
     assert source["sombra_offset"] == [2, 3]
+
+
+def test_normalized_directional_gradient_is_authenticated_and_deep_copied():
+    gradient = {
+        "kind": "linear",
+        "colors": ["#6633CC", "#08080A"],
+        "stops": [0.0, 1.0],
+        "start": [0.1, 0.2],
+        "end": [0.9, 0.8],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+    source = {
+        "style_origin": "source_detected",
+        "style_confidence": 0.95,
+        "cor_gradiente": gradient,
+    }
+
+    normalized = normalize_auto_typesetting_style(source, (245, 245, 245))
+
+    assert source_style_copy_allowed(source) is True
+    assert normalized["cor_gradiente"] == gradient
+    normalized["cor_gradiente"]["colors"][0] = "#FFFFFF"
+    assert source["cor_gradiente"]["colors"][0] == "#6633CC"

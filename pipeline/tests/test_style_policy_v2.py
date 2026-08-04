@@ -8,7 +8,8 @@ PIPELINE_DIR = Path(__file__).resolve().parents[1]
 if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
-from typesetter.style_contract import style_evidence_v2_from_v1
+from typesetter.style_contract import StyleAttributeEvidenceV2, style_evidence_v2_from_v1
+from typesetter.gradient_model import canonicalize_linear_gradient
 from typesetter.style_policy import (
     decide_style_copy_v2,
     style_candidate_copy_allowed,
@@ -100,6 +101,9 @@ def test_high_glow_confidence_cannot_authorize_low_confidence_fill():
 
     assert decision.status == "applied"
     assert decision.applied_attributes["glow"]["width_px"] == 5
+    assert decision.applied_attributes["gradient"] == canonicalize_linear_gradient(
+        ["#FFFFFF", "#78D7FF"]
+    )
     assert "fill" not in decision.applied_attributes
     assert decision.abstained_attributes["fill"] == "attribute_confidence_below_threshold"
 
@@ -140,13 +144,12 @@ def test_each_attribute_requires_its_own_confidence():
         ),
     )
 
-    assert "font_name" not in decision.applied_attributes
-    assert decision.abstained_attributes["font_name"] == "glyph_shape_is_auto_owned"
+    assert decision.applied_attributes["font_name"] == "ComicNeue-Bold.ttf"
     assert "stroke" not in decision.applied_attributes
     assert decision.abstained_attributes["stroke"] == "attribute_confidence_below_threshold"
 
 
-def test_v2_source_style_copy_never_applies_glyph_shape_attributes():
+def test_v2_source_style_copy_applies_matched_font_but_not_font_geometry_attributes():
     decision = decide_style_copy_v2(
         _candidate(),
         _evidence(
@@ -163,8 +166,10 @@ def test_v2_source_style_copy_never_applies_glyph_shape_attributes():
     assert decision.status == "applied"
     assert decision.applied_attributes["fill"] == "#F4F4F4"
     assert decision.applied_attributes["stroke"]["color"] == "#161616"
-    assert decision.applied_attributes["gradient"] == ["#FFFFFF", "#78D7FF"]
-    assert "font_name" not in decision.applied_attributes
+    assert decision.applied_attributes["gradient"] == canonicalize_linear_gradient(
+        ["#FFFFFF", "#78D7FF"]
+    )
+    assert decision.applied_attributes["font_name"] == "KOMIKAX_.ttf"
     assert "font_weight" not in decision.applied_attributes
     assert "font_width" not in decision.applied_attributes
     assert "slant_tangent" not in decision.applied_attributes
@@ -184,7 +189,7 @@ def test_low_confidence_evidence_is_preserved_but_not_applied():
     assert set(decision.abstained_attributes) >= {"fill", "font_name", "stroke"}
 
 
-def test_v2_source_style_copy_requires_authenticated_gradient():
+def test_v2_source_style_copy_applies_independent_stroke_without_gradient():
     decision = decide_style_copy_v2(
         _candidate(),
         _evidence(
@@ -200,8 +205,128 @@ def test_v2_source_style_copy_requires_authenticated_gradient():
         ),
     )
 
-    assert decision.status == "fallback"
-    assert decision.applied_attributes == {}
-    assert set(decision.abstained_attributes.values()) == {
-        "authenticated_gradient_required"
+    assert decision.status == "applied"
+    assert decision.applied_attributes["stroke"]["width_px"] == 3
+    assert decision.applied_attributes["glow"]["width_px"] == 5
+    assert decision.applied_attributes["font_name"] == "ComicNeue-Bold.ttf"
+    assert "gradient" not in decision.applied_attributes
+
+
+def test_v2_source_style_copy_applies_measured_gradient_with_lower_gradient_threshold():
+    decision = decide_style_copy_v2(
+        _candidate(),
+        _evidence(
+            text_color="#030204",
+            text_color_confidence=0.94,
+            font_confidence=0.99,
+            stroke_color="#EDE5ED",
+            stroke_width_px=1,
+            stroke_confidence=0.84,
+            gradient=True,
+            gradient_colors=["#160A36", "#000000"],
+            gradient_confidence=0.6154,
+        ),
+    )
+
+    assert decision.status == "applied"
+    assert decision.applied_attributes["gradient"] == canonicalize_linear_gradient(
+        ["#160A36", "#000000"]
+    )
+    assert decision.applied_attributes["fill"] == "#030204"
+    assert decision.applied_attributes["stroke"]["color"] == "#EDE5ED"
+    assert decision.applied_attributes["font_name"] == "ComicNeue-Bold.ttf"
+
+
+def test_v2_policy_preserves_a_confident_structured_gradient() -> None:
+    evidence = _evidence(text_color_confidence=0.94)
+    gradient = {
+        "kind": "linear",
+        "colors": ["#6633CC", "#08080A"],
+        "stops": [0.0, 1.0],
+        "start": [0.12, 0.08],
+        "end": [0.88, 0.92],
+        "coordinate_space": "glyph_bbox_normalized",
     }
+    evidence.attributes["gradient"] = StyleAttributeEvidenceV2(
+        value=gradient,
+        confidence=0.93,
+        top_k=(gradient,),
+        margin=0.93,
+    )
+
+    decision = decide_style_copy_v2(_candidate(), evidence)
+
+    assert decision.applied_attributes["gradient"] == gradient
+
+
+def test_v2_policy_abstains_from_a_degenerate_structured_gradient() -> None:
+    evidence = _evidence(text_color_confidence=0.94)
+    evidence.attributes["gradient"] = StyleAttributeEvidenceV2(
+        value={
+            "kind": "linear",
+            "colors": ["#6633CC", "#08080A"],
+            "start": [0.5, 0.5],
+            "end": [0.5, 0.5],
+        },
+        confidence=0.93,
+        top_k=(),
+        margin=0.93,
+    )
+
+    decision = decide_style_copy_v2(_candidate(), evidence)
+
+    assert "gradient" not in decision.applied_attributes
+    assert decision.abstained_attributes["gradient"] == "invalid_gradient_value"
+
+
+def test_v2_source_style_copy_can_apply_only_matched_font_and_solid_color():
+    decision = decide_style_copy_v2(
+        _candidate(),
+        _evidence(
+            text_color_confidence=0.99,
+            font_confidence=0.99,
+            stroke_color="",
+            stroke_width_px=0,
+            stroke_confidence=0.0,
+            glow=False,
+            glow_color="",
+            glow_px=0,
+            glow_confidence=0.0,
+            gradient=False,
+            gradient_confidence=0.0,
+        ),
+    )
+
+    assert decision.status == "applied"
+    assert decision.applied_attributes == {
+        "fill": "#F4F4F4",
+        "font_name": "ComicNeue-Bold.ttf",
+    }
+
+
+def test_high_confidence_style_copies_font_color_outline_and_shadow_without_gradient():
+    decision = decide_style_copy_v2(
+        _candidate(),
+        _evidence(
+            font_name="LeagueGothic-Regular-VariableFont_wdth.ttf",
+            font_confidence=0.96,
+            text_color="#7B2CBF",
+            text_color_confidence=0.97,
+            stroke_color="#FFFFFF",
+            stroke_width_px=2,
+            stroke_confidence=0.95,
+            shadow=True,
+            shadow_color="#24113A",
+            shadow_offset=[2, 3],
+            shadow_confidence=0.93,
+            gradient=False,
+            gradient_confidence=0.0,
+        ),
+    )
+
+    assert decision.status == "applied"
+    assert decision.applied_attributes["font_name"] == "LeagueGothic-Regular-VariableFont_wdth.ttf"
+    assert decision.applied_attributes["fill"] == "#7B2CBF"
+    assert decision.applied_attributes["stroke"] == {"color": "#FFFFFF", "width_px": 2.0}
+    assert decision.applied_attributes["shadow"] == {"color": "#24113A", "offset": [2.0, 3.0]}
+    assert "gradient" not in decision.applied_attributes

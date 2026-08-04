@@ -14,6 +14,8 @@ from typing import Any
 
 import numpy as np
 
+from typesetter.gradient_model import canonicalize_linear_gradient
+
 from typesetter.style_contract import (
     StyleEvidenceV2,
     style_evidence_v2_from_dict,
@@ -159,7 +161,14 @@ def _materialize_style(
     background = candidate.get("background_rgb")
     if not isinstance(background, (list, tuple)) or len(background) < 3:
         background = (255, 255, 255)
-    style = normalize_auto_typesetting_style({}, tuple(int(value) for value in background[:3]))
+    style = normalize_auto_typesetting_style(
+        {},
+        tuple(int(value) for value in background[:3]),
+        semantic_role=candidate.get("semantic_role"),
+        content_class=candidate.get("content_class"),
+        layout_profile=candidate.get("layout_profile") or candidate.get("block_profile"),
+        preserve_case=bool(candidate.get("preserve_case")),
+    )
     applied = decision.get("applied_attributes")
     applied = applied if isinstance(applied, Mapping) else {}
     if "fill" in applied:
@@ -202,9 +211,10 @@ def _materialize_style(
             glow_px=int(glow.get("width_px") or 2),
         )
     gradient = applied.get("gradient")
-    if isinstance(gradient, (list, tuple)) and len(gradient) >= 2:
-        style["cor_gradiente"] = [str(gradient[0]), str(gradient[1])]
-        style["cor"] = str(gradient[0])
+    canonical_gradient = canonicalize_linear_gradient(gradient)
+    if canonical_gradient is not None:
+        style["cor_gradiente"] = canonical_gradient
+        style["cor"] = str(canonical_gradient["colors"][0])
     curve = applied.get("curve")
     if isinstance(curve, Mapping):
         style.update(
@@ -329,6 +339,10 @@ def build_owner_visual_profile(
     glyph_hash = _mask_sha256(glyph_mask, tuple(source.shape[:2]))
     observed_text = any(str(_field(item, "text", "") or "").strip() for item in selected_observations)
     candidate_payload = copy.deepcopy(dict(candidate or {}))
+    candidate_payload.setdefault("semantic_role", _field(owner, "semantic_role"))
+    source_payload = str(_field(owner, "source_payload", "") or "").strip().lower()
+    if source_payload.startswith(("t/n:", "tn:", "n/t:")):
+        candidate_payload["preserve_case"] = True
     evidence = _style_evidence(candidate_payload, text_present=observed_text)
     decision = decide_style_copy_v2(candidate_payload, evidence).to_dict()
     group_id, group_kind, group_role = _visual_group_contract(

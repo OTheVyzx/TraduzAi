@@ -113,6 +113,7 @@ def test_every_renderable_owner_receives_explicit_style_status() -> None:
     }
     assert profiles["owner_a"]["source_capture_phase"] == "pre_inpaint"
     assert profiles["owner_a"]["page_id"] == "page_001"
+    assert profiles["owner_a"]["applied_style"]["force_upper"] is True
 
 
 def test_owner_profile_is_captured_before_inpaint_mutates_pixels() -> None:
@@ -203,6 +204,26 @@ def test_materialization_maps_every_applied_canonical_attribute() -> None:
 
     assert set(style["canonical_applied_attributes"]) == set(applied)
     assert style["canonical_applied_attributes"] == applied
+
+
+def test_materialization_keeps_directional_gradient_as_one_canonical_value() -> None:
+    gradient = {
+        "kind": "linear",
+        "colors": ["#6633CC", "#08080A"],
+        "stops": [0.0, 1.0],
+        "start": [0.1, 0.2],
+        "end": [0.9, 0.8],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+
+    style = _materialize_style(
+        {"background_rgb": [250, 250, 250]},
+        {"applied_attributes": {"gradient": gradient}},
+    )
+
+    assert style["cor_gradiente"] == gradient
+    assert style["cor"] == "#6633CC"
+    assert style["canonical_applied_attributes"]["gradient"] == gradient
 
 
 def test_style_profile_cannot_change_owner_semantic_signature() -> None:
