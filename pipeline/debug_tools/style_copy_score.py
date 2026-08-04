@@ -21,6 +21,8 @@ if __package__ in {None, ""}:
 import cv2
 
 from typesetter.style_extractor import IMPACT_FONT_CHOICES, extract_text_style_evidence
+from typesetter.gradient_model import canonicalize_linear_gradient
+from typesetter.style_materialization import compare_style_attribute
 
 
 ROOT = PIPELINE_DIR.parent
@@ -399,11 +401,35 @@ def score_real_records(records_path: Path) -> dict[str, Any]:
 def score_owner_fidelity(records: list[dict[str, Any]]) -> dict[str, Any]:
     owner_records = [record for record in records if str(record.get("owner_id") or "").strip()]
     unique_owners = {str(record["owner_id"]) for record in owner_records}
+    gradient_evaluated = 0
+    gradient_matched = 0
+    for record in owner_records:
+        detected = canonicalize_linear_gradient(
+            record.get("gradient_spec") or record.get("gradient_colors")
+        )
+        applied = canonicalize_linear_gradient(
+            record.get("applied_gradient_spec")
+            or record.get("applied_gradient_colors")
+        )
+        if detected is None or applied is None:
+            continue
+        gradient_evaluated += 1
+        gradient_matched += int(
+            compare_style_attribute("gradient", detected, applied).matches
+        )
     return {
         "records": len(owner_records),
         "owners": len(unique_owners),
         "owner_ids": sorted(unique_owners),
         "missing_profile_hash": sum(1 for record in owner_records if not record.get("visual_profile_sha256")),
+        "gradient_fidelity": {
+            "evaluated": gradient_evaluated,
+            "matched": gradient_matched,
+            "mismatched": gradient_evaluated - gradient_matched,
+            "rate": round(gradient_matched / gradient_evaluated, 4)
+            if gradient_evaluated
+            else 0.0,
+        },
     }
 
 

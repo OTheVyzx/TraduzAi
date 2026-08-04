@@ -14,7 +14,7 @@ import pytest
 
 from debug_tools import style_copy_score
 from debug_tools.run_style_copy_regression import _copy_run, _run_style_score
-from debug_tools.style_copy_score import _matches_real_kind
+from debug_tools.style_copy_score import _matches_real_kind, score_owner_fidelity
 
 
 PIPELINE_DIR = Path(__file__).resolve().parents[1]
@@ -283,6 +283,36 @@ def test_real_style_score_falls_back_to_detected_fields_for_old_reports():
     }
 
     assert _matches_real_kind(old_report_record, "dark_text_gradient") is True
+
+
+def test_owner_gradient_fidelity_rejects_same_colors_with_wrong_direction():
+    source = {
+        "kind": "linear",
+        "colors": ["#6633CC", "#08080A"],
+        "stops": [0.0, 1.0],
+        "start": [0.0, 0.0],
+        "end": [1.0, 1.0],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+    wrong = {**source, "start": [0.5, 0.0], "end": [0.5, 1.0]}
+
+    score = score_owner_fidelity(
+        [
+            {
+                "owner_id": "owner_gradient",
+                "visual_profile_sha256": "a" * 64,
+                "gradient_spec": source,
+                "applied_gradient_spec": wrong,
+            }
+        ]
+    )
+
+    assert score["gradient_fidelity"] == {
+        "evaluated": 1,
+        "matched": 0,
+        "mismatched": 1,
+        "rate": 0.0,
+    }
 
 
 def test_real_style_score_accepts_solid_dark_text_without_false_gradient():

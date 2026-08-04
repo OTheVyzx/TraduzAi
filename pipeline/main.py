@@ -29,6 +29,7 @@ if str(pipeline_root) not in sys.path:
 
 from utils.decision_log import configure_decision_trace, finalize_decision_trace
 from typesetter.style_contract import style_evidence_v2_from_v1
+from typesetter.gradient_model import canonicalize_linear_gradient
 from typesetter.style_policy import (
     SOURCE_STYLE_CONFIDENCE_THRESHOLD,
     decide_style_copy_v2,
@@ -10406,6 +10407,10 @@ def _neutralize_unallowed_source_style(layer: dict, *, force_black_text: bool = 
         style_input,
         _coerce_background_rgb(layer.get("background_rgb")),
         force_black_text=force_black_text,
+        semantic_role=layer.get("semantic_role"),
+        content_class=layer.get("content_class"),
+        layout_profile=style_input["layout_profile"],
+        preserve_case=_layer_is_translator_note(layer),
     )
     style["style_origin"] = "auto"
     style_confidence = _style_evidence_confidence(evidence)
@@ -10449,9 +10454,10 @@ def _style_from_evidence(
             style["contorno_px"] = int(applied["stroke"].get("width_px") or 0)
         if "font_name" in applied:
             style["fonte"] = applied["font_name"]
-        if "gradient" in applied and isinstance(applied["gradient"], list) and len(applied["gradient"]) >= 2:
-            style["cor_gradiente"] = [str(applied["gradient"][0]), str(applied["gradient"][1])]
-            style["cor"] = str(applied["gradient"][0])
+        gradient = canonicalize_linear_gradient(applied.get("gradient"))
+        if gradient is not None:
+            style["cor_gradiente"] = gradient
+            style["cor"] = str(gradient["colors"][0])
         if "shadow" in applied and isinstance(applied["shadow"], dict):
             style["sombra"] = True
             style["sombra_cor"] = applied["shadow"].get("color") or "#000000"
@@ -11962,12 +11968,25 @@ def build_text_layer(
         style_confidence = _style_evidence_confidence(style_evidence)
         style_source = str(style_evidence.get("source") or "").strip() or style_source
     style_input["tipo"] = ocr_text.get("tipo", "fala")
-    style_input["layout_profile"] = ocr_text.get("layout_profile") or ocr_text.get("block_profile")
+    semantic_role = original_ocr_text.get("semantic_role") or ocr_text.get("semantic_role")
+    style_layout_profile = (
+        "ui_form"
+        if isinstance(ocr_text.get("ui_layout_evidence"), dict)
+        else (ocr_text.get("layout_profile") or ocr_text.get("block_profile"))
+    )
+    style_input["layout_profile"] = style_layout_profile
+    case_policy_layer = dict(original_ocr_text)
+    case_policy_layer.update(ocr_text)
+    case_policy_layer["translated"] = translated
     background_rgb = _coerce_background_rgb(ocr_text.get("background_rgb"))
     style = normalize_auto_typesetting_style(
         style_input,
         background_rgb,
         force_black_text=force_black_text,
+        semantic_role=semantic_role,
+        content_class=ocr_text.get("content_class"),
+        layout_profile=style_layout_profile,
+        preserve_case=_layer_is_translator_note(case_policy_layer),
     )
     style_policy_text = dict(ocr_text)
     style_policy_text["style_origin"] = style_origin

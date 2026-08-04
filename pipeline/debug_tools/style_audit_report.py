@@ -18,6 +18,7 @@ import numpy as np
 
 from typesetter.style_extractor import extract_text_style_evidence
 from typesetter.style_contract import style_evidence_v2_from_v1
+from typesetter.gradient_model import canonicalize_linear_gradient
 from typesetter.style_policy import (
     decide_style_copy_v2,
     style_candidate_copy_allowed,
@@ -48,11 +49,23 @@ def _layer_style(layer: dict) -> dict:
 
 
 def _non_empty_gradient(value: object) -> bool:
-    return isinstance(value, list | tuple) and len(value) >= 2 and all(str(item).strip() for item in value[:2])
+    return canonicalize_linear_gradient(value) is not None
+
+
+def _gradient_direction(value: object) -> dict[str, object] | None:
+    gradient = canonicalize_linear_gradient(value)
+    if gradient is None:
+        return None
+    return {
+        "start": list(gradient["start"]),
+        "end": list(gradient["end"]),
+        "coordinate_space": str(gradient["coordinate_space"]),
+    }
 
 
 def _applied_style_fields(layer: dict) -> dict:
     style = _layer_style(layer)
+    gradient = canonicalize_linear_gradient(style.get("cor_gradiente"))
     return {
         "style_origin": str(layer.get("style_origin") or style.get("style_origin") or ""),
         "style_confidence": float(layer.get("style_confidence") or style.get("style_confidence") or 0.0),
@@ -64,10 +77,10 @@ def _applied_style_fields(layer: dict) -> dict:
         "applied_text_color": str(style.get("cor") or ""),
         "applied_stroke_color": str(style.get("contorno") or ""),
         "applied_stroke_width_px": int(style.get("contorno_px") or 0),
-        "applied_gradient": _non_empty_gradient(style.get("cor_gradiente")),
-        "applied_gradient_colors": list(style.get("cor_gradiente") or [])[:2]
-        if _non_empty_gradient(style.get("cor_gradiente"))
-        else [],
+        "applied_gradient": gradient is not None,
+        "applied_gradient_colors": list(gradient["colors"]) if gradient else [],
+        "applied_gradient_direction": _gradient_direction(gradient),
+        "applied_gradient_spec": gradient,
         "applied_glow": bool(style.get("glow")),
         "applied_glow_color": str(style.get("glow_cor") or ""),
         "applied_glow_px": int(style.get("glow_px") or 0),
@@ -205,6 +218,10 @@ def _read_project_records(run_dir: Path, originals_dir: Path) -> list[dict]:
                 )
             evidence_v2 = style_evidence_v2_from_v1(evidence)
             decision_v2 = decide_style_copy_v2(layer, evidence_v2)
+            gradient_attribute = evidence_v2.attributes.get("gradient")
+            detected_gradient = canonicalize_linear_gradient(
+                gradient_attribute.value if gradient_attribute is not None else None
+            )
             records.append(
                 {
                     "page": page_index,
@@ -219,6 +236,13 @@ def _read_project_records(run_dir: Path, originals_dir: Path) -> list[dict]:
                     "bbox": [x1, y1, x2, y2],
                     **applied_fields,
                     **evidence,
+                    "gradient_colors": (
+                        list(detected_gradient["colors"])
+                        if detected_gradient is not None
+                        else list(evidence.get("gradient_colors") or [])[:2]
+                    ),
+                    "gradient_direction": _gradient_direction(detected_gradient),
+                    "gradient_spec": detected_gradient,
                     "style_evidence_v2": evidence_v2.to_dict(),
                     "style_evidence_v2_shadow_policy": style_evidence_v2_shadow_policy(evidence_v2),
                     "style_application_decision_v2": decision_v2.to_dict(),

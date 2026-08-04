@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from qa import style_fidelity as style_fidelity_mod
+
 from ownership.model import owner_style_raster_contract_sha256
 from qa.style_fidelity import (
     audit_style_fidelity,
@@ -18,6 +20,45 @@ from qa.style_fidelity import (
 from style_v2_fixtures import valid_owner_style_raster_contract
 from test_final_pixel_qa import _graph
 from typesetter.owner_style import build_owner_visual_profile
+
+
+def test_style_fidelity_marks_rotated_gradient_as_mismatch():
+    expected = {
+        "kind": "linear",
+        "colors": ["#6633CC", "#08080A"],
+        "stops": [0.0, 1.0],
+        "start": [0.0, 0.0],
+        "end": [1.0, 1.0],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+    observed = {**expected, "start": [0.5, 0.0], "end": [0.5, 1.0]}
+    profile = {
+        "style_evidence_v2": {
+            "attributes": {"gradient": {"confidence": 0.95}}
+        }
+    }
+    contract = {
+        "schema_version": 2,
+        "materialization_plan": {
+            "attribute_plans": {
+                "gradient": {
+                    "resolution_kind": "exact",
+                    "target_value": expected,
+                }
+            }
+        },
+        "materialization_observation": {
+            "attributes": {"gradient": {"canonical_value": observed}}
+        },
+        "materialization_comparison": {"mismatches": []},
+    }
+
+    attributes, catastrophic = style_fidelity_mod._attribute_results(profile, contract)
+
+    assert attributes["gradient"]["status"] == "mismatch"
+    assert attributes["gradient"]["expected"] == expected
+    assert attributes["gradient"]["observed"] == observed
+    assert "gradient" in catastrophic
 
 
 def _project(*, confidence: float = 0.95, with_contract: bool = True) -> dict:

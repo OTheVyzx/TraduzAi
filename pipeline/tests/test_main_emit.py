@@ -19,6 +19,36 @@ from typesetter.renderer import build_render_blocks  # noqa: E402
 
 
 class MainEmitTests(unittest.TestCase):
+    def test_style_from_evidence_preserves_approved_directional_gradient(self) -> None:
+        gradient = {
+            "kind": "linear",
+            "colors": ["#6633CC", "#08080A"],
+            "stops": [0.0, 1.0],
+            "start": [0.2, 0.1],
+            "end": [0.8, 0.9],
+            "coordinate_space": "glyph_bbox_normalized",
+        }
+        evidence_v2 = SimpleNamespace(
+            attributes={"gradient": SimpleNamespace(confidence=0.94)}
+        )
+        decision = SimpleNamespace(
+            status="applied",
+            applied_attributes={"gradient": gradient},
+        )
+
+        with patch.object(main, "style_evidence_v2_from_v1", return_value=evidence_v2), patch.object(
+            main, "decide_style_copy_v2", return_value=decision
+        ):
+            style, origin, _confidence, _source = main._style_from_evidence(
+                {"cor": "#000000"},
+                {"source": "pixel_analysis", "gradient_confidence": 0.94},
+                {"route_action": "translate_inpaint_render"},
+            )
+
+        self.assertEqual(origin, "source_detected")
+        self.assertEqual(style["cor_gradiente"], gradient)
+        self.assertEqual(style["cor"], "#6633CC")
+
     def test_acceptance_bundle_publishes_pipeline_execution_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -72,6 +102,15 @@ class MainEmitTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         main._detach_work_dir_log_handler()
+
+    def test_default_text_style_uses_bold_for_plain_dialogue(self) -> None:
+        style = main._default_text_style()
+
+        self.assertEqual(style["fonte"], "ComicNeue-Bold.ttf")
+        self.assertTrue(style["bold"])
+        self.assertEqual(style["cor"], "#000000")
+        self.assertEqual(style["contorno"], "")
+        self.assertEqual(style["contorno_px"], 0)
 
     def test_style_audit_exception_becomes_qa_integrity_failure_in_enforce(self) -> None:
         project = {"qa": {}}
@@ -3223,6 +3262,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["layout_profile"], "ui_form")
         self.assertEqual(layer["block_profile"], "ui_form")
         self.assertEqual(layer["ui_layout_evidence"]["source"], "uied_cv")
+        self.assertFalse(layer["estilo"]["force_upper"])
 
     def test_run_ocr_page_uses_detected_blocks_when_text_layers_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4654,7 +4694,17 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["style_origin"], "source_detected")
         self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
         self.assertEqual(layer["estilo"]["cor"], "#010100")
-        self.assertEqual(layer["estilo"]["cor_gradiente"], ["#010100", "#404040"])
+        self.assertEqual(
+            layer["estilo"]["cor_gradiente"],
+            {
+                "kind": "linear",
+                "colors": ["#010100", "#404040"],
+                "stops": [0.0, 1.0],
+                "start": [0.5, 0.0],
+                "end": [0.5, 1.0],
+                "coordinate_space": "glyph_bbox_normalized",
+            },
+        )
         self.assertEqual(layer["estilo"]["contorno"], "#FFFFFE")
 
     def test_build_text_layer_skips_source_style_for_low_confidence_promoted_sfx_detector(self) -> None:
@@ -4862,7 +4912,17 @@ class MainEmitTests(unittest.TestCase):
         self.assertFalse(layer["estilo"]["curva"])
         self.assertEqual(layer["estilo"]["curva_direcao"], "")
         self.assertEqual(layer["estilo"]["curva_intensidade"], 0.0)
-        self.assertEqual(layer["estilo"]["cor_gradiente"], ["#111111", "#666666"])
+        self.assertEqual(
+            layer["estilo"]["cor_gradiente"],
+            {
+                "kind": "linear",
+                "colors": ["#111111", "#666666"],
+                "stops": [0.0, 1.0],
+                "start": [0.5, 0.0],
+                "end": [0.5, 1.0],
+                "coordinate_space": "glyph_bbox_normalized",
+            },
+        )
 
     def test_build_text_layer_keeps_low_confidence_style_evidence_but_uses_auto_style(self) -> None:
         evidence = {
@@ -5673,6 +5733,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["route_action"], "translate_inpaint_render")
         self.assertEqual(layer["action_mask_ref"], "layers/owner-mask/own_page_001_body.png")
         self.assertEqual(layer["layout_region_ids"], ["layout_page_001_body"])
+        self.assertTrue(layer["estilo"]["force_upper"])
 
 
     def test_build_text_layer_preserves_smart_skip_audit_for_project_json(self) -> None:

@@ -7,6 +7,30 @@ import numpy as np
 from debug_tools import style_audit_report
 
 
+def test_applied_style_fields_expose_directional_gradient_without_flattening():
+    gradient = {
+        "kind": "linear",
+        "colors": ["#6633CC", "#08080A"],
+        "stops": [0.0, 1.0],
+        "start": [0.2, 0.1],
+        "end": [0.8, 0.9],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+
+    fields = style_audit_report._applied_style_fields(
+        {"estilo": {"cor": "#6633CC", "cor_gradiente": gradient}}
+    )
+
+    assert fields["applied_gradient"] is True
+    assert fields["applied_gradient_colors"] == gradient["colors"]
+    assert fields["applied_gradient_direction"] == {
+        "start": gradient["start"],
+        "end": gradient["end"],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+    assert fields["applied_gradient_spec"] == gradient
+
+
 class _FakeEvidence:
     def to_dict(self) -> dict:
         return {
