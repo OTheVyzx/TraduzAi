@@ -411,6 +411,29 @@ def compare_style_attribute(name: str, expected: Any, observed: Any) -> Attribut
     domain = ATTRIBUTE_DOMAIN.get(name)
     if domain is None:
         raise ValueError(f"unknown style attribute: {name}")
+    if name == "font_name":
+        expected_payload = _thaw(expected)
+        observed_payload = _thaw(observed)
+        expected_sha = (
+            str(expected_payload.get("file_sha256") or "")
+            if isinstance(expected_payload, Mapping)
+            else ""
+        )
+        observed_sha = (
+            str(observed_payload.get("file_sha256") or "")
+            if isinstance(observed_payload, Mapping)
+            else ""
+        )
+        matches = bool(expected_sha) and expected_sha == observed_sha
+        return AttributeComparison(
+            name=name,
+            domain=domain,
+            expected=expected_payload,
+            observed=observed_payload,
+            matches=matches,
+            tolerance={"kind": "resolved_file_sha256"},
+            reason="" if matches else "resolved_font_identity_mismatch",
+        )
     try:
         canonical_expected = canonicalize_style_attribute(name, expected)
         canonical_observed = canonicalize_style_attribute(name, observed)

@@ -61,6 +61,46 @@ def test_style_fidelity_marks_rotated_gradient_as_mismatch():
     assert "gradient" in catastrophic
 
 
+def test_style_fidelity_matches_identical_resolved_font_identity():
+    identity = {
+        "family": "CCTotallyAwesomeW00-Bold",
+        "file_sha256": "9" * 64,
+        "filename": "CCTotallyAwesome W00 Bold.ttf",
+        "postscript_name": "CCTotallyAwesomeW00-Bold",
+        "subfamily": "Regular",
+        "variation_axes": [],
+        "weight_class": 700,
+        "width_class": 5,
+    }
+    profile = {
+        "style_evidence_v2": {
+            "attributes": {"font_name": {"confidence": 0.91}}
+        }
+    }
+    contract = {
+        "schema_version": 2,
+        "materialization_plan": {
+            "attribute_plans": {
+                "font_name": {
+                    "resolution_kind": "exact",
+                    "target_value": identity,
+                }
+            }
+        },
+        "materialization_observation": {
+            "attributes": {"font_name": {"canonical_value": dict(identity)}}
+        },
+        "materialization_comparison": {"mismatches": []},
+    }
+
+    attributes, catastrophic = style_fidelity_mod._attribute_results(profile, contract)
+
+    assert attributes["font_name"]["status"] == "applied"
+    assert attributes["font_name"]["expected"] == identity
+    assert attributes["font_name"]["observed"] == identity
+    assert catastrophic == []
+
+
 def _project(*, confidence: float = 0.95, with_contract: bool = True) -> dict:
     graph = _graph(state="rendered")
     page_rgb = np.full((24, 40, 3), 245, dtype=np.uint8)
