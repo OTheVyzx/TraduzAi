@@ -38,6 +38,36 @@ from translator.translate import (
 
 
 class TranslateContextTests(unittest.TestCase):
+    def test_google_wrapper_falls_back_to_public_endpoint_and_health_uses_it(self):
+        class _BrokenDeepTranslator:
+            def __init__(self, source, target):
+                self.source = source
+                self.target = target
+
+            def translate(self, _text):
+                raise RuntimeError("deep-translator endpoint unavailable")
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps([[['olá', 'hello', None, None, 10]], 'en']).encode("utf-8")
+
+        with patch("deep_translator.GoogleTranslator", _BrokenDeepTranslator), patch(
+            "translator.translate.urllib.request.urlopen", return_value=_Response()
+        ) as urlopen, patch("translator.translate.time.sleep"):
+            translator = translate_module._GoogleTranslator(source="en", target="pt")
+            _probe_google_backend(translator, "en", "pt")
+
+        self.assertEqual(translator.translate("hello"), "olá")
+        self.assertEqual(urlopen.call_count, 1)
+        request = urlopen.call_args.args[0]
+        self.assertIn("translate.googleapis.com/translate_a/single", request.full_url)
+
     def setUp(self):
         translate_module._google = None
         translate_module._google_health_key = None

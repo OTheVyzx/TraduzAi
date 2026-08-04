@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 import urllib.request
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -486,7 +487,36 @@ class _GoogleTranslator:
             except Exception:
                 if attempt < 2:
                     time.sleep(0.5 * (2 ** attempt))
-        return None
+        try:
+            query = urllib.parse.urlencode(
+                {
+                    "client": "gtx",
+                    "sl": self._source_lang,
+                    "tl": self._target_lang,
+                    "dt": "t",
+                    "q": text,
+                }
+            )
+            request = urllib.request.Request(
+                f"https://translate.googleapis.com/translate_a/single?{query}",
+                headers={"User-Agent": "TraduzAI/1.0"},
+            )
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            segments = payload[0] if isinstance(payload, list) and payload else []
+            result = "".join(
+                str(segment[0])
+                for segment in segments
+                if isinstance(segment, list) and segment and segment[0] is not None
+            ).strip()
+            if not result:
+                return None
+            self._cache[key] = result
+            self._persistent_store(key, result)
+            return result
+        except Exception as exc:
+            logger.debug("Fallback Google publico falhou: %s", exc)
+            return None
 
     def _translate_uncached_batch(self, uncached_texts: list[str]) -> list[str]:
         results: list[Optional[str]] = [None] * len(uncached_texts)
@@ -2259,8 +2289,12 @@ def _preserve_caps_proper_nouns_enabled() -> bool:
 
 def _probe_google_backend(translator: _GoogleTranslator, source_lang: str, target_lang: str) -> None:
     probe = _GOOGLE_HEALTH_PROBES.get(source_lang, "hello")
-    backend = getattr(translator, "_translator", translator)
-    result = backend.translate(probe)
+    translate = getattr(translator, "translate", None)
+    if not callable(translate):
+        translate = getattr(getattr(translator, "_translator", None), "translate", None)
+    if not callable(translate):
+        raise RuntimeError("Google Translate sem metodo de health check")
+    result = translate(probe)
     if not result or not str(result).strip():
         raise RuntimeError("Google Translate retornou resposta vazia no health check")
     if source_lang != target_lang and str(result).strip() == probe:
