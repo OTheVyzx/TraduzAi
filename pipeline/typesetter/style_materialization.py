@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final, Literal, Mapping, Sequence
 
+from typesetter.gradient_model import canonicalize_linear_gradient
 from typesetter.style_contract import STYLE_V2_ATTRIBUTE_NAME_SET
 
 
@@ -228,11 +229,10 @@ def canonicalize_style_attribute(
     if name in {"stroke", "multistroke", "shadow", "glow"}:
         return _canonicalize_effect(value, name=name)
     if name == "gradient":
-        if isinstance(value, Mapping):
-            return _canonicalize_mapping(value, parent=name)
-        if not isinstance(value, (list, tuple)) or len(value) < 2:
-            raise ValueError("gradient must contain at least two colors")
-        return [canonicalize_srgb_color(item) for item in value]
+        gradient = canonicalize_linear_gradient(value)
+        if gradient is None:
+            raise ValueError("gradient must be a valid non-degenerate linear field")
+        return gradient
     if name in {"curve", "container"}:
         return _canonicalize_mapping(value, parent=name)
     raise ValueError(f"canonicalization is not implemented for style attribute: {name}")
@@ -371,6 +371,42 @@ def _compare_effect_raster(
     )
 
 
+def _compare_linear_gradient(
+    expected: Mapping[str, Any],
+    observed: Mapping[str, Any],
+) -> tuple[bool, dict[str, Any], float | None]:
+    geometry_matches = all(
+        expected.get(field) == observed.get(field)
+        for field in ("kind", "stops", "start", "end", "coordinate_space")
+    )
+    expected_colors = expected.get("colors")
+    observed_colors = observed.get("colors")
+    color_distances: list[float] = []
+    colors_match = bool(
+        isinstance(expected_colors, list)
+        and isinstance(observed_colors, list)
+        and len(expected_colors) == 2
+        and len(observed_colors) == 2
+    )
+    if colors_match:
+        for first, second in zip(expected_colors, observed_colors, strict=True):
+            distance = delta_e_2000(first, second)
+            if distance is None:
+                colors_match = False
+                continue
+            color_distances.append(distance)
+            colors_match = colors_match and distance <= 12.0
+    return (
+        geometry_matches and colors_match,
+        {
+            "kind": "linear_gradient_field",
+            "color_delta_e_max": 12.0,
+            "geometry": "canonical_exact",
+        },
+        max(color_distances) if color_distances else None,
+    )
+
+
 def compare_style_attribute(name: str, expected: Any, observed: Any) -> AttributeComparison:
     domain = ATTRIBUTE_DOMAIN.get(name)
     if domain is None:
@@ -396,6 +432,15 @@ def compare_style_attribute(name: str, expected: Any, observed: Any) -> Attribut
         and isinstance(canonical_observed, Mapping)
     ):
         matches, tolerance, color_distance = _compare_effect_raster(
+            canonical_expected,
+            canonical_observed,
+        )
+    elif (
+        name == "gradient"
+        and isinstance(canonical_expected, Mapping)
+        and isinstance(canonical_observed, Mapping)
+    ):
+        matches, tolerance, color_distance = _compare_linear_gradient(
             canonical_expected,
             canonical_observed,
         )

@@ -232,6 +232,70 @@ def test_gradient_supersedes_unobservable_solid_fill_explicitly():
     assert module.compare_materialization(plan, observation).status == "match"
 
 
+def test_gradient_comparison_canonicalizes_equivalent_legacy_vertical_value():
+    module = _materialization_module()
+    structured = {
+        "kind": "linear",
+        "colors": ["#FFFFFF", "#000000"],
+        "stops": [0.0, 1.0],
+        "start": [0.5, 0.0],
+        "end": [0.5, 1.0],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+
+    comparison = module.compare_style_attribute(
+        "gradient",
+        ["#FFFFFF", "#000000"],
+        structured,
+    )
+
+    assert comparison.matches is True
+
+
+def test_gradient_comparison_rejects_matching_colors_on_a_different_axis():
+    module = _materialization_module()
+    vertical = {
+        "kind": "linear",
+        "colors": ["#FFFFFF", "#000000"],
+        "stops": [0.0, 1.0],
+        "start": [0.5, 0.0],
+        "end": [0.5, 1.0],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+    horizontal = {
+        **vertical,
+        "start": [0.0, 0.5],
+        "end": [1.0, 0.5],
+    }
+
+    comparison = module.compare_style_attribute("gradient", vertical, horizontal)
+
+    assert comparison.matches is False
+    assert comparison.reason == "canonical_value_mismatch"
+
+
+def test_gradient_comparison_accepts_measured_endpoint_color_tolerance():
+    module = _materialization_module()
+    expected = {
+        "kind": "linear",
+        "colors": ["#FF0000", "#FFFF00"],
+        "stops": [0.0, 1.0],
+        "start": [0.0, 0.5],
+        "end": [1.0, 0.5],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+    observed = {
+        **expected,
+        "colors": ["#FF0800", "#FFF700"],
+    }
+
+    comparison = module.compare_style_attribute("gradient", expected, observed)
+
+    assert comparison.matches is True
+    assert comparison.tolerance["kind"] == "linear_gradient_field"
+    assert comparison.tolerance["color_delta_e_max"] == 12.0
+
+
 def test_xheight_units_resolve_before_raster_and_compare_in_execution_units():
     module = _materialization_module()
     intent = _intent(

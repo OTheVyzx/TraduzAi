@@ -16,6 +16,8 @@ if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
 from typesetter.glyph_rasterizer import rasterize_v2_glyph_layers  # noqa: E402
+from typesetter.gradient_model import canonicalize_linear_gradient  # noqa: E402
+from typesetter.style_materialization import compare_style_attribute  # noqa: E402
 
 
 def _glyph(shape=(120, 260)) -> np.ndarray:
@@ -29,6 +31,85 @@ def _safe(shape=(120, 260), inset=8) -> np.ndarray:
     mask = np.zeros(shape, dtype=np.uint8)
     mask[inset : shape[0] - inset, inset : shape[1] - inset] = 255
     return mask
+
+
+def test_solid_fill_preserves_antialiased_glyph_coverage() -> None:
+    core = np.zeros((32, 48), dtype=np.uint8)
+    core[8:24, 12:36] = 255
+    core[7, 13:35] = 96
+    core[24, 13:35] = 176
+    core[9:23, 11] = 64
+    core[9:23, 36] = 208
+
+    result = rasterize_v2_glyph_layers(
+        core,
+        np.full_like(core, 255),
+        {"fill": "#202020"},
+        rendered_x_height_px=18,
+    )
+
+    assert result.status == "applied"
+    assert np.array_equal(result.glyph_core_mask, core)
+    assert np.array_equal(result.rgba[:, :, 3], core)
+    assert set(np.unique(result.rgba[:, :, 3])) >= {0, 64, 96, 176, 208, 255}
+
+
+def test_geometric_transform_keeps_partial_alpha_edges() -> None:
+    core = np.zeros((60, 100), dtype=np.uint8)
+    cv2.circle(core, (50, 30), 15, 255, -1, lineType=cv2.LINE_AA)
+
+    result = rasterize_v2_glyph_layers(
+        core,
+        np.full_like(core, 255),
+        {
+            "fill": "#FFFFFF",
+            "width_scale": 0.83,
+            "slant_tangent": 0.16,
+            "rotation_deg": 4.0,
+        },
+        rendered_x_height_px=24,
+    )
+
+    partial = result.rgba[:, :, 3]
+    assert result.status == "applied"
+    assert np.any((partial > 0) & (partial < 255))
+
+
+def test_partial_fill_coverage_blends_over_outline_instead_of_replacing_it() -> None:
+    core = np.zeros((24, 32), dtype=np.uint8)
+    core[8:16, 12:20] = 255
+    core[8:16, 11] = 128
+
+    result = rasterize_v2_glyph_layers(
+        core,
+        np.full_like(core, 255),
+        {
+            "fill": "#FFFFFF",
+            "stroke": {"color": "#000000", "width_px": 1},
+        },
+        rendered_x_height_px=16,
+    )
+
+    edge_rgb = result.rgba[12, 11, :3]
+    assert result.rgba[12, 11, 3] == 255
+    assert np.all((edge_rgb > 0) & (edge_rgb < 255))
+
+
+def test_fill_observation_uses_isolated_fill_layer_when_outline_is_underneath() -> None:
+    core = np.zeros((24, 32), dtype=np.uint8)
+    core[8:16, 15] = 128
+
+    result = rasterize_v2_glyph_layers(
+        core,
+        np.full_like(core, 255),
+        {
+            "fill": "#FFFFFF",
+            "stroke": {"color": "#000000", "width_px": 2},
+        },
+        rendered_x_height_px=16,
+    )
+
+    assert result.observed_attributes["fill"] == "#FFFFFF"
 
 
 def test_renderer_applies_v2_tracking_slant_and_width() -> None:
@@ -87,6 +168,91 @@ def test_renderer_applies_multistroke_shadow_glow_and_gradient_layers() -> None:
     assert {"multistroke", "shadow", "glow", "gradient"}.issubset(result.observed_attributes)
     colors = np.unique(result.rgba[result.rgba[:, :, 3] > 0, :3].reshape(-1, 3), axis=0)
     assert len(colors) >= 4
+
+
+def _directional_gradient(
+    colors: tuple[str, str],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> dict[str, object]:
+    value = canonicalize_linear_gradient(
+        {
+            "kind": "linear",
+            "colors": list(colors),
+            "stops": [0.0, 1.0],
+            "start": list(start),
+            "end": list(end),
+            "coordinate_space": "glyph_bbox_normalized",
+        }
+    )
+    assert value is not None
+    return value
+
+
+def _multiline_core() -> np.ndarray:
+    core = np.zeros((70, 120), dtype=np.uint8)
+    core[10:22, 10:110] = 255
+    core[30:42, 28:92] = 255
+    core[50:62, 16:104] = 255
+    return core
+
+
+def test_rasterizer_applies_horizontal_gradient_over_complete_multiline_union() -> None:
+    gradient = _directional_gradient(
+        ("#FF0000", "#FFFF00"),
+        (0.0, 0.5),
+        (1.0, 0.5),
+    )
+
+    result = rasterize_v2_glyph_layers(
+        _multiline_core(),
+        np.full((70, 120), 255, dtype=np.uint8),
+        {"gradient": gradient},
+        rendered_x_height_px=18,
+    )
+
+    assert compare_style_attribute(
+        "gradient", gradient, result.observed_attributes["gradient"]
+    ).matches
+    assert tuple(result.rgba[15, 10, :3]) == (255, 0, 0)
+    assert tuple(result.rgba[15, 109, :3]) == (255, 255, 0)
+    assert tuple(result.rgba[15, 50, :3]) == tuple(result.rgba[35, 50, :3])
+
+
+def test_rasterizer_applies_diagonal_gradient_without_restarting_each_line() -> None:
+    gradient = _directional_gradient(
+        ("#2040E0", "#20D050"),
+        (0.0, 0.0),
+        (1.0, 1.0),
+    )
+
+    result = rasterize_v2_glyph_layers(
+        _multiline_core(),
+        np.full((70, 120), 255, dtype=np.uint8),
+        {"gradient": gradient},
+        rendered_x_height_px=18,
+    )
+
+    upper = result.rgba[15, 20, :3].astype(int)
+    lower = result.rgba[55, 20, :3].astype(int)
+    assert compare_style_attribute(
+        "gradient", gradient, result.observed_attributes["gradient"]
+    ).matches
+    assert lower[1] > upper[1]
+    assert lower[2] < upper[2]
+
+
+def test_rasterizer_canonicalizes_legacy_vertical_gradient() -> None:
+    result = rasterize_v2_glyph_layers(
+        _multiline_core(),
+        np.full((70, 120), 255, dtype=np.uint8),
+        {"gradient": ["#6633CC", "#08080A"]},
+        rendered_x_height_px=18,
+    )
+
+    assert result.observed_attributes["gradient"] == canonicalize_linear_gradient(
+        ["#6633CC", "#08080A"]
+    )
 
 
 def test_shadow_observation_preserves_executed_offset_when_layer_is_clipped_at_page_edge() -> None:

@@ -10,6 +10,12 @@ from typing import Any, Callable, Mapping
 import cv2
 import numpy as np
 
+from typesetter.gradient_model import (
+    canonicalize_linear_gradient,
+    gradient_parameter_map,
+    render_linear_gradient_rgb,
+)
+
 
 @dataclass(frozen=True)
 class GlyphRasterResult:
@@ -40,6 +46,19 @@ def _binary(mask: np.ndarray, *, shape: tuple[int, int] | None = None) -> np.nda
     if shape is not None and raw.shape != shape:
         raise ValueError("safe mask must match glyph mask dimensions")
     return np.where(raw > 0, 255, 0).astype(np.uint8)
+
+
+def _coverage(mask: np.ndarray, *, shape: tuple[int, int] | None = None) -> np.ndarray:
+    """Normalize an antialiased coverage mask without destroying partial alpha."""
+
+    raw = np.asarray(mask)
+    if raw.ndim != 2:
+        raise ValueError("glyph masks must be two-dimensional")
+    if shape is not None and raw.shape != shape:
+        raise ValueError("glyph mask dimensions must match")
+    if raw.dtype == np.uint8:
+        return raw.copy()
+    return np.clip(raw, 0, 255).astype(np.uint8)
 
 
 def _bbox(mask: np.ndarray) -> tuple[int, int, int, int] | None:
@@ -86,7 +105,9 @@ def _transform_core(
     center = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
     tracking_xh = max(-0.25, min(1.0, _finite(style, "tracking_xh", 0.0)))
     if abs(tracking_xh) > 1e-6:
-        count, labels, stats, centroids = cv2.connectedComponentsWithStats(transformed, 8)
+        count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            _binary(transformed), 8
+        )
         parts = [
             (label, float(centroids[label][0]))
             for label in range(1, count)
@@ -99,11 +120,14 @@ def _transform_core(
         for index, (label, _centroid_x) in enumerate(parts):
             dx = int(round((index - midpoint) * step))
             matrix = np.asarray([[1.0, 0.0, dx], [0.0, 1.0, 0.0]], dtype=np.float32)
+            component = np.where(labels == label, transformed, 0).astype(np.uint8)
             shifted = cv2.warpAffine(
-                np.where(labels == label, 255, 0).astype(np.uint8),
+                component,
                 matrix,
                 (transformed.shape[1], transformed.shape[0]),
-                flags=cv2.INTER_NEAREST,
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
             )
             tracked = np.maximum(tracked, shifted)
         transformed = tracked
@@ -114,14 +138,17 @@ def _transform_core(
     if bbox is None:
         raise ValueError("tracking removed every glyph pixel")
     crop = transformed[bbox[1] : bbox[3], bbox[0] : bbox[2]]
-    crop = cv2.resize(
-        crop,
-        (
-            max(1, int(round(crop.shape[1] * width_scale))),
-            max(1, int(round(crop.shape[0] * scale_y))),
-        ),
-        interpolation=cv2.INTER_NEAREST,
+    target_size = (
+        max(1, int(round(crop.shape[1] * width_scale))),
+        max(1, int(round(crop.shape[0] * scale_y))),
     )
+    if target_size != (crop.shape[1], crop.shape[0]):
+        interpolation = (
+            cv2.INTER_AREA
+            if target_size[0] < crop.shape[1] or target_size[1] < crop.shape[0]
+            else cv2.INTER_LINEAR
+        )
+        crop = cv2.resize(crop, target_size, interpolation=interpolation)
     transformed = _place_centered(transformed, crop, center)
 
     slant = max(-0.75, min(0.75, _finite(style, "slant_tangent", 0.0)))
@@ -134,7 +161,9 @@ def _transform_core(
             transformed,
             matrix,
             (transformed.shape[1], transformed.shape[0]),
-            flags=cv2.INTER_NEAREST,
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
         )
     rotation = max(-60.0, min(60.0, _finite(style, "rotation_deg", 0.0)))
     if abs(rotation) > 1e-6:
@@ -143,9 +172,11 @@ def _transform_core(
             transformed,
             matrix,
             (transformed.shape[1], transformed.shape[0]),
-            flags=cv2.INTER_NEAREST,
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
         )
-    return _binary(transformed), {
+    return _coverage(transformed), {
         "tracking_xh": tracking_xh,
         "slant_tangent": slant,
         "width_scale": width_scale,
@@ -208,15 +239,78 @@ def _outside(mask: np.ndarray, safe: np.ndarray) -> int:
     return int(np.count_nonzero((mask > 0) & (safe == 0)))
 
 
-def _paint_solid(rgba: np.ndarray, mask: np.ndarray, color: tuple[int, int, int], alpha: np.ndarray | int = 255) -> None:
-    active = mask > 0
+def _paint_solid(
+    rgba: np.ndarray,
+    mask: np.ndarray,
+    color: tuple[int, int, int],
+    alpha: np.ndarray | int = 255,
+) -> None:
+    coverage = np.asarray(mask, dtype=np.float32) / 255.0
+    if isinstance(alpha, np.ndarray):
+        source_alpha = np.where(
+            coverage > 0,
+            np.asarray(alpha, dtype=np.float32) / 255.0,
+            0.0,
+        )
+    else:
+        source_alpha = coverage * (max(0, min(255, int(alpha))) / 255.0)
+    active = source_alpha > 0
     if not np.any(active):
         return
-    rgba[active, :3] = color
-    if isinstance(alpha, np.ndarray):
-        rgba[active, 3] = np.maximum(rgba[active, 3], alpha[active])
-    else:
-        rgba[active, 3] = np.maximum(rgba[active, 3], int(alpha))
+    src_a = source_alpha[active]
+    dst_a = rgba[active, 3].astype(np.float32) / 255.0
+    out_a = src_a + dst_a * (1.0 - src_a)
+    src_rgb = np.asarray(color, dtype=np.float32)[None, :]
+    dst_rgb = rgba[active, :3].astype(np.float32)
+    numerator = (
+        src_rgb * src_a[:, None]
+        + dst_rgb * dst_a[:, None] * (1.0 - src_a[:, None])
+    )
+    rgba[active, :3] = np.rint(
+        np.clip(
+            np.divide(
+                numerator,
+                out_a[:, None],
+                out=np.zeros_like(numerator),
+                where=out_a[:, None] > 0,
+            ),
+            0,
+            255,
+        )
+    ).astype(np.uint8)
+    rgba[active, 3] = np.rint(np.clip(out_a * 255.0, 0, 255)).astype(np.uint8)
+
+
+def _paint_rgb(rgba: np.ndarray, mask: np.ndarray, pixels: np.ndarray) -> None:
+    coverage = np.asarray(mask, dtype=np.float32) / 255.0
+    source = np.asarray(pixels, dtype=np.float32)
+    if source.shape != (*coverage.shape, 3):
+        raise ValueError("gradient pixels must match the glyph mask")
+    active = coverage > 0
+    if not np.any(active):
+        return
+    src_a = coverage[active]
+    dst_a = rgba[active, 3].astype(np.float32) / 255.0
+    out_a = src_a + dst_a * (1.0 - src_a)
+    numerator = (
+        source[active] * src_a[:, None]
+        + rgba[active, :3].astype(np.float32)
+        * dst_a[:, None]
+        * (1.0 - src_a[:, None])
+    )
+    rgba[active, :3] = np.rint(
+        np.clip(
+            np.divide(
+                numerator,
+                out_a[:, None],
+                out=np.zeros_like(numerator),
+                where=out_a[:, None] > 0,
+            ),
+            0,
+            255,
+        )
+    ).astype(np.uint8)
+    rgba[active, 3] = np.rint(np.clip(out_a * 255.0, 0, 255)).astype(np.uint8)
 
 
 def _contains_xheight_units(value: Any) -> bool:
@@ -272,16 +366,30 @@ def _measured_expansion_px(core: np.ndarray, layer: np.ndarray) -> float:
     return float(round(float(np.max(distance[outside]))))
 
 
-def _gradient_endpoints(pixels: np.ndarray, core: np.ndarray) -> list[str]:
-    ys = np.nonzero(core > 0)[0]
-    if not len(ys):
+def _gradient_endpoints(
+    pixels: np.ndarray,
+    core: np.ndarray,
+    gradient: object,
+) -> dict[str, object]:
+    canonical = canonicalize_linear_gradient(gradient)
+    if canonical is None:
+        raise ValueError("gradient layer has an invalid canonical value")
+    active = (np.asarray(core) > 0) & (np.asarray(pixels)[:, :, 3] > 0)
+    if not np.any(active):
         raise ValueError("gradient layer has no core pixels")
-    colors = []
-    for y in (int(ys.min()), int(ys.max())):
-        row_mask = np.zeros_like(core)
-        row_mask[y, :] = core[y, :]
-        colors.append(_observed_color(pixels, row_mask))
-    return colors
+    parameter = gradient_parameter_map(core, canonical)
+    values = parameter[active]
+    tail_count = min(len(values), max(8, int(round(len(values) * 0.025))))
+    order = np.argsort(values)
+    rgb = np.asarray(pixels)[active, :3]
+    first = np.median(rgb[order[:tail_count]], axis=0)
+    second = np.median(rgb[order[-tail_count:]], axis=0)
+    observed = copy.deepcopy(canonical)
+    observed["colors"] = [
+        "#" + "".join(f"{int(round(float(channel))):02X}" for channel in color)
+        for color in (first, second)
+    ]
+    return observed
 
 
 def _observe_backend_layers(
@@ -326,7 +434,11 @@ def _observe_backend_layers(
         row = gradient_rows[0]
         mask = _binary(np.asarray(row["mask"]), shape=core.shape)
         pixels = np.asarray(row["pixels"], dtype=np.uint8)
-        observed["gradient"] = _gradient_endpoints(pixels, mask)
+        observed["gradient"] = _gradient_endpoints(
+            pixels,
+            mask,
+            style.get("gradient"),
+        )
         digest = _array_evidence_sha256(mask, pixels)
         evidence["gradient"] = {
             "evidence_kind": "layer_pixels_and_mask",
@@ -430,7 +542,7 @@ def rasterize_v2_glyph_layers(
 ) -> GlyphRasterResult:
     """Transform and compose glyph/effect masks without clipping requested ink."""
 
-    glyph = _binary(glyph_mask)
+    glyph = _coverage(glyph_mask)
     safe = _binary(safe_mask, shape=glyph.shape)
     raw_x_height = rendered_x_height_px if rendered_x_height_px is not None else source_x_height_px
     if raw_x_height is None:
@@ -443,7 +555,7 @@ def rasterize_v2_glyph_layers(
         if not isinstance(raw_output, Mapping):
             raise ValueError("glyph raster backend must return an observable mapping")
         rgba = np.asarray(raw_output.get("rgba"), dtype=np.uint8)
-        core = _binary(np.asarray(raw_output.get("glyph_core_mask")), shape=glyph.shape)
+        core = _coverage(np.asarray(raw_output.get("glyph_core_mask")), shape=glyph.shape)
         if rgba.shape != (*glyph.shape, 4):
             raise ValueError("glyph raster backend RGBA shape is invalid")
         layers = raw_output.get("layers")
@@ -536,7 +648,9 @@ def rasterize_v2_glyph_layers(
         accepted_strokes.append((stroke, candidate, width))
         maximum_stroke_width = max(maximum_stroke_width, width)
     for stroke, candidate, _width in sorted(accepted_strokes, key=lambda item: -item[2]):
-        accepted_effects.append(("stroke", candidate, _color(stroke.get("color"), (0, 0, 0)), 255))
+        accepted_effects.append(
+            ("stroke", candidate, _color(stroke.get("color"), (0, 0, 0)), candidate)
+        )
         effect_union = np.maximum(effect_union, candidate)
     if accepted_strokes:
         name = "multistroke" if len(strokes) > 1 else "stroke"
@@ -549,7 +663,18 @@ def rasterize_v2_glyph_layers(
         if _outside(candidate, safe):
             abstained["shadow"] = "effect_envelope_outside_safe"
         else:
-            accepted_effects.insert(0, ("shadow", candidate, _color(shadow.get("color"), (0, 0, 0)), 210))
+            shadow_alpha = np.clip(
+                candidate.astype(np.float32) * (210.0 / 255.0), 0, 210
+            ).astype(np.uint8)
+            accepted_effects.insert(
+                0,
+                (
+                    "shadow",
+                    candidate,
+                    _color(shadow.get("color"), (0, 0, 0)),
+                    shadow_alpha,
+                ),
+            )
             effect_union = np.maximum(effect_union, candidate)
             applied["shadow"] = copy.deepcopy(dict(shadow))
 
@@ -570,20 +695,19 @@ def rasterize_v2_glyph_layers(
     for _name, mask, color, alpha in accepted_effects:
         _paint_solid(rgba, mask, color, alpha)
 
-    gradient = style.get("gradient")
-    if isinstance(gradient, (list, tuple)) and len(gradient) >= 2:
-        top = np.asarray(_color(gradient[0], (0, 0, 0)), dtype=np.float32)
-        bottom = np.asarray(_color(gradient[1], (255, 255, 255)), dtype=np.float32)
-        core_bbox = _bbox(core)
-        assert core_bbox is not None
-        for y in range(core_bbox[1], core_bbox[3]):
-            ratio = (y - core_bbox[1]) / max(1.0, float(core_bbox[3] - core_bbox[1] - 1))
-            row_color = tuple(int(round(value)) for value in (top * (1.0 - ratio) + bottom * ratio))
-            _paint_solid(rgba, np.where((core > 0) & (np.indices(core.shape)[0] == y), 255, 0).astype(np.uint8), row_color)
-        applied["gradient"] = list(gradient[:2])
+    core_layer_pixels = np.zeros_like(rgba)
+    gradient = canonicalize_linear_gradient(style.get("gradient"))
+    if gradient is not None:
+        gradient_pixels = render_linear_gradient_rgb(core, gradient)
+        _paint_rgb(rgba, core, gradient_pixels)
+        core_layer_pixels[:, :, :3] = gradient_pixels
+        core_layer_pixels[:, :, 3] = core
+        applied["gradient"] = gradient
     else:
         fill = style.get("fill") or style.get("fill_color") or "#000000"
-        _paint_solid(rgba, core, _color(fill, (0, 0, 0)))
+        fill_color = _color(fill, (0, 0, 0))
+        _paint_solid(rgba, core, fill_color, core)
+        _paint_solid(core_layer_pixels, core, fill_color, core)
         applied["fill"] = fill
 
     output_outside = _outside(rgba[:, :, 3], safe)
@@ -600,6 +724,7 @@ def rasterize_v2_glyph_layers(
                 "pixels": _layer_pixels(
                     candidate,
                     _color(stroke.get("color"), (0, 0, 0)),
+                    candidate,
                 ),
             }
             for stroke, candidate, _width in accepted_strokes
@@ -614,10 +739,8 @@ def rasterize_v2_glyph_layers(
                     "pixels": _layer_pixels(layer_mask, layer_color, layer_alpha),
                 }
             ]
-    core_pixels = np.zeros_like(rgba)
-    core_pixels[core > 0] = rgba[core > 0]
     layers["gradient" if "gradient" in applied else "fill"] = [
-        {"mask": core, "pixels": core_pixels}
+        {"mask": core, "pixels": core_layer_pixels}
     ]
     observed, evidence, evidence_hashes, unavailable = _observe_backend_layers(
         rgba=rgba,
