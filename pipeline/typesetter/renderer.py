@@ -34,7 +34,15 @@ if matplotlib.get_backend().lower() != "agg":
 from matplotlib.ft2font import FT2Font as _FT2Font
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from typesetter.glyph_rasterizer import GlyphRasterResult, rasterize_v2_glyph_layers
-from typesetter.style_policy import normalize_auto_typesetting_style, sample_text_background_rgb
+from typesetter.gradient_model import (
+    canonicalize_linear_gradient,
+    render_linear_gradient_rgb,
+)
+from typesetter.style_policy import (
+    normalize_auto_typesetting_style,
+    resolve_auto_force_upper,
+    sample_text_background_rgb,
+)
 from typesetter.owner_style import validate_owner_visual_profile
 from typesetter.font_identity import resolve_font_identity
 from typesetter.style_materialization import (
@@ -386,7 +394,9 @@ def _canonical_render_style(estilo: dict | None) -> dict:
     style.setdefault("bold", True)
     style.setdefault("italico", False)
     style.setdefault("cor", "#000000")
-    style.setdefault("cor_gradiente", [])
+    style["cor_gradiente"] = canonicalize_linear_gradient(
+        style.get("cor_gradiente")
+    ) or []
     style.setdefault("contorno", "")
     if not style.get("contorno") and int(style.get("contorno_px", 0) or 0) > 0:
         style["contorno"] = "#000000"
@@ -967,6 +977,13 @@ def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> Non
         text_data["style_origin"] = "owner_style_v2"
         style = dict(normalized.get("applied_style") or {})
         style["style_origin"] = "owner_style_v2"
+        style["force_upper"] = resolve_auto_force_upper(
+            style,
+            semantic_role=text_data.get("semantic_role"),
+            content_class=text_data.get("content_class"),
+            layout_profile=text_data.get("layout_profile") or text_data.get("block_profile"),
+            preserve_case=_is_translator_note_layer(text_data),
+        )
         text_data["estilo"] = style
         text_data["style"] = style
         return
@@ -998,6 +1015,10 @@ def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> Non
         text_data.get("estilo", {}),
         background_rgb,
         force_black_text=force_black_text,
+        semantic_role=text_data.get("semantic_role"),
+        content_class=text_data.get("content_class"),
+        layout_profile=profile,
+        preserve_case=_is_translator_note_layer(text_data),
     )
     text_data["style"] = text_data["estilo"]
     _apply_dark_panel_glow_fallback(text_data, background_rgb)
@@ -1506,7 +1527,10 @@ def _seal_owner_materialization_plan(
             }
         elif name == "gradient":
             targets[name] = copy.deepcopy(
-                layout_plan.get("cor_gradiente") or value
+                canonicalize_linear_gradient(
+                    layout_plan.get("cor_gradiente") or value
+                )
+                or value
             )
         elif name == "rotation_deg":
             targets[name] = float(layout_plan.get("rotation_deg") or value or 0.0)
@@ -1589,7 +1613,7 @@ def _render_v2_owner_core_mask(
             positions,
             fill_color="#FFFFFF",
         )
-        return np.where(np.max(core_rgb, axis=2) > 0, 255, 0).astype(np.uint8)
+        return np.max(core_rgb, axis=2).astype(np.uint8)
     for line, (origin_x, origin_y) in zip(lines, positions, strict=True):
         extra_width = max(0, len(line) - 1) * tracking_px
         cursor_x = float(origin_x)
@@ -1613,7 +1637,7 @@ def _render_v2_owner_core_mask(
                         mask[my1:my1 + ty2 - ty1, mx1:mx1 + tx2 - tx1],
                     )
             cursor_x += advance + tracking_px
-    return np.where(core > 0, 255, 0).astype(np.uint8)
+    return core
 
 
 def _render_v2_owner_text_layer(
@@ -1632,11 +1656,21 @@ def _render_v2_owner_text_layer(
     profile = text_data.get("visual_profile_v2")
     if not isinstance(profile, dict):
         return None
+    decision = profile.get("style_application_decision_v2")
+    if isinstance(decision, Mapping):
+        decision_status = str(decision.get("status") or "").strip().lower()
+        decision_applied = decision.get("applied_attributes")
+        if (
+            decision_status != "applied"
+            or not isinstance(decision_applied, Mapping)
+            or not decision_applied
+        ):
+            return None
     _seal_owner_materialization_plan(text_data, plan, font, lines, positions)
     applied_style = profile.get("applied_style")
     applied_style = applied_style if isinstance(applied_style, dict) else {}
     core = (
-        np.where(np.asarray(core_override) > 0, 255, 0).astype(np.uint8)
+        np.clip(np.asarray(core_override), 0, 255).astype(np.uint8)
         if core_override is not None
         else _render_v2_owner_core_mask(
             image_np.shape[:2],
@@ -1701,9 +1735,9 @@ def _render_v2_owner_text_layer(
             "color": plan["glow_cor"],
             "width_px": int(plan["glow_px"]),
         }
-    gradient = plan.get("cor_gradiente")
-    if isinstance(gradient, (list, tuple)) and len(gradient) >= 2:
-        raster_style["gradient"] = list(gradient[:2])
+    gradient = canonicalize_linear_gradient(plan.get("cor_gradiente"))
+    if gradient is not None:
+        raster_style["gradient"] = gradient
     sealed_plan = text_data.get("_sealed_materialization_plan_v1")
     if isinstance(sealed_plan, Mapping):
         materialization = materialization_plan_from_dict(sealed_plan)
@@ -2385,26 +2419,76 @@ def _apply_safe_glow(
     image_np[roi_y1:roi_y2, roi_x1:roi_x2] = np.clip(blended, 0, 255).astype(np.uint8)
 
 
+def _positioned_mask_union(
+    canvas_shape: tuple[int, int],
+    positioned_masks: list[tuple[np.ndarray, int, int]],
+) -> tuple[np.ndarray, int, int] | None:
+    """Combine positioned glyph masks into one clipped block-level mask."""
+
+    canvas_height, canvas_width = [int(value) for value in canvas_shape[:2]]
+    valid = [
+        (np.asarray(mask, dtype=np.uint8), int(origin_x), int(origin_y))
+        for mask, origin_x, origin_y in positioned_masks
+        if np.asarray(mask).ndim == 2 and np.asarray(mask).size > 0
+    ]
+    if not valid:
+        return None
+    x1 = max(0, min(origin_x for _mask, origin_x, _origin_y in valid))
+    y1 = max(0, min(origin_y for _mask, _origin_x, origin_y in valid))
+    x2 = min(
+        canvas_width,
+        max(origin_x + mask.shape[1] for mask, origin_x, _origin_y in valid),
+    )
+    y2 = min(
+        canvas_height,
+        max(origin_y + mask.shape[0] for mask, _origin_x, origin_y in valid),
+    )
+    if x2 <= x1 or y2 <= y1:
+        return None
+    union = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+    for mask, origin_x, origin_y in valid:
+        clip_x1 = max(x1, origin_x)
+        clip_y1 = max(y1, origin_y)
+        clip_x2 = min(x2, origin_x + mask.shape[1])
+        clip_y2 = min(y2, origin_y + mask.shape[0])
+        if clip_x2 <= clip_x1 or clip_y2 <= clip_y1:
+            continue
+        source_x1 = clip_x1 - origin_x
+        source_y1 = clip_y1 - origin_y
+        source_x2 = source_x1 + (clip_x2 - clip_x1)
+        source_y2 = source_y1 + (clip_y2 - clip_y1)
+        target_x1 = clip_x1 - x1
+        target_y1 = clip_y1 - y1
+        target_x2 = target_x1 + (clip_x2 - clip_x1)
+        target_y2 = target_y1 + (clip_y2 - clip_y1)
+        union[target_y1:target_y2, target_x1:target_x2] = np.maximum(
+            union[target_y1:target_y2, target_x1:target_x2],
+            mask[source_y1:source_y2, source_x1:source_x2],
+        )
+    if not np.any(union):
+        return None
+    return union, x1, y1
+
+
 def _apply_safe_gradient_text(
     image_np: np.ndarray,
     lines: list[str],
     font: SafeTextPathFont,
     positions: list[tuple[int, int]],
-    color_top: str,
-    color_bottom: str,
+    gradient: object,
     outline_color: str,
     outline_px: int,
-    start_y: int,
-    total_height: int,
 ) -> None:
-    ct = np.array(_parse_hex_color(color_top), dtype=np.float32)
-    cb = np.array(_parse_hex_color(color_bottom), dtype=np.float32)
-
+    canonical = canonicalize_linear_gradient(gradient)
+    if canonical is None:
+        raise ValueError("invalid text gradient")
+    positioned_masks: list[tuple[np.ndarray, int, int]] = []
     for line, (lx, ly) in zip(lines, positions):
         pad = max(0, outline_px)
         mask = _build_textpath_mask(font, line, padding=pad)
         origin_x = lx - pad
         origin_y = ly - pad
+        positioned_masks.append((mask, origin_x, origin_y))
 
         if outline_color and outline_px > 0:
             kernel = cv2.getStructuringElement(
@@ -2414,14 +2498,18 @@ def _apply_safe_gradient_text(
             outline_mask = cv2.dilate(mask, kernel, iterations=1)
             _blend_mask_into_image(image_np, outline_mask, origin_x, origin_y, outline_color)
 
-        gradient_patch = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
-        for y in range(mask.shape[0]):
-            global_y = (origin_y + y) - start_y
-            t = float(np.clip(global_y / max(1, total_height), 0.0, 1.0))
-            color = (ct * (1.0 - t) + cb * t).clip(0, 255).astype(np.uint8)
-            gradient_patch[y, :] = color
-
-        _blend_rgb_patch_with_mask(image_np, gradient_patch, mask, origin_x, origin_y)
+    combined = _positioned_mask_union(image_np.shape[:2], positioned_masks)
+    if combined is None:
+        return
+    union_mask, origin_x, origin_y = combined
+    gradient_patch = render_linear_gradient_rgb(union_mask, canonical)
+    _blend_rgb_patch_with_mask(
+        image_np,
+        gradient_patch,
+        union_mask,
+        origin_x,
+        origin_y,
+    )
 
 
 def set_project_font_assets(font_assets: dict | None) -> None:
@@ -16611,12 +16699,15 @@ def ensure_legible_plan(img: Image.Image, plan: dict) -> dict:
             adjusted["outline_color"] = ""
             adjusted["outline_px"] = 0
 
-    gradient = adjusted.get("cor_gradiente", []) or []
-    if len(gradient) >= 2:
-        top_gap = _contrast_gap(gradient[0], bg_hex)
-        bottom_gap = _contrast_gap(gradient[1], bg_hex)
-        if min(top_gap, bottom_gap) < 70:
+    gradient = canonicalize_linear_gradient(adjusted.get("cor_gradiente"))
+    if gradient is not None:
+        endpoint_gaps = [
+            _contrast_gap(color, bg_hex) for color in gradient["colors"]
+        ]
+        if min(endpoint_gaps) < 70:
             adjusted["cor_gradiente"] = []
+        else:
+            adjusted["cor_gradiente"] = gradient
 
     return adjusted
 
@@ -17300,7 +17391,8 @@ def _rotation_sentinel_rgb(plan: dict) -> tuple[int, int, int]:
             used_colors.add(tuple(int(v) for v in _parse_hex_color(str(value))[:3]))
         except Exception:
             continue
-    for value in plan.get("cor_gradiente") or []:
+    gradient = canonicalize_linear_gradient(plan.get("cor_gradiente"))
+    for value in gradient["colors"] if gradient is not None else []:
         try:
             used_colors.add(tuple(int(v) for v in _parse_hex_color(str(value))[:3]))
         except Exception:
@@ -17871,13 +17963,12 @@ def _render_single_text_block_unrotated(
                 plan["glow_cor"], int(plan["glow_px"]),
             )
 
-        gradient = plan["cor_gradiente"]
-        if gradient and len(gradient) >= 2:
+        gradient = canonicalize_linear_gradient(plan.get("cor_gradiente"))
+        if gradient is not None:
             _apply_safe_gradient_text(
                 image_np, best_lines, best_font, positions,
-                gradient[0], gradient[1],
+                gradient,
                 outline_color, outline_px,
-                start_y, total_text_height,
             )
         else:
             _render_safe_text_layer(
@@ -17918,13 +18009,11 @@ def _render_single_text_block_unrotated(
                         continue
                     draw.text((lx + dx, ly + dy), line, font=best_font, fill=outline_color)
 
-    gradient = plan["cor_gradiente"]
-    if gradient and len(gradient) >= 2:
+    gradient = canonicalize_linear_gradient(plan.get("cor_gradiente"))
+    if gradient is not None:
         _apply_gradient_text(
             render_layer, best_lines, best_font, positions,
-            gradient[0], gradient[1],
-            outline_color, outline_px,
-            start_y, total_text_height,
+            gradient,
         )
     else:
         draw = ImageDraw.Draw(render_layer)
@@ -18326,17 +18415,13 @@ def _apply_gradient_text(
     lines: list,
     font: ImageFont.FreeTypeFont,
     positions: list,
-    color_top: str,
-    color_bottom: str,
-    outline_color: str,
-    outline_px: int,
-    start_y: int,
-    total_height: int,
+    gradient: object,
 ) -> None:
-    """Render text with a vertical gradient fill on top of already-drawn outlines."""
-    ct = np.array(_parse_hex_color(color_top), dtype=float)
-    cb = np.array(_parse_hex_color(color_bottom), dtype=float)
-
+    """Render one directional gradient over the complete translated glyph union."""
+    canonical = canonicalize_linear_gradient(gradient)
+    if canonical is None:
+        raise ValueError("invalid text gradient")
+    positioned_masks: list[tuple[np.ndarray, int, int]] = []
     for line, (lx, ly) in zip(lines, positions):
         try:
             tbbox = font.getbbox(line)
@@ -18353,16 +18438,20 @@ def _apply_gradient_text(
         # Text mask
         mask = Image.new("L", (lw, lh), 0)
         ImageDraw.Draw(mask).text((pad, pad), line, font=font, fill=255)
+        positioned_masks.append((np.asarray(mask), lx - pad, ly - pad))
 
-        # Gradient strip mapped to global vertical position
-        gradient = np.zeros((lh, lw, 3), dtype=np.uint8)
-        for y in range(lh):
-            global_y = (ly + y - pad) - start_y
-            t = float(np.clip(global_y / max(1, total_height), 0.0, 1.0))
-            color = (ct * (1.0 - t) + cb * t).clip(0, 255).astype(np.uint8)
-            gradient[y, :] = color
-
-        img.paste(Image.fromarray(gradient, "RGB"), (lx - pad, ly - pad), mask)
+    combined = _positioned_mask_union(
+        (int(img.height), int(img.width)), positioned_masks
+    )
+    if combined is None:
+        return
+    union_mask, origin_x, origin_y = combined
+    gradient_patch = render_linear_gradient_rgb(union_mask, canonical)
+    img.paste(
+        Image.fromarray(gradient_patch, "RGB"),
+        (origin_x, origin_y),
+        Image.fromarray(union_mask, "L"),
+    )
 
 
 def _clamp_render_bbox_to_image(bbox: list[int] | None, img: Image.Image) -> list[int] | None:
@@ -18700,7 +18789,7 @@ def _render_single_owner_proportionally(
         child["container_font_bounds_px"] = [candidate_size, candidate_size]
         child_plan = plan_text_layout(child)
         if not _fits_in_box(
-            str(child.get("translated_payload") or ""),
+            str(child.get("translated") or child.get("translated_payload") or ""),
             str(child_plan.get("font_name") or ""),
             candidate_size,
             int(child_plan.get("max_width", 0) or 0),
@@ -18817,6 +18906,9 @@ def _render_owner_text_block(
     _apply_auto_style_policy_if_needed(img, text_data)
     if _should_apply_auto_style_policy(text_data):
         text_data["visual_profile"] = copy.deepcopy(text_data.get("estilo") or {})
+    render_style = _canonical_render_style(text_data.get("estilo", {}))
+    visual_payload = payload.upper() if render_style.get("force_upper") else payload
+    text_data["_visual_render_payload"] = visual_payload
 
     regions = [
         copy.deepcopy(region)
@@ -18830,11 +18922,17 @@ def _render_owner_text_block(
         )
     )
     if len(regions) <= 1:
-        return _render_single_owner_proportionally(
+        visual_block = copy.deepcopy(text_data)
+        visual_block["translated"] = visual_payload
+        result = _render_single_owner_proportionally(
             img,
-            text_data,
+            visual_block,
             pre_render_np=pre_render_np,
         )
+        text_data.update(visual_block)
+        text_data["translated"] = payload
+        text_data["translated_payload"] = payload
+        return result
 
     areas: list[float] = []
     for region in regions:
@@ -18887,6 +18985,7 @@ def _render_owner_text_block(
             if bbox is None or polygon is None:
                 raise ValueError("owner visual chunk is missing verified geometry")
             child = copy.deepcopy(text_data)
+            render_chunk = chunk.upper() if render_style.get("force_upper") else chunk
             for legacy_geometry_key in (
                 "source_bbox",
                 "text_pixel_bbox",
@@ -18897,7 +18996,7 @@ def _render_owner_text_block(
             child.update(
                 {
                     "bbox": list(bbox),
-                    "translated": chunk,
+                    "translated": render_chunk,
                     "translated_payload": chunk,
                     "layout_regions": [copy.deepcopy(region)],
                     "layout_region_ids": [str(region.get("layout_region_id") or "")],
@@ -18920,7 +19019,7 @@ def _render_owner_text_block(
             )
             child_plan = plan_text_layout(child)
             if not _fits_in_box(
-                chunk,
+                render_chunk,
                 str(child_plan.get("font_name") or ""),
                 candidate_size,
                 int(child_plan.get("max_width", 0) or 0),
@@ -21286,6 +21385,8 @@ def _render_owner_band_image(
         for line in list((block.get("_render_debug") or {}).get("wrapped_lines") or [])
         if str(line).strip()
     ]
+    if str(block.get("_visual_render_payload") or "") != execution_authority.translated_payload:
+        rendered_lines = [execution_authority.translated_payload]
     if not rendered_lines:
         rendered_lines = [execution_authority.translated_payload]
     glyph_span_runs = (

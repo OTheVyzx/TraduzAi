@@ -432,6 +432,68 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertGreater(np.count_nonzero(result.rgba[:, :, 3]), 0)
         self.assertNotEqual(block.get("fit_status"), "style_attribute_not_materialized")
 
+    def test_v2_owner_renderer_preserves_directional_gradient_geometry(self):
+        canvas = np.zeros((120, 240, 3), dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
+        gradient = {
+            "kind": "linear",
+            "colors": ["#6A36B8", "#181818"],
+            "stops": [0.0, 1.0],
+            "start": [0.20, 0.15],
+            "end": [0.80, 0.90],
+            "coordinate_space": "glyph_bbox_normalized",
+        }
+        block = {
+            "visual_profile_v2": {
+                "applied_style": {"cor": "#6A36B8", "gradient": gradient}
+            },
+            "render_safe_polygon_page": [[0, 0], [240, 0], [240, 120], [0, 120]],
+        }
+        plan = {
+            "safe_text_box": [0, 0, 240, 120],
+            "text_color": "#6A36B8",
+            "cor_gradiente": gradient,
+            "alignment": "center",
+        }
+
+        result = renderer_mod._render_v2_owner_text_layer(
+            canvas, block, plan, ["TESTE"], font, [(40, 35)]
+        )
+
+        self.assertIsNotNone(result)
+        observed = result.observed_attributes["gradient"]
+        self.assertEqual(observed["start"], gradient["start"])
+        self.assertEqual(observed["end"], gradient["end"])
+        self.assertEqual(observed["coordinate_space"], "glyph_bbox_normalized")
+
+    def test_v2_owner_fallback_without_approved_attributes_uses_normal_text_path(self):
+        canvas = np.zeros((120, 240, 3), dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Regular.ttf"), 28)
+        block = {
+            "visual_profile_v2": {
+                "status": "fallback",
+                "style_application_decision_v2": {
+                    "status": "fallback",
+                    "applied_attributes": {},
+                    "abstained_attributes": {"stroke": "attribute_confidence_below_threshold"},
+                },
+                "applied_style": {"fonte": "ComicNeue-Regular.ttf", "cor": "#000000"},
+            },
+            "render_safe_polygon_page": [[0, 0], [240, 0], [240, 120], [0, 120]],
+        }
+        plan = {
+            "safe_text_box": [0, 0, 240, 120],
+            "text_color": "#000000",
+            "alignment": "center",
+        }
+
+        result = renderer_mod._render_v2_owner_text_layer(
+            canvas, block, plan, ["TESTE"], font, [(40, 35)]
+        )
+
+        self.assertIsNone(result)
+        self.assertNotIn("_sealed_materialization_plan_v1", block)
+
     def test_v2_owner_effects_use_container_paint_safe_not_layout_chord(self):
         canvas = np.zeros((120, 240, 3), dtype=np.uint8)
         font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
@@ -747,6 +809,36 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertTrue(np.any(changed))
         self.assertGreater(float(rendered[changed].mean()), 150.0)
         self.assertEqual(block["estilo"]["cor"], "#FFFFFF")
+
+    def test_owner_renderer_applies_uppercase_only_to_visual_alias(self):
+        image = Image.new("RGB", (180, 100), (255, 255, 255))
+        payload = "Olha esse cara agindo"
+        block = {
+            "owner_id": "owner_upper",
+            "translated": payload,
+            "translated_payload": payload,
+            "semantic_role": "dialogue_body",
+            "layout_regions": [],
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "force_upper": False},
+            "_owner_render_mode": True,
+        }
+        observed = {}
+
+        def capture(_image, visual_block, **_kwargs):
+            observed["translated"] = visual_block.get("translated")
+            observed["translated_payload"] = visual_block.get("translated_payload")
+            return None
+
+        with patch(
+            "typesetter.renderer._render_single_owner_proportionally",
+            side_effect=capture,
+        ):
+            renderer_mod._render_owner_text_block(image, block)
+
+        self.assertEqual(observed["translated"], payload.upper())
+        self.assertEqual(observed["translated_payload"], payload)
+        self.assertEqual(block["translated"], payload)
+        self.assertEqual(block["translated_payload"], payload)
 
     def test_render_band_image_owner_mode_returns_logical_page_glyph_patch(self):
         canvas = np.full((120, 180, 3), 235, dtype=np.uint8)
@@ -1422,6 +1514,97 @@ class TypesettingRendererTests(unittest.TestCase):
 
         self.assertGreater(float(np.mean(top[:, 2])), float(np.mean(bottom[:, 2])) + 8.0)
         self.assertGreater(float(np.mean(bottom[:, 1])), float(np.mean(top[:, 1])) + 8.0)
+
+    def test_renderer_applies_structured_horizontal_gradient_pixels(self):
+        arr = self._render_style_probe(
+            {
+                "cor": "#D01020",
+                "cor_gradiente": {
+                    "kind": "linear",
+                    "colors": ["#D01020", "#2010D0"],
+                    "stops": [0.0, 1.0],
+                    "start": [0.0, 0.5],
+                    "end": [1.0, 0.5],
+                    "coordinate_space": "glyph_bbox_normalized",
+                },
+                "contorno": "",
+                "contorno_px": 0,
+            }
+        )
+        mask = self._changed_mask(arr)
+        _ys, xs = np.where(mask)
+        x_grid = np.indices(mask.shape)[1]
+        left = arr[mask & (x_grid <= np.percentile(xs, 30))]
+        right = arr[mask & (x_grid >= np.percentile(xs, 70))]
+
+        self.assertGreater(len(left), 30)
+        self.assertGreater(len(right), 30)
+        self.assertGreater(float(np.mean(left[:, 0])), float(np.mean(right[:, 0])) + 25.0)
+        self.assertGreater(float(np.mean(right[:, 2])), float(np.mean(left[:, 2])) + 25.0)
+
+    def test_safe_renderer_uses_one_gradient_field_for_unequal_lines(self):
+        canvas = np.full((120, 240, 3), 255, dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 30)
+        lines = ["MMMMMMMM", "MM"]
+        positions = [(10, 10), (85, 60)]
+        gradient = {
+            "kind": "linear",
+            "colors": ["#E01020", "#2010E0"],
+            "stops": [0.0, 1.0],
+            "start": [0.0, 0.5],
+            "end": [1.0, 0.5],
+            "coordinate_space": "glyph_bbox_normalized",
+        }
+
+        renderer_mod._apply_safe_gradient_text(
+            canvas,
+            lines,
+            font,
+            positions,
+            gradient,
+            "",
+            0,
+        )
+
+        second_mask = renderer_mod._build_textpath_mask(font, lines[1], padding=0) > 180
+        second_pixels = canvas[
+            60 : 60 + second_mask.shape[0],
+            85 : 85 + second_mask.shape[1],
+        ][second_mask]
+        mean = np.mean(second_pixels, axis=0)
+        self.assertGreater(float(mean[0]), 55.0)
+        self.assertGreater(float(mean[2]), 55.0)
+        self.assertLess(abs(float(mean[0]) - float(mean[2])), 70.0)
+
+    def test_pil_renderer_applies_structured_diagonal_gradient(self):
+        layer = Image.new("RGBA", (240, 120), (0, 0, 0, 0))
+        font = ImageFont.truetype(find_font("ComicNeue-Bold.ttf"), 42)
+        gradient = {
+            "kind": "linear",
+            "colors": ["#7D35D8", "#181818"],
+            "stops": [0.0, 1.0],
+            "start": [0.0, 0.0],
+            "end": [1.0, 1.0],
+            "coordinate_space": "glyph_bbox_normalized",
+        }
+
+        renderer_mod._apply_gradient_text(
+            layer,
+            ["TESTE"],
+            font,
+            [(45, 35)],
+            gradient,
+        )
+
+        rgba = np.asarray(layer)
+        mask = rgba[:, :, 3] > 180
+        ys, xs = np.where(mask)
+        projection = xs + ys
+        low = rgba[mask & ((np.indices(mask.shape)[1] + np.indices(mask.shape)[0]) <= np.percentile(projection, 30)), :3]
+        high = rgba[mask & ((np.indices(mask.shape)[1] + np.indices(mask.shape)[0]) >= np.percentile(projection, 70)), :3]
+        self.assertGreater(len(low), 30)
+        self.assertGreater(len(high), 30)
+        self.assertGreater(float(np.mean(low[:, 2])), float(np.mean(high[:, 2])) + 25.0)
 
     def test_renderer_applies_detected_outline_as_solid_ring_pixels(self):
         purple = (145, 0, 245)
