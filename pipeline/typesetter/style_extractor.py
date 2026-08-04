@@ -7,6 +7,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from typesetter.gradient_model import detect_linear_gradient
 from typesetter.style_contract import (
     STYLE_V2_ATTRIBUTE_NAMES,
     StyleAttributeEvidenceV2,
@@ -269,13 +270,17 @@ def extract_text_style_evidence_v2(
         and float(metrics.get("bbox_height_xh", 0.0)) >= 2.50
     )
     metrics["coarse_mask_geometry"] = coarse_mask_geometry
-    fill_sampling_mask = _interior_fill_sampling_mask(glyph)
-    fill_sampling_mask = _contrast_refined_fill_sampling_mask(
-        image_rgb,
-        fill_sampling_mask,
-        np.asarray(metrics["background_rgb"], dtype=np.float32),
+    high_occupancy_color_geometry = bool(
+        float(metrics.get("glyph_occupancy", 0.0)) >= 0.85
     )
-    if coarse_mask_geometry:
+    metrics["high_occupancy_color_geometry"] = high_occupancy_color_geometry
+    fill_sampling_mask = _interior_fill_sampling_mask(glyph)
+    if coarse_mask_geometry or high_occupancy_color_geometry:
+        fill_sampling_mask = _contrast_refined_fill_sampling_mask(
+            image_rgb,
+            fill_sampling_mask,
+            np.asarray(metrics["background_rgb"], dtype=np.float32),
+        )
         fill_sampling_mask = _coarse_mask_global_contrast_sampling_mask(
             image_rgb,
             fill_sampling_mask,
@@ -347,24 +352,21 @@ def extract_text_style_evidence_v2(
         )
 
     rgb = np.asarray(image_rgb, dtype=np.uint8)[:, :, :3]
-    glyph_pixels = rgb[fill_sampling_mask > 0]
-    y_coords = np.where(fill_sampling_mask > 0)[0]
     if coarse_mask_geometry:
         attributes["gradient"] = _v2_unknown("coarse_owner_mask_color_geometry")
-    elif len(glyph_pixels) >= 24 and len(set(int(value) for value in y_coords)) >= 4:
-        midpoint = float(np.median(y_coords))
-        top = glyph_pixels[y_coords <= midpoint]
-        bottom = glyph_pixels[y_coords > midpoint]
-        if len(top) >= 8 and len(bottom) >= 8:
-            top_rgb = np.median(top.astype(np.float32), axis=0)
-            bottom_rgb = np.median(bottom.astype(np.float32), axis=0)
-            gradient_delta = float(np.linalg.norm(top_rgb - bottom_rgb))
-            if gradient_delta >= 24.0:
-                top_hex = "#" + "".join(f"{int(round(value)):02X}" for value in top_rgb)
-                bottom_hex = "#" + "".join(f"{int(round(value)):02X}" for value in bottom_rgb)
-                attributes["gradient"] = _v2_observed([top_hex, bottom_hex], min(0.95, gradient_delta / 96.0))
-            else:
-                attributes["gradient"] = _v2_unknown("solid_fill_no_gradient")
+    else:
+        gradient_detection = detect_linear_gradient(image_rgb, fill_sampling_mask)
+        metrics.update(
+            {
+                f"gradient_{name}": value
+                for name, value in gradient_detection.metrics.items()
+            }
+        )
+        attributes["gradient"] = (
+            _v2_observed(gradient_detection.value, gradient_detection.confidence)
+            if gradient_detection.value is not None
+            else _v2_unknown(gradient_detection.reason)
+        )
     points = np.column_stack(np.where(glyph > 0)[::-1]).astype(np.float32)
     if len(points) >= 8 and not coarse_mask_geometry:
         _mean, eigenvectors, eigenvalues = cv2.PCACompute2(points, mean=None)

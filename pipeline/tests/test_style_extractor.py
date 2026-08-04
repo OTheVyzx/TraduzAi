@@ -135,9 +135,96 @@ def test_v2_fill_sampling_preserves_a_real_vertical_gradient():
         semantic_role="system_card",
     )
 
-    assert evidence.attributes["gradient"].value != "unknown"
-    assert len(evidence.attributes["gradient"].value) == 2
-    assert evidence.attributes["gradient"].value[0] != evidence.attributes["gradient"].value[1]
+    gradient = evidence.attributes["gradient"].value
+    assert isinstance(gradient, dict)
+    assert gradient["colors"][0] != gradient["colors"][1]
+    axis = np.asarray(gradient["end"]) - np.asarray(gradient["start"])
+    assert float(axis[1] / np.linalg.norm(axis)) >= 0.98
+
+
+def test_v2_fill_sampling_preserves_diagonal_gradient_direction_and_metrics():
+    image = np.full((150, 280, 3), 246, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    for text, origin in (
+        ("HONESTLY", (32, 36)),
+        ("NO ONE CAN", (18, 67)),
+        ("BEAT ME", (48, 98)),
+        ("ONE ON ONE", (12, 129)),
+    ):
+        cv2.putText(
+            glyph,
+            text,
+            origin,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            255,
+            2,
+            cv2.LINE_8,
+        )
+    ys, xs = np.where(glyph > 0)
+    grid_y, grid_x = np.indices(glyph.shape, dtype=np.float32)
+    xn = (grid_x - xs.min()) / max(1.0, float(xs.max() - xs.min()))
+    yn = (grid_y - ys.min()) / max(1.0, float(ys.max() - ys.min()))
+    t = np.clip((xn + yn) / 2.0, 0.0, 1.0)[..., None]
+    purple = np.asarray((102, 51, 204), dtype=np.float32)
+    black = np.asarray((8, 8, 10), dtype=np.float32)
+    field = np.rint(purple * (1.0 - t) + black * t).astype(np.uint8)
+    image[glyph > 0] = field[glyph > 0]
+    context = np.full(glyph.shape, 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        owner_id="owner_diagonal_gradient",
+        semantic_role="dialogue_body",
+    )
+
+    gradient = evidence.attributes["gradient"].value
+    assert isinstance(gradient, dict)
+    axis = np.asarray(gradient["end"]) - np.asarray(gradient["start"])
+    assert float(np.dot(axis, (1.0, 1.0)) / (np.linalg.norm(axis) * np.sqrt(2.0))) >= 0.90
+    metrics = evidence.attribute_provenance["typographic_metrics"]
+    assert metrics["gradient_supported_cells"] >= 6
+    assert metrics["gradient_rank_one_explained_energy"] >= 0.72
+    assert metrics["gradient_median_residual_rgb"] >= 0.0
+
+
+def test_v2_gradient_fill_ignores_separate_white_outline_and_dark_shadow():
+    image = np.full((120, 260, 3), 244, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.putText(glyph, "GRADIENT", (22, 75), cv2.FONT_HERSHEY_SIMPLEX, 1.0, 255, 3, cv2.LINE_8)
+    outline = cv2.dilate(glyph, np.ones((5, 5), dtype=np.uint8))
+    outline[glyph > 0] = 0
+    shadow = np.zeros_like(glyph)
+    shadow[4:, 5:] = glyph[:-4, :-5]
+    shadow[glyph > 0] = 0
+    image[shadow > 0] = (18, 18, 20)
+    image[outline > 0] = (255, 255, 255)
+    ys, xs = np.where(glyph > 0)
+    grid_x = np.indices(glyph.shape, dtype=np.float32)[1]
+    t = np.clip((grid_x - xs.min()) / max(1.0, float(xs.max() - xs.min())), 0.0, 1.0)[..., None]
+    red = np.asarray((224, 32, 32), dtype=np.float32)
+    yellow = np.asarray((240, 224, 32), dtype=np.float32)
+    field = np.rint(red * (1.0 - t) + yellow * t).astype(np.uint8)
+    image[glyph > 0] = field[glyph > 0]
+    context = np.full(glyph.shape, 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        stroke_ring_mask=outline,
+        effect_region_mask=shadow,
+        owner_id="owner_gradient_effects",
+        semantic_role="dialogue_body",
+    )
+
+    gradient = evidence.attributes["gradient"].value
+    assert isinstance(gradient, dict)
+    colors = [np.asarray([int(color[i : i + 2], 16) for i in (1, 3, 5)]) for color in gradient["colors"]]
+    assert np.linalg.norm(colors[0] - red) <= 24.0
+    assert np.linalg.norm(colors[1] - yellow) <= 24.0
 
 
 def test_v2_coarse_multiline_owner_mask_abstains_from_glyph_geometry_style():
