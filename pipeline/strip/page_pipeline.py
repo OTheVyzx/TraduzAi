@@ -15,6 +15,7 @@ from ownership.hash_contract import (
     canonical_json_bytes,
     canonical_page_sha256,
     sha256_bytes,
+    sha256_text,
 )
 from ownership.model import TRANSLATION_ROUTE_ACTIONS, OwnerGraph, OwnerProjection
 from ownership.owner_builder import build_owner_page_graph_from_coverage
@@ -221,6 +222,10 @@ class PageExecutionResult:
     final_page: Any | None
     terminal_proof: Any | None
     result_sha256: str
+    repair_requests: tuple[Any, ...] = ()
+    owner_target_materializations: tuple[Any, ...] = ()
+    text_layers_view: Any | None = None
+    page_composition: Any | None = None
 
     @property
     def page_id(self) -> str:
@@ -294,24 +299,32 @@ class PageExecutionResult:
             "owner_graph": json.loads(self.owner_graph.canonical_json_bytes.decode("utf-8")),
             "translation_attempts": [item.to_dict() for item in self.translation_attempts],
             "translations": [item.to_dict() for item in self.translations],
-            "repair_requests": [],
+            "repair_requests": [item.to_dict() for item in self.repair_requests],
             "repair_history": [],
             "repair_budget_policy_sha256": None,
-            "owner_target_materializations": [],
+            "owner_target_materializations": [
+                item.to_dict() for item in self.owner_target_materializations
+            ],
             "page_commits": [
                 {
                     key: getattr(item, key, None)
                     for key in (
                         "commit_id", "run_id", "execution_id", "page_id",
                         "page_source_sha256", "owner_id", "before_sha256", "after_sha256",
+                        "translation_binding_sha256", "source_payload_sha256",
+                        "target_payload_sha256", "target_glyph_patch_sha256",
                     )
                 }
                 for item in self.page_commits
             ],
             "page_geometry": None,
             "ocr_result": None,
-            "text_layers": None,
-            "page_composition": None,
+            "text_layers": (
+                self.text_layers_view.read() if self.text_layers_view is not None else None
+            ),
+            "page_composition": (
+                self.page_composition.to_dict() if self.page_composition is not None else None
+            ),
             "project_asset_refs": [],
             "visual_stage_artifacts": None,
             "final_qa_ocr_requests": [],
@@ -337,9 +350,12 @@ class PageExecutionResult:
 
         from ownership.execution import (
             FinalPageSnapshot,
+            FrozenJSONSnapshot,
+            PageCompositionSnapshot,
             PersistedRGBImageArtifactRef,
             TerminalPixelProof,
         )
+        from ownership.model import OwnerRepairRequest, OwnerTargetMaterialization
 
         if payload.get("schema_version") != 1:
             raise PagePipelineStateError("page execution evidence schema is unsupported")
@@ -402,6 +418,23 @@ class PageExecutionResult:
             TerminalPixelProof.from_dict(proof_payload)
             if isinstance(proof_payload, dict) else None
         )
+        repair_requests = tuple(
+            OwnerRepairRequest.from_dict(item) for item in payload.get("repair_requests") or ()
+        )
+        materializations = tuple(
+            OwnerTargetMaterialization.from_dict(item)
+            for item in payload.get("owner_target_materializations") or ()
+        )
+        text_layers_payload = payload.get("text_layers")
+        text_layers_view = (
+            FrozenJSONSnapshot.build(text_layers_payload)
+            if isinstance(text_layers_payload, dict) else None
+        )
+        composition_payload = payload.get("page_composition")
+        page_composition = (
+            PageCompositionSnapshot.from_dict(composition_payload)
+            if isinstance(composition_payload, dict) else None
+        )
         result = cls.build(
             request=request,
             coverage=coverage,
@@ -409,6 +442,10 @@ class PageExecutionResult:
             translation_attempts=attempts,
             translations=bindings,
             page_commits=tuple(SimpleNamespace(**item) for item in payload.get("page_commits") or ()),
+            repair_requests=repair_requests,
+            owner_target_materializations=materializations,
+            text_layers_view=text_layers_view,
+            page_composition=page_composition,
             status=str(payload.get("status") or ""),
             final_page=final_page,
             terminal_proof=terminal_proof,
@@ -427,6 +464,10 @@ class PageExecutionResult:
         translation_attempts: Sequence[TranslationAttempt] = (),
         translations: Sequence[TranslationBinding] = (),
         page_commits: Sequence[Any] = (),
+        repair_requests: Sequence[Any] = (),
+        owner_target_materializations: Sequence[Any] = (),
+        text_layers_view: Any | None = None,
+        page_composition: Any | None = None,
         status: str = "candidate_ready",
         final_page: Any | None = None,
         terminal_proof: Any | None = None,
@@ -475,10 +516,105 @@ class PageExecutionResult:
                 actual = getattr(commit, field, None)
                 if actual is not None and actual != expected:
                     raise PagePipelineIdentityError(f"page commit crossed {field}")
-        if status not in {"candidate_ready", "final_verified"}:
+        repairs = tuple(repair_requests)
+        materializations = tuple(owner_target_materializations)
+        for record in (*repairs, *materializations):
+            for field, expected in (
+                ("run_id", request.run_id),
+                ("execution_id", request.execution_id),
+                ("page_id", request.page_id),
+                ("page_source_sha256", request.page_source_sha256),
+            ):
+                if getattr(record, field, None) != expected:
+                    raise PagePipelineIdentityError(f"owner artifact crossed {field}")
+        bound_commits = tuple(
+            item for item in commits
+            if bool(getattr(item, "translation_binding_sha256", ""))
+        )
+        if bound_commits:
+            ordered_bindings = tuple(sorted(bindings, key=lambda item: item.owner_id))
+            ordered_commits = tuple(sorted(bound_commits, key=lambda item: item.owner_id))
+            ordered_materializations = tuple(
+                sorted(materializations, key=lambda item: item.owner_id)
+            )
+            if not (
+                len(ordered_bindings) == len(ordered_commits) == len(ordered_materializations)
+            ):
+                raise PagePipelineIdentityError(
+                    "binding, commit and target materialization cardinality mismatch"
+                )
+            for binding, commit, materialization in zip(
+                ordered_bindings, ordered_commits, ordered_materializations, strict=True
+            ):
+                if not (
+                    binding.owner_id == commit.owner_id == materialization.owner_id
+                    and binding.translation_binding_sha256
+                    == commit.translation_binding_sha256
+                    == materialization.translation_binding_sha256
+                    and binding.source_payload_sha256
+                    == commit.source_payload_sha256
+                    == materialization.source_payload_sha256
+                    and binding.target_payload_sha256
+                    == commit.target_payload_sha256
+                    == materialization.target_payload_sha256
+                    and commit.target_glyph_patch_sha256
+                    == materialization.target_glyph_patch_sha256
+                ):
+                    raise PagePipelineIdentityError(
+                        "binding, commit and target materialization hash chain mismatch"
+                    )
+            if text_layers_view is None:
+                raise PagePipelineIdentityError("bound owner result requires text layer snapshot")
+            layers_payload = text_layers_view.read()
+            layers = layers_payload.get("texts")
+            if not isinstance(layers, list) or len(layers) != len(ordered_bindings):
+                raise PagePipelineIdentityError("text layer cardinality differs from bindings")
+            layer_by_owner = {
+                str(layer.get("owner_id") or ""): layer
+                for layer in layers if isinstance(layer, dict)
+            }
+            if len(layer_by_owner) != len(layers):
+                raise PagePipelineIdentityError("text layers contain duplicate or invalid owners")
+            for binding in ordered_bindings:
+                layer = layer_by_owner.get(binding.owner_id)
+                target = str((layer or {}).get("translated") or "")
+                if (
+                    layer is None
+                    or layer.get("translation_binding_sha256")
+                    != binding.translation_binding_sha256
+                    or layer.get("target_payload_sha256") != binding.target_payload_sha256
+                    or sha256_text(target) != binding.target_payload_sha256
+                ):
+                    raise PagePipelineIdentityError("text layer target binding mismatch")
+            if page_composition is None:
+                raise PagePipelineIdentityError("bound owner result requires page composition")
+            if (
+                page_composition.run_id != request.run_id
+                or page_composition.execution_id != request.execution_id
+                or page_composition.page_id != request.page_id
+                or page_composition.page_source_sha256 != request.page_source_sha256
+                or page_composition.commit_ids
+                != tuple(item.commit_id for item in ordered_commits)
+                or page_composition.translation_binding_sha256s
+                != tuple(item.translation_binding_sha256 for item in ordered_commits)
+                or page_composition.source_payload_sha256s
+                != tuple(item.source_payload_sha256 for item in ordered_commits)
+                or page_composition.target_payload_sha256s
+                != tuple(item.target_payload_sha256 for item in ordered_commits)
+                or page_composition.target_glyph_patch_sha256s
+                != tuple(item.target_glyph_patch_sha256 for item in ordered_commits)
+                or page_composition.target_materialization_sha256s
+                != tuple(item.materialization_sha256 for item in ordered_materializations)
+            ):
+                raise PagePipelineIdentityError("page composition hash chain mismatch")
+        if status not in {"candidate_ready", "repair_pending", "final_verified"}:
             raise PagePipelineStateError("page result state is not exportable")
-        if status == "candidate_ready" and (final_page is not None or terminal_proof is not None):
+        if status in {"candidate_ready", "repair_pending"} and (
+            final_page is not None or terminal_proof is not None
+        ):
             raise PagePipelineStateError("candidate result cannot carry final authority")
+        if status == "repair_pending" and not repairs:
+            raise PagePipelineStateError("repair_pending result requires a repair request")
         if status == "final_verified" and (final_page is None or terminal_proof is None):
             raise PagePipelineStateError("final result requires both final page and terminal proof")
         if status == "final_verified":
@@ -529,6 +665,12 @@ class PageExecutionResult:
             "translation_attempt_sha256s": [item.attempt_sha256 for item in attempts],
             "translation_binding_sha256s": [item.translation_binding_sha256 for item in bindings],
             "commit_ids": [str(getattr(item, "commit_id", "")) for item in commits],
+            "repair_request_sha256s": [item.request_sha256 for item in repairs],
+            "target_materialization_sha256s": [
+                item.materialization_sha256 for item in materializations
+            ],
+            "text_layers_sha256": getattr(text_layers_view, "sha256", None),
+            "page_composition_sha256": getattr(page_composition, "sha256", None),
             "status": status,
         }
         return cls(
@@ -542,7 +684,31 @@ class PageExecutionResult:
             final_page=final_page,
             terminal_proof=terminal_proof,
             result_sha256=sha256_bytes(canonical_json_bytes(payload)),
+            repair_requests=repairs,
+            owner_target_materializations=materializations,
+            text_layers_view=text_layers_view,
+            page_composition=page_composition,
         )
+
+    @classmethod
+    def build_from(cls, result: "PageExecutionResult", **overrides: Any) -> "PageExecutionResult":
+        values = {
+            "request": result.request,
+            "coverage": result.coverage,
+            "owner_graph": result.owner_graph,
+            "translation_attempts": result.translation_attempts,
+            "translations": result.translations,
+            "page_commits": result.page_commits,
+            "repair_requests": result.repair_requests,
+            "owner_target_materializations": result.owner_target_materializations,
+            "text_layers_view": result.text_layers_view,
+            "page_composition": result.page_composition,
+            "status": result.status,
+            "final_page": result.final_page,
+            "terminal_proof": result.terminal_proof,
+        }
+        values.update(overrides)
+        return cls.build(**values)
 
 
 @dataclass(frozen=True)

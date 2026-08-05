@@ -1385,6 +1385,10 @@ class OwnerExecutionCommit:
     run_id: str = ""
     execution_id: str = ""
     page_source_sha256: str = ""
+    translation_binding_sha256: str = ""
+    source_payload_sha256: str = ""
+    target_payload_sha256: str = ""
+    target_glyph_patch_sha256: str = ""
 
     def __post_init__(self) -> None:
         identity_values = (self.commit_id, self.run_id, self.execution_id, self.page_source_sha256)
@@ -1403,10 +1407,24 @@ class OwnerExecutionCommit:
                     "after_sha256": self.after_sha256,
                     "state": self.state,
                     "committed": self.committed,
+                    "translation_binding_sha256": self.translation_binding_sha256,
+                    "source_payload_sha256": self.source_payload_sha256,
+                    "target_payload_sha256": self.target_payload_sha256,
+                    "target_glyph_patch_sha256": self.target_glyph_patch_sha256,
                 }
             )
             if self.commit_id != expected_commit_id:
                 raise ValueError("owner execution commit hash identity mismatch")
+        binding_values = (
+            self.translation_binding_sha256,
+            self.source_payload_sha256,
+            self.target_payload_sha256,
+            self.target_glyph_patch_sha256,
+        )
+        if any(binding_values) and (
+            not all(_OWNER_STYLE_SHA256_RE.fullmatch(value) for value in binding_values)
+        ):
+            raise ValueError("owner execution commit target binding is incomplete")
         copy_value = getattr(self.result_rgb, "copy", None)
         if not callable(copy_value):
             return
@@ -1437,6 +1455,10 @@ def bind_owner_execution_commit_identity(
         "after_sha256": commit.after_sha256,
         "state": commit.state,
         "committed": commit.committed,
+        "translation_binding_sha256": commit.translation_binding_sha256,
+        "source_payload_sha256": commit.source_payload_sha256,
+        "target_payload_sha256": commit.target_payload_sha256,
+        "target_glyph_patch_sha256": commit.target_glyph_patch_sha256,
     }
     return replace(
         commit,

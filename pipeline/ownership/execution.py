@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import mimetypes
 from pathlib import Path, PurePosixPath
@@ -34,6 +34,272 @@ class PageArtifactIntegrityError(ValueError):
 
 class PageNotTerminalError(ValueError):
     """Raised when candidate-only evidence reaches an export boundary."""
+
+
+class AtomicReplacementError(ValueError):
+    """Raised before a cleanup/target pair can create an owner commit."""
+
+
+def canonical_glyph_patch_sha256(glyph_patch: Any) -> str:
+    if glyph_patch is None:
+        raise AtomicReplacementError("target glyph patch is missing")
+    paint_mask = getattr(glyph_patch, "paint_mask", None)
+    if paint_mask is None:
+        paint_mask = getattr(glyph_patch, "glyph_mask", None)
+    paint = np.asarray(paint_mask)
+    result = np.asarray(getattr(glyph_patch, "result_rgb", None))
+    if paint.ndim != 2 or result.ndim != 3 or result.shape[2] != 3:
+        raise AtomicReplacementError("target glyph patch raster contract is invalid")
+    payload = {
+        "schema_version": 1,
+        "owner_id": str(getattr(glyph_patch, "owner_id", "")),
+        "page_id": str(getattr(glyph_patch, "page_id", "")),
+        "coordinate_space": str(getattr(glyph_patch, "coordinate_space", "")),
+        "before_sha256": str(getattr(glyph_patch, "before_sha256", "")),
+        "after_sha256": str(getattr(glyph_patch, "after_sha256", "")),
+        "glyph_mask_sha256": str(getattr(glyph_patch, "glyph_mask_sha256", "")),
+        "paint_mask_sha256": str(getattr(glyph_patch, "paint_mask_sha256", "")),
+        "component_geometry_sha256": str(
+            getattr(glyph_patch, "component_geometry_sha256", "")
+        ),
+        "text_execution_authority_sha256": str(
+            getattr(glyph_patch, "text_execution_authority_sha256", "")
+        ),
+        "delivery_contract_sha256": str(
+            getattr(getattr(glyph_patch, "delivery_contract", None), "contract_sha256", "")
+        ),
+        "style_contract_sha256": str(
+            getattr(getattr(glyph_patch, "style_raster_contract", None), "contract_sha256", "")
+        ),
+        "paint_shape": list(paint.shape),
+        "paint_bytes_sha256": sha256_bytes(np.ascontiguousarray(paint).tobytes()),
+        "result_pixel_sha256": canonical_page_sha256(result),
+    }
+    return canonical_json_sha256(payload)
+
+
+@dataclass(frozen=True)
+class OwnerReplacementOutcome:
+    commit: Any
+    materialization: Any
+    final_page: Any
+    final_pixel_sha256: str
+
+    def __post_init__(self) -> None:
+        pixels = np.ascontiguousarray(np.asarray(self.final_page, dtype=np.uint8)).copy()
+        pixels.setflags(write=False)
+        object.__setattr__(self, "final_page", pixels)
+
+
+@dataclass(frozen=True)
+class OwnerReplacementAttemptResult:
+    status: str
+    outcome: OwnerReplacementOutcome | None
+    repair_request: Any | None
+    final_page: Any | None
+
+
+def build_owner_repair_request(
+    transaction: OwnerReplacementTransaction,
+    *,
+    failed_stage: str,
+    reason: str,
+    evidence_ids=(),
+    next_strategy: str,
+    issue_id: str | None = None,
+) -> Any:
+    from .model import OwnerRepairRequest
+
+    if failed_stage == "final_qa" and not issue_id:
+        raise AtomicReplacementError("final QA repair request requires issue identity")
+    evidence = tuple(str(value) for value in evidence_ids)
+    request_id = canonical_json_sha256(
+        {
+            "run_id": transaction.translation.run_id,
+            "execution_id": transaction.execution_id,
+            "page_id": transaction.translation.page_id,
+            "page_source_sha256": transaction.translation.page_source_sha256,
+            "owner_id": transaction.translation.owner_id,
+            "failed_stage": str(failed_stage),
+            "reason": str(reason),
+            "evidence_ids": list(evidence),
+            "next_strategy": str(next_strategy),
+            "issue_id": issue_id,
+        }
+    )
+    return OwnerRepairRequest.build(
+        request_id=request_id,
+        issue_id=issue_id,
+        run_id=transaction.translation.run_id,
+        execution_id=transaction.execution_id,
+        page_id=transaction.translation.page_id,
+        page_source_sha256=transaction.translation.page_source_sha256,
+        owner_id=transaction.translation.owner_id,
+        original_page_sha256=transaction.original_pixel_sha256,
+        failed_stage=str(failed_stage),
+        reason=str(reason),
+        evidence_ids=evidence,
+        next_strategy=str(next_strategy),
+    )
+
+
+def execute_owner_replacement(
+    transaction: OwnerReplacementTransaction,
+    cleanup: Any,
+    glyph_patch: Any,
+    *,
+    failed_stage: str,
+    failure_reason: str,
+    evidence_ids=(),
+    next_strategy: str,
+    issue_id: str | None = None,
+) -> OwnerReplacementAttemptResult:
+    try:
+        outcome = transaction.commit(cleanup, glyph_patch)
+    except AtomicReplacementError:
+        repair = build_owner_repair_request(
+            transaction,
+            failed_stage=failed_stage,
+            reason=failure_reason,
+            evidence_ids=evidence_ids,
+            next_strategy=next_strategy,
+            issue_id=issue_id,
+        )
+        return OwnerReplacementAttemptResult(
+            status="repair_pending",
+            outcome=None,
+            repair_request=repair,
+            final_page=None,
+        )
+    return OwnerReplacementAttemptResult(
+        status="committed",
+        outcome=outcome,
+        repair_request=None,
+        final_page=outcome.final_page,
+    )
+
+
+@dataclass(frozen=True)
+class PageCompositionCandidate:
+    final_page: Any
+    base_pixel_sha256: str
+    final_pixel_sha256: str
+    commit_ids: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        pixels = np.ascontiguousarray(np.asarray(self.final_page, dtype=np.uint8)).copy()
+        pixels.setflags(write=False)
+        object.__setattr__(self, "final_page", pixels)
+
+
+@dataclass(frozen=True)
+class OwnerReplacementTransaction:
+    original_rgb: Any
+    mutation: Any
+    translation: Any
+    execution_id: str
+    original_pixel_sha256: str
+    atomic_options: Mapping[str, Any]
+
+    @classmethod
+    def build(cls, **values: Any) -> "OwnerReplacementTransaction":
+        original = np.asarray(values["original_rgb"])
+        mutation = values["mutation"]
+        translation = values["translation"]
+        if original.dtype != np.uint8 or original.ndim != 3 or original.shape[2] != 3:
+            raise AtomicReplacementError("owner replacement original must be uint8 RGB")
+        if (
+            getattr(mutation, "owner_id", None) != getattr(translation, "owner_id", None)
+            or getattr(mutation, "page_id", None) != getattr(translation, "page_id", None)
+        ):
+            raise AtomicReplacementError("cleanup and translation owner identity mismatch")
+        frozen = np.ascontiguousarray(original).copy()
+        frozen.setflags(write=False)
+        return cls(
+            original_rgb=frozen,
+            mutation=mutation,
+            translation=translation,
+            execution_id=str(values["execution_id"]),
+            original_pixel_sha256=canonical_page_sha256(original),
+            atomic_options=dict(values.get("atomic_options") or {}),
+        )
+
+    def commit(self, cleanup: Any, glyph_patch: Any, *, overrides=None) -> Any:
+        if cleanup is None or glyph_patch is None:
+            raise AtomicReplacementError("cleanup and target glyph patch must commit together")
+        if cleanup is not self.mutation:
+            raise AtomicReplacementError("cleanup differs from sealed transaction mutation")
+        if (
+            getattr(cleanup, "owner_id", None) != self.translation.owner_id
+            or getattr(glyph_patch, "owner_id", None) != self.translation.owner_id
+            or getattr(cleanup, "page_id", None) != self.translation.page_id
+            or getattr(glyph_patch, "page_id", None) != self.translation.page_id
+        ):
+            raise AtomicReplacementError("cleanup, glyph and translation identity mismatch")
+        glyph_sha = canonical_glyph_patch_sha256(glyph_patch)
+        expected = {
+            "translation_binding_sha256": self.translation.translation_binding_sha256,
+            "source_payload_sha256": self.translation.source_payload_sha256,
+            "target_payload_sha256": self.translation.target_payload_sha256,
+            "target_glyph_patch_sha256": glyph_sha,
+        }
+        supplied = expected | dict(overrides or {})
+        if supplied != expected:
+            raise AtomicReplacementError("stale translation or target hash override")
+        from strip.process_bands import apply_atomic_owner_execution
+        from .model import OwnerTargetMaterialization, bind_owner_execution_commit_identity
+
+        raw_commit = apply_atomic_owner_execution(
+            np.asarray(self.original_rgb), cleanup, glyph_patch, **dict(self.atomic_options)
+        )
+        if not raw_commit.committed:
+            raise AtomicReplacementError(raw_commit.reason)
+        final = np.asarray(raw_commit.result_rgb)
+        final_sha = canonical_page_sha256(final)
+        bound_payload = replace(
+            raw_commit,
+            before_sha256=self.original_pixel_sha256,
+            after_sha256=final_sha,
+            **expected,
+        )
+        commit = bind_owner_execution_commit_identity(
+            bound_payload,
+            run_id=self.translation.run_id,
+            execution_id=self.execution_id,
+            page_source_sha256=self.translation.page_source_sha256,
+        )
+        base_sha = canonical_page_sha256(np.asarray(cleanup.result_rgb))
+        materialization_id = canonical_json_sha256(
+            {
+                "run_id": self.translation.run_id,
+                "execution_id": self.execution_id,
+                "page_id": self.translation.page_id,
+                "owner_id": self.translation.owner_id,
+                "translation_binding_sha256": self.translation.translation_binding_sha256,
+                "target_glyph_patch_sha256": glyph_sha,
+            }
+        )
+        materialization = OwnerTargetMaterialization.build(
+            materialization_id=materialization_id,
+            run_id=self.translation.run_id,
+            execution_id=self.execution_id,
+            page_id=self.translation.page_id,
+            page_source_sha256=self.translation.page_source_sha256,
+            owner_id=self.translation.owner_id,
+            translation_binding_sha256=self.translation.translation_binding_sha256,
+            source_payload_sha256=self.translation.source_payload_sha256,
+            target_payload_sha256=self.translation.target_payload_sha256,
+            target_glyph_patch_sha256=glyph_sha,
+            glyph_mask_sha256=str(getattr(glyph_patch, "glyph_mask_sha256", "")),
+            base_pixel_sha256=base_sha,
+            result_pixel_sha256=final_sha,
+        )
+        return OwnerReplacementOutcome(
+            commit=commit,
+            materialization=materialization,
+            final_page=final,
+            final_pixel_sha256=final_sha,
+        )
 
 
 @dataclass(frozen=True)
@@ -103,6 +369,150 @@ class PageGeometrySnapshot:
         if sha256_bytes(self.canonical_json_bytes) != self.sha256:
             raise PageArtifactIntegrityError("page geometry snapshot hash mismatch")
         return json.loads(self.canonical_json_bytes.decode("utf-8"))
+
+
+@dataclass(frozen=True)
+class PageCompositionSnapshot:
+    run_id: str
+    execution_id: str
+    page_id: str
+    page_source_sha256: str
+    base_pixel_sha256: str
+    final_pixel_sha256: str
+    commit_ids: tuple[str, ...]
+    translation_binding_sha256s: tuple[str, ...]
+    source_payload_sha256s: tuple[str, ...]
+    target_payload_sha256s: tuple[str, ...]
+    target_glyph_patch_sha256s: tuple[str, ...]
+    target_materialization_sha256s: tuple[str, ...]
+    canonical_json_bytes: bytes
+    sha256: str
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        run_id: str,
+        execution_id: str,
+        page_id: str,
+        page_source_sha256: str,
+        base_pixel_sha256: str,
+        final_pixel_sha256: str,
+        commits,
+        materializations,
+    ) -> "PageCompositionSnapshot":
+        ordered_commits = tuple(commits)
+        ordered_materializations = tuple(materializations)
+        payload = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "execution_id": execution_id,
+            "page_id": page_id,
+            "page_source_sha256": page_source_sha256,
+            "base_pixel_sha256": _require_hash(base_pixel_sha256, "base_pixel_sha256"),
+            "final_pixel_sha256": _require_hash(final_pixel_sha256, "final_pixel_sha256"),
+            "commit_ids": [str(item.commit_id) for item in ordered_commits],
+            "translation_binding_sha256s": [
+                str(item.translation_binding_sha256) for item in ordered_commits
+            ],
+            "source_payload_sha256s": [str(item.source_payload_sha256) for item in ordered_commits],
+            "target_payload_sha256s": [str(item.target_payload_sha256) for item in ordered_commits],
+            "target_glyph_patch_sha256s": [
+                str(item.target_glyph_patch_sha256) for item in ordered_commits
+            ],
+            "target_materialization_sha256s": [
+                str(item.materialization_sha256) for item in ordered_materializations
+            ],
+        }
+        encoded = canonical_json_bytes(payload)
+        return cls(
+            run_id=run_id,
+            execution_id=execution_id,
+            page_id=page_id,
+            page_source_sha256=page_source_sha256,
+            base_pixel_sha256=payload["base_pixel_sha256"],
+            final_pixel_sha256=payload["final_pixel_sha256"],
+            commit_ids=tuple(payload["commit_ids"]),
+            translation_binding_sha256s=tuple(payload["translation_binding_sha256s"]),
+            source_payload_sha256s=tuple(payload["source_payload_sha256s"]),
+            target_payload_sha256s=tuple(payload["target_payload_sha256s"]),
+            target_glyph_patch_sha256s=tuple(payload["target_glyph_patch_sha256s"]),
+            target_materialization_sha256s=tuple(payload["target_materialization_sha256s"]),
+            canonical_json_bytes=encoded,
+            sha256=sha256_bytes(encoded),
+        )
+
+    def read(self) -> dict[str, Any]:
+        if sha256_bytes(self.canonical_json_bytes) != self.sha256:
+            raise PageArtifactIntegrityError("page composition snapshot hash mismatch")
+        payload = json.loads(self.canonical_json_bytes.decode("utf-8"))
+        if payload != self.to_dict(include_hash=False):
+            raise PageArtifactIntegrityError("page composition snapshot canonical form mismatch")
+        return payload
+
+    def to_dict(self, *, include_hash: bool = True) -> dict[str, Any]:
+        payload = {
+            "schema_version": 1,
+            "run_id": self.run_id,
+            "execution_id": self.execution_id,
+            "page_id": self.page_id,
+            "page_source_sha256": self.page_source_sha256,
+            "base_pixel_sha256": self.base_pixel_sha256,
+            "final_pixel_sha256": self.final_pixel_sha256,
+            "commit_ids": list(self.commit_ids),
+            "translation_binding_sha256s": list(self.translation_binding_sha256s),
+            "source_payload_sha256s": list(self.source_payload_sha256s),
+            "target_payload_sha256s": list(self.target_payload_sha256s),
+            "target_glyph_patch_sha256s": list(self.target_glyph_patch_sha256s),
+            "target_materialization_sha256s": list(self.target_materialization_sha256s),
+        }
+        if include_hash:
+            payload["sha256"] = self.sha256
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "PageCompositionSnapshot":
+        expected = {
+            "schema_version", "run_id", "execution_id", "page_id",
+            "page_source_sha256", "base_pixel_sha256", "final_pixel_sha256",
+            "commit_ids", "translation_binding_sha256s", "source_payload_sha256s",
+            "target_payload_sha256s", "target_glyph_patch_sha256s",
+            "target_materialization_sha256s", "sha256",
+        }
+        if set(payload) != expected or payload.get("schema_version") != 1:
+            raise PageArtifactIntegrityError("page composition snapshot schema is invalid")
+        rebuilt = cls.build(
+            run_id=str(payload["run_id"]),
+            execution_id=str(payload["execution_id"]),
+            page_id=str(payload["page_id"]),
+            page_source_sha256=str(payload["page_source_sha256"]),
+            base_pixel_sha256=str(payload["base_pixel_sha256"]),
+            final_pixel_sha256=str(payload["final_pixel_sha256"]),
+            commits=tuple(
+                type("CommitRef", (), {
+                    "commit_id": commit_id,
+                    "translation_binding_sha256": binding_sha,
+                    "source_payload_sha256": source_sha,
+                    "target_payload_sha256": target_sha,
+                    "target_glyph_patch_sha256": glyph_sha,
+                })()
+                for commit_id, binding_sha, source_sha, target_sha, glyph_sha in zip(
+                    payload["commit_ids"],
+                    payload["translation_binding_sha256s"],
+                    payload["source_payload_sha256s"],
+                    payload["target_payload_sha256s"],
+                    payload["target_glyph_patch_sha256s"],
+                    strict=True,
+                )
+            ),
+            materializations=tuple(
+                type("MaterializationRef", (), {"materialization_sha256": value})()
+                for value in payload["target_materialization_sha256s"]
+            ),
+        )
+        if rebuilt.sha256 != payload["sha256"] or rebuilt.to_dict() != dict(payload):
+            raise PageArtifactIntegrityError("page composition snapshot hash mismatch")
+        return rebuilt
 
 
 @dataclass(frozen=True)
@@ -378,6 +788,82 @@ class PageCandidateTransaction:
     generation_id: str
     page_generation_id: str
     transaction_id: str
+    _composition_original_rgb: Any = None
+    _composition_commits: tuple[Any, ...] = ()
+
+    @classmethod
+    def from_original(
+        cls,
+        original_rgb: Any,
+        *,
+        commits=(),
+        artifact_root: str | Path | None = None,
+    ) -> "PageCandidateTransaction":
+        return cls(
+            private_execution_root=Path(artifact_root or "."),
+            run_id="",
+            execution_id="",
+            page_id="",
+            artifact_store_id="",
+            generation_id="",
+            page_generation_id="",
+            transaction_id="",
+            _composition_original_rgb=np.asarray(original_rgb).copy(),
+            _composition_commits=tuple(commits),
+        )
+
+    def replace_owner_commit(self, commit: Any) -> "PageCandidateTransaction":
+        owner_id = str(getattr(commit, "owner_id", "") or "")
+        if not owner_id:
+            raise AtomicReplacementError("replacement commit owner identity is missing")
+        commits = tuple(
+            item for item in self._composition_commits
+            if str(getattr(item, "owner_id", "") or "") != owner_id
+        ) + (commit,)
+        return replace(self, _composition_commits=commits)
+
+    def compose(self) -> Any:
+        if self._composition_original_rgb is None:
+            raise AtomicReplacementError("page compositor has no immutable original")
+        original = np.asarray(self._composition_original_rgb)
+        if original.dtype != np.uint8 or original.ndim != 3 or original.shape[2] != 3:
+            raise AtomicReplacementError("page compositor original is invalid")
+        ordered = tuple(
+            sorted(
+                self._composition_commits,
+                key=lambda item: (str(getattr(item, "owner_id", "")), str(getattr(item, "commit_id", ""))),
+            )
+        )
+        owner_ids = [str(getattr(item, "owner_id", "")) for item in ordered]
+        if len(owner_ids) != len(set(owner_ids)):
+            raise AtomicReplacementError("page compositor has duplicate owner commits")
+        final = np.ascontiguousarray(original).copy()
+        for commit in ordered:
+            if not bool(getattr(commit, "committed", False)):
+                raise AtomicReplacementError("page compositor rejects uncommitted owner")
+            mutation = getattr(commit, "mutation", None)
+            action = np.asarray(getattr(mutation, "action_mask", None))
+            cleaned = np.asarray(getattr(mutation, "result_rgb", None))
+            if action.shape != final.shape[:2] or cleaned.shape != final.shape:
+                raise AtomicReplacementError("owner cleanup raster shape mismatch")
+            final[action > 0] = cleaned[action > 0]
+        for commit in ordered:
+            patch = getattr(commit, "glyph_patch", None)
+            paint = getattr(patch, "paint_mask", None)
+            if paint is None:
+                paint = getattr(patch, "glyph_mask", None)
+            paint_array = np.asarray(paint)
+            rendered = np.asarray(getattr(patch, "result_rgb", None))
+            if paint_array.shape != final.shape[:2] or rendered.shape != final.shape:
+                raise AtomicReplacementError("owner glyph raster shape mismatch")
+            final[paint_array > 0] = rendered[paint_array > 0]
+        final_sha = canonical_page_sha256(final)
+        return PageCompositionCandidate(
+            final_page=final,
+            base_pixel_sha256=canonical_page_sha256(original),
+            final_pixel_sha256=final_sha,
+            commit_ids=tuple(str(getattr(item, "commit_id", "")) for item in ordered),
+        )
 
     def commit_verified_generation(self, result: Any) -> PageExecutionEvidenceRef:
         if getattr(result, "status", None) != "final_verified":
@@ -844,11 +1330,20 @@ __all__ = [
     "FrozenJSONSnapshot",
     "PageArtifactIntegrityError",
     "PageCandidateTransaction",
+    "PageCompositionCandidate",
+    "PageCompositionSnapshot",
     "PageExecutionEvidenceRef",
     "PageExecutionEvidenceSnapshot",
     "PageGeometrySnapshot",
     "PageNotTerminalError",
+    "AtomicReplacementError",
+    "OwnerReplacementAttemptResult",
+    "OwnerReplacementOutcome",
+    "OwnerReplacementTransaction",
     "PersistedAssetRef",
     "PersistedRGBImageArtifactRef",
     "TerminalPixelProof",
+    "build_owner_repair_request",
+    "canonical_glyph_patch_sha256",
+    "execute_owner_replacement",
 ]

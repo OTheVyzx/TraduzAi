@@ -21,7 +21,7 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "execution_attempt": frozenset({"repair_pending", "cleaned"}),
     "repair_pending": frozenset({"execution_attempt"}),
     "cleaned": frozenset({"rendered"}),
-    "rendered": frozenset({"final_verified"}),
+    "rendered": frozenset({"repair_pending", "final_verified"}),
     "final_verified": frozenset(),
     "explicit_non_dialogue_preserve": frozenset(),
 }

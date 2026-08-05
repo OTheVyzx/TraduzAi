@@ -2788,6 +2788,8 @@ class OwnerPageExecution:
     commits: tuple[OwnerExecutionCommit, ...]
     records: tuple[dict[str, Any], ...]
     translation_result: OwnerPageTranslationResult | None = None
+    target_materializations: tuple[Any, ...] = ()
+    repair_requests: tuple[Any, ...] = ()
 
 
 def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None = None) -> dict:
@@ -11328,7 +11330,13 @@ def execute_owner_page_graph(
         )
     )
     commits: list[OwnerExecutionCommit] = []
+    target_materializations: list[Any] = []
+    repair_requests: list[Any] = []
     final_records: list[dict[str, Any]] = []
+    bindings_by_owner = {
+        binding.owner_id: binding
+        for binding in (translation_result.bindings if translation_result is not None else ())
+    }
 
     for owner in sorted(executed_graph.owners, key=lambda item: item.owner_id):
         if owner.disposition != "owned" or owner.state not in {"translated", "target_ready"}:
@@ -11727,28 +11735,72 @@ def execute_owner_page_graph(
         style_decision = visual_profile.get("style_application_decision_v2")
         style_intent = layout_record.get("style_resolved_intent_v1")
         materialization_plan = layout_record.get("_sealed_materialization_plan_v1")
-        commit = apply_atomic_owner_execution(
-            source,
-            mutation,
-            glyph_patch,
-            expected_visual_profile_sha256=str(
+        atomic_kwargs = {
+            "expected_visual_profile_sha256": str(
                 layout_record.get("visual_profile_sha256") or ""
             ),
-            expected_profile_component_geometry_sha256=str(
+            "expected_profile_component_geometry_sha256": str(
                 visual_profile.get("component_geometry_sha256") or ""
             ),
-            expected_style_decision=(
+            "expected_style_decision": (
                 style_decision if isinstance(style_decision, dict) else None
             ),
-            expected_style_intent=(
+            "expected_style_intent": (
                 style_intent if isinstance(style_intent, dict) else None
             ),
-            expected_materialization_plan_sha256=(
+            "expected_materialization_plan_sha256": (
                 str(materialization_plan.get("plan_sha256") or "")
                 if isinstance(materialization_plan, dict)
                 else None
             ),
-        )
+        }
+        if enforce_graph:
+            from ownership.execution import (
+                OwnerReplacementTransaction,
+                execute_owner_replacement,
+            )
+
+            binding = bindings_by_owner.get(owner.owner_id)
+            if binding is None:
+                raise ValueError(
+                    f"renderable owner {owner.owner_id} is missing translation binding"
+                )
+            transaction = OwnerReplacementTransaction.build(
+                original_rgb=source,
+                mutation=mutation,
+                translation=binding,
+                execution_id=graph.origin_execution_id,
+                atomic_options=atomic_kwargs,
+            )
+            replacement = execute_owner_replacement(
+                transaction,
+                mutation,
+                glyph_patch,
+                failed_stage="render",
+                failure_reason="atomic_owner_replacement_rejected",
+                evidence_ids=(plan.action_mask_ref,),
+                next_strategy="r0_precise_retry",
+            )
+            if replacement.outcome is None:
+                repair_requests.append(replacement.repair_request)
+                owner.state = "repair_pending"
+                single_owner.state = "repair_pending"
+                review_seed = copy.deepcopy(record)
+                review_seed["owner_execution_rejection_reason"] = (
+                    replacement.repair_request.reason
+                )
+                review_seed["state"] = "repair_pending"
+                final_records.append(review_seed)
+                continue
+            commit = replacement.outcome.commit
+            target_materializations.append(replacement.outcome.materialization)
+        else:
+            commit = apply_atomic_owner_execution(
+                source,
+                mutation,
+                glyph_patch,
+                **atomic_kwargs,
+            )
         commits.append(commit)
         if commit.committed:
             owner.state = "rendered"
@@ -11865,6 +11917,8 @@ def execute_owner_page_graph(
         commits=tuple(commits),
         records=tuple(final_records),
         translation_result=translation_result,
+        target_materializations=tuple(target_materializations),
+        repair_requests=tuple(repair_requests),
     )
 
 
