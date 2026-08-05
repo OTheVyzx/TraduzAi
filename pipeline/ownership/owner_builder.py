@@ -34,6 +34,7 @@ _AUDITED_PRESERVE_POLICY_IDS = frozenset(
         "explicit_url_outside_translatable_container",
         "explicit_mark_outside_translatable_container",
         "ocr_empty_near_uniform_false_glyph",
+        "ocr_empty_tiny_isolated_false_glyph",
     }
 )
 
