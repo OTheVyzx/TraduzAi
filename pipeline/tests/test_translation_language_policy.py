@@ -126,6 +126,32 @@ def test_already_ptbr_accepts_shared_homographs_only_with_ptbr_specific_evidence
     assert not ambiguous_only.accepted
 
 
+def test_already_ptbr_recognizes_morphology_when_ocr_contains_unknown_tokens() -> None:
+    source = "ESTIMADO WVIP?"
+    verdict = validate_target_language(
+        source=source,
+        target=source,
+        role="dialogue_body",
+        page_language_evidence=build_page_language_evidence(
+            texts=(source,),
+            coverage_complete=True,
+        ),
+    )
+    english = validate_target_language(
+        source="ESTIMATED VIP?",
+        target="ESTIMATED VIP?",
+        role="dialogue_body",
+        page_language_evidence=build_page_language_evidence(
+            texts=("ESTIMATED VIP?",),
+            coverage_complete=True,
+        ),
+    )
+
+    assert verdict.accepted
+    assert verdict.policy_id == "already_target_language"
+    assert not english.accepted
+
+
 def test_page_language_evidence_tracks_material_english_but_not_ptbr() -> None:
     english = build_page_language_evidence(
         texts=("THE PLAYER HAS 10 KILLS",),

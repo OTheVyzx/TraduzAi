@@ -37,6 +37,34 @@ _PTBR_WORDS = frozenset(
     vocês abate abates
     """.split()
 ) | frozenset({"voce", "voces"})
+_PTBR_MORPHOLOGY_SUFFIXES = (
+    "ado",
+    "ada",
+    "ados",
+    "adas",
+    "ido",
+    "ida",
+    "idos",
+    "idas",
+    "ando",
+    "endo",
+    "indo",
+    "mente",
+    "dade",
+    "dades",
+)
+
+
+def _is_ptbr_token(token: str) -> bool:
+    normalized = str(token or "").casefold()
+    if normalized in _PTBR_WORDS:
+        return True
+    return len(normalized) >= 6 and normalized.endswith(_PTBR_MORPHOLOGY_SUFFIXES)
+
+
+def _is_ptbr_specific_token(token: str) -> bool:
+    normalized = str(token or "").casefold()
+    return _is_ptbr_token(normalized) and normalized not in _ENGLISH_WORDS
 
 
 @dataclass(frozen=True)
@@ -241,16 +269,18 @@ def validate_target_language(
         token for token in target_tokens if token not in explicit_entity_tokens
     )
     english_tokens = tuple(token for token in considered_tokens if token in _ENGLISH_WORDS)
-    ptbr_tokens = tuple(token for token in considered_tokens if token in _PTBR_WORDS)
+    ptbr_tokens = tuple(
+        token for token in considered_tokens if _is_ptbr_token(token)
+    )
     english_only_tokens = tuple(
         token
         for token in considered_tokens
-        if token in _ENGLISH_WORDS and token not in _PTBR_WORDS
+        if token in _ENGLISH_WORDS and not _is_ptbr_token(token)
     )
     ptbr_only_tokens = tuple(
         token
         for token in considered_tokens
-        if token in _PTBR_WORDS and token not in _ENGLISH_WORDS
+        if _is_ptbr_specific_token(token) and token not in _ENGLISH_WORDS
     )
     source_counter = Counter(source_tokens)
     source_only_tokens = tuple(
@@ -258,7 +288,7 @@ def validate_target_language(
             {
                 token
                 for token in considered_tokens
-                if source_counter[token] > 0 and token not in _PTBR_WORDS
+                if source_counter[token] > 0 and not _is_ptbr_token(token)
             }
         )
     )
