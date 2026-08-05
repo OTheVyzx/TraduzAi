@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
 
 from PIL import Image
 import numpy as np
@@ -36,3 +38,21 @@ def test_cli_returns_nonzero_without_source_and_has_no_unhandled_exception(tmp_p
         "--source", str(tmp_path / "missing"),
         "--context", str(tmp_path / "current.json"),
     ]) != 0
+
+
+def test_direct_cli_runs_from_repository_root(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.fromarray(np.full((8, 9, 3), 220, dtype=np.uint8), "RGB").save(source / "001.png")
+    script = Path(__file__).resolve().parents[1] / "tools" / "init_owner_validation_run.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--base", str(tmp_path / "validation"),
+         "--source", str(source), "--context", str(tmp_path / "current.json")],
+        cwd=script.parents[2],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (tmp_path / "current.json").is_file()
