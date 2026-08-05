@@ -1640,6 +1640,36 @@ class MainEmitTests(unittest.TestCase):
             config = json.loads((output_dir / "runner_config.json").read_text(encoding="utf-8"))
             self.assertTrue(config["strict"])
 
+    def test_runner_cli_preserves_resolved_chapter_and_real_mode_in_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / "original"
+            output_dir = Path(tmp) / "out"
+            input_dir.mkdir()
+            (input_dir / "001.png").write_bytes(b"fake image")
+            resolved = main.resolve_runner_config_from_cli(
+                main.parse_cli_args(
+                    [
+                        "--input", str(input_dir),
+                        "--work", "Mitch Items",
+                        "--chapter", "39",
+                        "--source-lang", "en",
+                        "--target", "pt-BR",
+                        "--mode", "real",
+                        "--output", str(output_dir),
+                    ]
+                ),
+                loaded_config={},
+            )
+
+            with patch.object(main, "_run_pipeline") as run_pipeline:
+                exit_code = main._run_pipeline_runner_cli(resolved)
+
+            self.assertEqual(exit_code, 0)
+            run_pipeline.assert_called_once()
+            config = json.loads((output_dir / "runner_config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["capitulo"], 39)
+            self.assertEqual(config["mode"], "real")
+
     def test_debug_export_gate_artifacts_write_consistency_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             from debug_tools import DebugRecorder
