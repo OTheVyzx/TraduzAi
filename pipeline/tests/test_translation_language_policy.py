@@ -5,8 +5,24 @@ import pytest
 from translator.language_policy import (
     PageLanguageEvidence,
     build_page_language_evidence,
+    recover_noisy_source_anchors,
     validate_target_language,
 )
+
+
+def test_recovers_ordered_english_and_context_name_anchors_from_bilingual_overlay() -> None:
+    recovery = recover_noisy_source_anchors(
+        "ISSOANSRRAWO!HOOMO DIDINBEDODGEKMSSIMEOK'S SWPORBDSTRIKETFAOOEH...",
+        context_names=("Kim Sihyeok",),
+    )
+    assert recovery is not None
+    assert recovery.anchors == ("HOW", "DID", "DODGE", "KIM SIHYEOK", "SWORD", "STRIKE")
+    assert recovery.reason == "bilingual_overlay_low_lexical_coherence"
+
+
+def test_noisy_anchor_recovery_does_not_rewrite_coherent_language_text() -> None:
+    assert recover_noisy_source_anchors("HOW DID HE DODGE KIM SIHYEOK'S SWORD STRIKE?", context_names=("Kim Sihyeok",)) is None
+    assert recover_noisy_source_anchors("COMO ELE DESVIOU DO GOLPE DE ESPADA?", context_names=("Kim Sihyeok",)) is None
 
 
 def test_unchanged_english_dialogue_is_not_valid_pt_br() -> None:

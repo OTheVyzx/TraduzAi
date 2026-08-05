@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 import re
-from typing import Literal
+from typing import Iterable, Literal
 import unicodedata
 
 try:
@@ -457,9 +457,139 @@ def validate_target_language(
     )
 
 
+_RECOVERY_WORD_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+_RECOVERY_SHORT_FUZZY = frozenset({"how", "why", "who", "what", "where"})
+_RECOVERY_CONTENT_ANCHORS = frozenset(word for word in _ENGLISH_WORDS if len(word) >= 5)
+
+
+@dataclass(frozen=True)
+class NoisySourceRecovery:
+    anchors: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
+class _RecoveryAnchorCandidate:
+    start: int
+    end: int
+    value: str
+    score: int
+    content: bool
+
+
+def _recovery_levenshtein(left: str, right: str) -> int:
+    previous = list(range(len(right) + 1))
+    for row, left_char in enumerate(left, 1):
+        current = [row]
+        for column, right_char in enumerate(right, 1):
+            current.append(min(current[-1] + 1, previous[column] + 1, previous[column - 1] + (left_char != right_char)))
+        previous = current
+    return previous[-1]
+
+
+def _recovery_best_window(chunk: str, target: str) -> tuple[int, int, int] | None:
+    if not chunk or not target:
+        return None
+    best: tuple[int, int, int] | None = None
+    for width in range(max(1, len(target) - 2), min(len(chunk), len(target) + 2) + 1):
+        for start in range(0, len(chunk) - width + 1):
+            candidate = (_recovery_levenshtein(chunk[start : start + width], target), start, width)
+            if best is None or candidate < best:
+                best = candidate
+    return best
+
+
+def _recovery_compact(value: str) -> str:
+    return re.sub(r"[^a-z]", "", str(value or "").casefold())
+
+
+def _recovery_context_names(context_names: Iterable[str]) -> tuple[tuple[str, str], ...]:
+    result: list[tuple[str, str]] = []
+    for raw_name in context_names:
+        display = " ".join(str(raw_name or "").split())
+        compact = _recovery_compact(display)
+        if len(compact) >= 5 and display:
+            result.append((display.upper(), compact))
+    return tuple(result)
+
+
+def _recovery_is_low_coherence(text: str) -> bool:
+    chunks = [match.group(0) for match in _RECOVERY_WORD_RE.finditer(str(text or ""))]
+    return len(chunks) >= 3 and sum(len(_recovery_compact(chunk)) >= 10 for chunk in chunks) >= 2
+
+
+def _recovery_word_candidates(text: str) -> list[_RecoveryAnchorCandidate]:
+    candidates: list[_RecoveryAnchorCandidate] = []
+    for match in _RECOVERY_WORD_RE.finditer(text):
+        chunk = _recovery_compact(match.group(0))
+        if len(chunk) < 3:
+            continue
+        for word in _ENGLISH_WORDS:
+            if len(word) < 3:
+                continue
+            best = _recovery_best_window(chunk, word)
+            if best is None:
+                continue
+            distance, local_start, width = best
+            exact = distance == 0
+            allowed = 1 if word in _RECOVERY_SHORT_FUZZY and len(chunk) <= 7 else (2 if len(word) >= 5 else 0)
+            if distance > allowed:
+                continue
+            fragment = chunk[local_start : local_start + width]
+            if not exact and fragment[:1] != word[:1]:
+                continue
+            start = match.start() + local_start
+            candidates.append(_RecoveryAnchorCandidate(start, start + width, word.upper(), (100 if exact else 70) + len(word) * 4 - distance * 8, word in _RECOVERY_CONTENT_ANCHORS))
+    return candidates
+
+
+def _recovery_name_candidates(text: str, context_names: Iterable[str]) -> list[_RecoveryAnchorCandidate]:
+    candidates: list[_RecoveryAnchorCandidate] = []
+    for match in _RECOVERY_WORD_RE.finditer(text):
+        chunk = _recovery_compact(match.group(0))
+        if len(chunk) < 7:
+            continue
+        for display, compact_name in _recovery_context_names(context_names):
+            best = _recovery_best_window(chunk, compact_name)
+            if best is None:
+                continue
+            distance, local_start, width = best
+            if distance > max(2, min(4, len(compact_name) // 2)):
+                continue
+            start = match.start() + local_start
+            candidates.append(_RecoveryAnchorCandidate(start, start + width, display, 180 + len(compact_name) * 4 - distance * 8, True))
+    return candidates
+
+
+def _select_recovery_candidates(candidates: Iterable[_RecoveryAnchorCandidate]) -> tuple[_RecoveryAnchorCandidate, ...]:
+    selected: list[_RecoveryAnchorCandidate] = []
+    for candidate in sorted(candidates, key=lambda item: (-item.score, item.start, -(item.end - item.start), item.value)):
+        if any(candidate.start < item.end and item.start < candidate.end for item in selected):
+            continue
+        selected.append(candidate)
+    return tuple(sorted(selected, key=lambda item: (item.start, item.end, item.value)))
+
+
+def recover_noisy_source_anchors(text: str, *, context_names: Iterable[str] = ()) -> NoisySourceRecovery | None:
+    """Recover ordered anchors only from clearly incoherent long OCR chunks."""
+    source = str(text or "").strip()
+    if not _recovery_is_low_coherence(source):
+        return None
+    selected = _select_recovery_candidates([*_recovery_word_candidates(source), *_recovery_name_candidates(source, context_names)])
+    anchors: list[str] = []
+    for candidate in selected:
+        if candidate.value not in anchors:
+            anchors.append(candidate.value)
+    if len(anchors) < 3 or sum(1 for item in selected if item.content) < 2:
+        return None
+    return NoisySourceRecovery(tuple(anchors), "bilingual_overlay_low_lexical_coherence")
+
+
 __all__ = [
+    "NoisySourceRecovery",
     "PageLanguageEvidence",
     "TargetLanguageVerdict",
     "build_page_language_evidence",
+    "recover_noisy_source_anchors",
     "validate_target_language",
 ]

@@ -38,6 +38,11 @@ except ImportError:
     from .locale_policy import canonical_target_locale, validate_target_locale
 
 try:
+    from translator.language_policy import recover_noisy_source_anchors
+except ImportError:
+    from .language_policy import recover_noisy_source_anchors
+
+try:
     from ownership.hash_contract import canonical_json_bytes, sha256_bytes
 except ImportError:
     from ..ownership.hash_contract import canonical_json_bytes, sha256_bytes
@@ -2491,7 +2496,7 @@ def _refine_google_translations_with_semantic_llm(
 
 @dataclass(frozen=True)
 class TranslationAttemptControl:
-    backend: Literal["google", "ollama"]
+    backend: Literal["google", "ollama", "ocr_recovery"]
     variant: str
     disable_cache: bool
     provider_model: str | None = None
@@ -2545,6 +2550,55 @@ def _single_owner_identity(ocr_result: dict[str, Any]) -> tuple[str, str]:
         raise ValueError("translation attempt boundary requires owner_id")
     source_text = str(record.get("text") or record.get("original") or "")
     return owner_id, source_text
+
+
+def _context_character_names(context: dict[str, Any]) -> tuple[str, ...]:
+    names: list[str] = []
+    for key in ("personagens", "characters"):
+        values = context.get(key) or []
+        if isinstance(values, (str, dict)):
+            values = [values]
+        for value in values:
+            candidate = (value.get("name") or value.get("nome") or value.get("full_name")) if isinstance(value, dict) else value
+            normalized = " ".join(str(candidate or "").split())
+            if normalized and normalized not in names:
+                names.append(normalized)
+    return tuple(names)
+
+
+def _reconstruct_noisy_owner_source(source_text: str, *, context: dict[str, Any], model: str, host: str) -> tuple[str, dict[str, Any]]:
+    recovery = recover_noisy_source_anchors(source_text, context_names=_context_character_names(context))
+    if recovery is None:
+        raise ValueError("owner OCR recovery requires low-coherence source anchors")
+    anchor_text = " | ".join(recovery.anchors)
+    system = (
+        "You repair severely corrupted English comic OCR. The bitmap contains the English source and a translated layer drawn over each other. "
+        "Unknown letters are interference, not a cipher. Reliable ordered anchors: "
+        f"{anchor_text}. Reconstruct one short grammatical English line using only those anchors; add only function words required for grammar, "
+        "preserve names, and return only JSON [{\"id\":\"t1\",\"translated\":\"clean English\"}]."
+    )
+    user = f"OCR source:\n{source_text}"
+    reconstructed = ""
+    local_error: str | None = None
+    try:
+        local_items = _call_ollama(model, system, user, host)
+        if local_items:
+            reconstructed = str(local_items[0].get("translated") or "").strip()
+    except Exception as exc:
+        local_error = exc.__class__.__name__
+    compact = re.sub(r"[^a-z]", "", reconstructed.casefold())
+    matches = sum(re.sub(r"[^a-z]", "", anchor.casefold()) in compact for anchor in recovery.anchors)
+    if not reconstructed or reconstructed.casefold() == source_text.casefold() or matches < max(3, (len(recovery.anchors) + 1) // 2):
+        reconstructed = " ".join(recovery.anchors)
+        if recovery.anchors and recovery.anchors[0] in {"HOW", "WHY", "WHO", "WHAT", "WHERE"}:
+            reconstructed += "?"
+    return reconstructed, {
+        "reason": recovery.reason,
+        "anchors": list(recovery.anchors),
+        "local_model": model,
+        "local_error": local_error,
+        "reconstructed_source_sha256": sha256_bytes(reconstructed.encode("utf-8")),
+    }
 
 
 def translate_one_owner_attempt(
@@ -2665,6 +2719,33 @@ def translate_one_owner_attempt(
                 target_locale=target_locale,
                 debug_session=debug_session,
             )
+        elif control.backend == "ocr_recovery":
+            reconstruction_model = provider_model or ollama_model
+            reconstructed_source, recovery_metadata = _reconstruct_noisy_owner_source(
+                source_text, context=context, model=reconstruction_model, host=ollama_host
+            )
+            if _google is None:
+                _google = _GoogleTranslator(source=source_lang, target=target_lang)
+                _google._source_lang = source_lang
+                _google._target_lang = target_lang
+            memory_cache = getattr(_google, "_cache", None)
+            persistent_cache = getattr(_google, "_persistent_cache", None)
+            provider_page["texts"][0]["text"] = reconstructed_source
+            provider_page["texts"][0]["original"] = reconstructed_source
+            _google._cache = {}
+            _google._persistent_cache = None
+            try:
+                translated_pages = _translate_with_google(
+                    [provider_page], context, glossario, progress_callback,
+                    idioma_origem=source_lang, idioma_destino=target_lang,
+                    target_locale=target_locale, translation_context=translation_context,
+                    debug_session=debug_session,
+                )
+            finally:
+                _google._cache = memory_cache
+                _google._persistent_cache = persistent_cache
+            metadata["recovery"] = recovery_metadata
+            provider_model = f"{reconstruction_model}+google-public"
         else:  # pragma: no cover - Literal protects typed callers
             raise ValueError(f"unsupported translation backend: {control.backend}")
     except Exception as exc:

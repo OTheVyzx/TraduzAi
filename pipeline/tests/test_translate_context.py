@@ -2006,6 +2006,44 @@ def test_forced_ollama_attempt_disables_hidden_google_repair(monkeypatch) -> Non
     assert low_level.call_args.kwargs["repair_translator"] is None
 
 
+def test_owner_ocr_recovery_attempt_reconstructs_source_then_translates_with_google(monkeypatch) -> None:
+    source = "ISSOANSRRAWO!HOOMO DIDINBEDODGEKMSSIMEOK'S SWPORBDSTRIKETFAOOEH..."
+    page = _owned_legacy_page()
+    page["texts"][0]["text"] = source
+    page["texts"][0]["original"] = source
+    captured: dict[str, str] = {}
+
+    def local_model(_model, system, user_msg, _host):
+        captured["system"] = system
+        captured["user"] = user_msg
+        return [{"id": "t1", "translated": "HOW DID HE DODGE KIM SIHYEOK'S SWORD STRIKE?"}]
+
+    def google(pages, *_args, **_kwargs):
+        captured["google_source"] = pages[0]["texts"][0]["text"]
+        result = pages[0].copy()
+        result["texts"] = [dict(pages[0]["texts"][0])]
+        result["texts"][0]["translated"] = "COMO ELE DESVIOU DO GOLPE DE ESPADA DE KIM SIHYEOK?"
+        return [result]
+
+    monkeypatch.setattr(translate_module, "_call_ollama", local_model)
+    monkeypatch.setattr(translate_module, "_translate_with_google", google)
+    monkeypatch.setattr(translate_module, "_google", type("Google", (), {"_cache": {}, "_persistent_cache": None})())
+    result = translate_module.translate_one_owner_attempt(
+        page, "obra", {"personagens": ["Kim Sihyeok"]}, {},
+        idioma_destino="pt-BR", idioma_origem="en", qualidade="normal",
+        ollama_host="http://localhost:11434", ollama_model="traduzai-translator",
+        models_dir="", translation_context=None,
+        control=translate_module.TranslationAttemptControl("ocr_recovery", "owner_ocr_recovery", True),
+    )
+    translated = result.translated_items[0].read()["texts"][0]["translated"]
+    assert translated.startswith("COMO ELE DESVIOU")
+    assert result.backend == "ocr_recovery"
+    assert "OCR" in captured["system"]
+    assert "HOW | DID | DODGE | KIM SIHYEOK | SWORD | STRIKE" in captured["system"]
+    assert source in captured["user"]
+    assert captured["google_source"] == "HOW DID HE DODGE KIM SIHYEOK'S SWORD STRIKE?"
+
+
 def test_low_level_provider_calls_are_owned_only_by_attempt_boundary() -> None:
     tree = ast.parse(Path(translate_module.__file__).read_text(encoding="utf-8"))
     offenders: list[str] = []
