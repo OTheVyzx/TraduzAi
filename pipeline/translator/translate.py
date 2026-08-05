@@ -2592,6 +2592,12 @@ def translate_one_owner_attempt(
         "target_locale": target_locale,
         "disable_cache": bool(control.disable_cache),
     }
+    provider_page = copy.deepcopy(ocr_result)
+    if not legacy_batch:
+        provider_page["_owner_translation_contract"] = {
+            "owner_id": owner_id,
+            "source_text_sha256": sha256_bytes(source_text.encode("utf-8")),
+        }
     try:
         if control.backend == "google":
             if _google is None:
@@ -2627,7 +2633,7 @@ def translate_one_owner_attempt(
                 _google._persistent_cache = None
             try:
                 translated_pages = _translate_with_google(
-                    [copy.deepcopy(ocr_result)],
+                    [provider_page],
                     context,
                     glossario,
                     progress_callback,
@@ -2645,7 +2651,7 @@ def translate_one_owner_attempt(
         elif control.backend == "ollama":
             provider_model = provider_model or ollama_model
             translated_pages = _translate_with_ollama(
-                [copy.deepcopy(ocr_result)],
+                [provider_page],
                 obra,
                 context,
                 glossario,

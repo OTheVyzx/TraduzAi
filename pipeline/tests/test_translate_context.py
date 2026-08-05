@@ -1919,6 +1919,59 @@ def test_forced_google_attempt_records_real_metadata(monkeypatch) -> None:
     low_level.assert_called_once()
 
 
+def test_owner_attempt_bypasses_legacy_renormalization_for_joined_ocr(monkeypatch) -> None:
+    source = "MYTHOUGHTSAREA BIT DIFFERENTTHOUGH"
+    translate_batch = unittest.mock.Mock(
+        return_value=["Meu pensamento e um pouco diferente"]
+    )
+    google = type(
+        "Google",
+        (),
+        {
+            "_cache": {},
+            "_persistent_cache": None,
+            "translate_batch": translate_batch,
+        },
+    )()
+    monkeypatch.setattr(translate_module, "_google", google)
+
+    result = translate_module.translate_one_owner_attempt(
+        {
+            "page_id": "page_012",
+            "texts": [
+                {
+                    "id": "owner-a",
+                    "owner_id": "owner-a",
+                    "text": source,
+                    "original": source,
+                    "semantic_role": "dialogue_body",
+                    "tipo": "dialogue_body",
+                    "route_action": "translate_inpaint_render",
+                    "component_ids": ["component-a"],
+                }
+            ],
+        },
+        "obra",
+        {},
+        {},
+        idioma_destino="pt-BR",
+        idioma_origem="en",
+        qualidade="normal",
+        ollama_host="http://localhost:11434",
+        ollama_model="traduzai-translator",
+        models_dir="",
+        translation_context=None,
+        control=translate_module.TranslationAttemptControl(
+            "google", "primary", True
+        ),
+    )
+
+    translated = result.translated_items[0].read()["texts"][0]
+    assert translated["route_action"] == "translate_inpaint_render"
+    assert translated["translated"] == "MEU PENSAMENTO E UM POUCO DIFERENTE"
+    translate_batch.assert_called_once_with(["Mythoughtsarea bit differentthough"])
+
+
 def test_forced_ollama_attempt_disables_hidden_google_repair(monkeypatch) -> None:
     translated = {
         "texts": [
