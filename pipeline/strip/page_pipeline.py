@@ -37,6 +37,7 @@ from ownership.translation import (
     apply_owner_translation_result,
     translate_owner_page,
 )
+from translator.language_policy import build_page_language_evidence
 
 
 class PagePipelineIdentityError(ValueError):
@@ -1644,12 +1645,20 @@ def run_page_owner_pipeline(
         and owner.route_action in TRANSLATION_ROUTE_ACTIONS
     )
     if requests:
+        language_evidence_by_owner = {
+            owner_request.owner_id: build_page_language_evidence(
+                texts=(owner_request.source_text,),
+                coverage_complete=True,
+            )
+            for owner_request in requests
+        }
         translation_result = translate_owner_page(
             requests,
             backends=services.translation_backends,
             attempt_fn=services.translation_attempt_fn,
             attempt_controls=services.translation_attempt_controls,
             attempt_kwargs=services.translation_attempt_kwargs,
+            page_language_evidence_by_owner=language_evidence_by_owner,
         )
         translated_graph = apply_owner_translation_result(graph, translation_result)
     else:

@@ -204,6 +204,29 @@ def test_enforce_mode_processes_page_without_creating_band_placeholder():
     assert result.final_page is None
 
 
+def test_page_pipeline_passes_fresh_complete_language_evidence(monkeypatch):
+    import strip.page_pipeline as page_pipeline
+
+    captured = {}
+    original = page_pipeline.translate_owner_page
+
+    def recording_translate_owner_page(*args, **kwargs):
+        captured.update(kwargs["page_language_evidence_by_owner"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        page_pipeline,
+        "translate_owner_page",
+        recording_translate_owner_page,
+    )
+
+    result = run_page_owner_pipeline(_request(), _services())
+
+    owner_id = result.translations[0].owner_id
+    assert captured[owner_id].coverage_complete
+    assert "this" in captured[owner_id].source_only_tokens
+
+
 def test_stale_mutable_band_payloads_are_not_imported_or_mutated_in_enforce():
     band = Band(y_top=10, y_bottom=80, tile_id="band-legacy")
     band.ocr_result = {"texts": [{"translated": "STALE"}]}
