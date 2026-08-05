@@ -470,6 +470,30 @@ def test_ocr_empty_tiny_isolated_false_glyph_policy_roundtrips_as_preserve() -> 
     assert disposition.policy_evidence_ids == entry.ocr_attempt_ids
 
 
+def test_ocr_empty_uncorroborated_glyph_scan_policy_roundtrips_as_preserve() -> None:
+    coverage = _coverage(
+        (("component-art", "", (20, 20, 220, 140)),),
+        containers=(None,),
+        preserve_policy="policy:ocr_empty_uncorroborated_glyph_scan",
+        semantic_role="visual_non_text",
+    )
+    entry = replace(
+        coverage.entries[0],
+        materiality="non_text",
+        observation_ids=(),
+    )
+
+    graph = build_owner_page_graph_from_coverage(
+        _replace_entries(coverage, (entry,), observations=())
+    )
+
+    disposition = graph.component_dispositions[0]
+    assert graph.owners == []
+    assert disposition.decision == "preserve"
+    assert disposition.policy_id == "ocr_empty_uncorroborated_glyph_scan"
+    assert disposition.policy_evidence_ids == entry.ocr_attempt_ids
+
+
 def test_unknown_preserve_policy_is_rejected() -> None:
     coverage = _coverage(
         (("component-a", "TEXT", (20, 20, 120, 50)),),
