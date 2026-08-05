@@ -137,3 +137,39 @@ class OwnerLifecycle:
             evidence_sha256s=(*self.evidence_sha256s, evidence.evidence_sha256),
             history=(*self.history, state),
         )
+
+
+def advance_owner_with_translation(lifecycle: OwnerLifecycle, binding) -> OwnerLifecycle:
+    """Advance one owner only from its own accepted, hash-bound PT-BR binding."""
+
+    binding_identity = OwnerLifecycleIdentity(
+        run_id=str(getattr(binding, "run_id", "")),
+        origin_execution_id=str(getattr(binding, "origin_execution_id", "")),
+        page_id=str(getattr(binding, "page_id", "")),
+        page_source_sha256=str(getattr(binding, "page_source_sha256", "")),
+        owner_id=str(getattr(binding, "owner_id", "")),
+    )
+    if binding_identity != lifecycle.identity:
+        raise CoverageInvariantError("translation binding belongs to another owner")
+    verdict = getattr(binding, "language_verdict", None)
+    if (
+        getattr(binding, "target_locale", None) != "pt-BR"
+        or verdict is None
+        or not bool(getattr(verdict, "accepted", False))
+    ):
+        raise CoverageInvariantError("target_ready requires accepted PT-BR binding")
+    binding_sha256 = str(getattr(binding, "translation_binding_sha256", ""))
+    canonical_payload = getattr(binding, "canonical_payload", None)
+    if (
+        len(binding_sha256) != 64
+        or not callable(canonical_payload)
+        or canonical_json_sha256(canonical_payload()) != binding_sha256
+    ):
+        raise CoverageInvariantError("translation binding hash mismatch")
+    evidence = LifecycleEvidence.build(
+        identity=lifecycle.identity,
+        evidence_id=f"translation-binding:{binding_sha256[:24]}",
+        evidence_kind="translation_binding",
+        payload_sha256=binding_sha256,
+    )
+    return lifecycle.advance("target_ready", evidence=evidence)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 from unittest.mock import MagicMock
@@ -22,6 +23,7 @@ from ownership.model import (
     SourceTextComponent,
     TextObservation,
     TextOwner,
+    TRANSLATION_ROUTE_ACTIONS,
 )
 
 
@@ -543,3 +545,313 @@ def test_run_translate_stage_blocks_invalid_response_page_cardinality(
     assert "owner_translation_page_count_mismatch" in _critical_codes(merged)
     assert merged.owners[0].state == "review_required"
     assert merged.owners[0].translated_payload is None
+
+
+def _owner_request(owner_suffix: str = "a", *, route_action: str = "translate_inpaint_render"):
+    from ownership.translation import OwnerTranslationRequest
+
+    graph = _graph([(owner_suffix, "THE PLAYER HAS 10 KILLS")])
+    graph.owners[0].route_action = route_action
+    return OwnerTranslationRequest.from_graph(graph, graph.owners[0].owner_id)
+
+
+def test_translation_binding_preserves_owner_and_hash_chain() -> None:
+    from ownership.translation import TranslationAttempt, bind_translation
+    from translator.language_policy import validate_target_language
+
+    request = _owner_request()
+    verdict = validate_target_language(
+        source=request.source_text,
+        target="O JOGADOR TEM 10 ABATES",
+        role=request.semantic_role,
+    )
+    attempt = TranslationAttempt.build(
+        request=request,
+        backend="google",
+        variant="primary",
+        provider_model=None,
+        provider_metadata={"request_id": "provider-1"},
+        target_text="O JOGADOR TEM 10 ABATES",
+        provider_called=True,
+        cache_hit=False,
+        status="accepted",
+        language_verdict=verdict,
+    )
+    binding = bind_translation(request, "O JOGADOR TEM 10 ABATES", (attempt,))
+
+    assert binding.owner_id == request.owner_id
+    assert binding.source_payload_sha256 == request.source_payload_sha256
+    assert binding.target_payload_sha256 == sha256_text(binding.target_text)
+    assert binding.target_locale == "pt-BR"
+    assert binding.attempt_ids == (attempt.attempt_id,)
+    assert binding.translation_binding_sha256
+
+
+@pytest.mark.parametrize("route_action", sorted(TRANSLATION_ROUTE_ACTIONS))
+def test_every_declared_translation_route_receives_exactly_one_binding(
+    route_action: str,
+) -> None:
+    from ownership.translation import translate_owner_page
+
+    request = _owner_request(route_action=route_action)
+    calls: list[str] = []
+
+    def backend(owner_request, variant):
+        calls.append(owner_request.owner_id)
+        return "O JOGADOR TEM 10 ABATES"
+
+    backend.backend_name = "fixture"
+    result = translate_owner_page((request,), backends=(backend,))
+
+    assert calls == [request.owner_id]
+    assert [binding.owner_id for binding in result.bindings] == [request.owner_id]
+
+
+def test_invalid_english_targets_exhaust_without_binding() -> None:
+    from ownership.translation import TranslationValidationExhausted, translate_owner
+
+    request = _owner_request()
+
+    def unchanged(owner_request, variant):
+        return owner_request.source_text
+
+    unchanged.backend_name = "fixture"
+    with pytest.raises(TranslationValidationExhausted) as exc:
+        translate_owner(request, backends=(unchanged,), max_attempts_per_backend=2)
+
+    assert len(exc.value.attempts) == 2
+    assert all(attempt.status == "rejected" for attempt in exc.value.attempts)
+
+
+def test_bulk_adapter_never_cross_assigns_owner_payloads() -> None:
+    from ownership.translation import translate_owner_page
+
+    requests = (_owner_request("a"), _owner_request("b"))
+    calls: list[tuple[str, str]] = []
+
+    def backend(owner_request, variant):
+        calls.append((owner_request.owner_id, variant))
+        return (
+            "O JOGADOR TEM 10 ABATES"
+            if owner_request.owner_id == "owner_a"
+            else "O PARTICIPANTE TEM 10 ABATES"
+        )
+
+    backend.backend_name = "fixture"
+    result = translate_owner_page(requests, backends=(backend,))
+
+    assert [owner_id for owner_id, _variant in calls] == ["owner_a", "owner_b"]
+    assert [binding.owner_id for binding in result.bindings] == ["owner_a", "owner_b"]
+    assert {attempt.owner_id for attempt in result.attempts} == {"owner_a", "owner_b"}
+
+
+def test_translation_result_rejects_binding_from_other_execution() -> None:
+    from ownership.translation import (
+        OwnerPageTranslationResult,
+        TranslationIdentityError,
+        translate_owner_page,
+    )
+
+    request = _owner_request()
+
+    def backend(_owner_request, _variant):
+        return "O JOGADOR TEM 10 ABATES"
+
+    backend.backend_name = "fixture"
+    result = translate_owner_page((request,), backends=(backend,))
+    stale = replace(result.bindings[0], origin_execution_id="execution-other")
+
+    with pytest.raises(TranslationIdentityError):
+        OwnerPageTranslationResult.build(result.attempts, (stale,))
+
+
+def test_owner_reaches_target_ready_only_with_its_valid_ptbr_binding() -> None:
+    from ownership.lifecycle import (
+        LifecycleEvidence,
+        OwnerLifecycle,
+        OwnerLifecycleIdentity,
+        advance_owner_with_translation,
+    )
+    from ownership.translation import translate_owner_page
+
+    request = _owner_request()
+    identity = OwnerLifecycleIdentity(
+        run_id=request.run_id,
+        origin_execution_id=request.origin_execution_id,
+        page_id=request.page_id,
+        page_source_sha256=request.page_source_sha256,
+        owner_id=request.owner_id,
+    )
+    discovery = LifecycleEvidence.build(
+        identity=identity,
+        evidence_id="discovery",
+        evidence_kind="coverage",
+        payload_sha256=request.source_payload_sha256,
+    )
+    lifecycle = OwnerLifecycle.start(identity, evidence=discovery)
+    for state in ("observed", "owned"):
+        lifecycle = lifecycle.advance(
+            state,
+            evidence=LifecycleEvidence.build(
+                identity=identity,
+                evidence_id=f"to-{state}",
+                evidence_kind="coverage",
+                payload_sha256=request.source_payload_sha256,
+            ),
+        )
+
+    def backend(_owner_request, _variant):
+        return "O JOGADOR TEM 10 ABATES"
+
+    backend.backend_name = "fixture"
+    binding = translate_owner_page((request,), backends=(backend,)).bindings[0]
+    target_ready = advance_owner_with_translation(lifecycle, binding)
+
+    assert target_ready.state == "target_ready"
+    assert target_ready.evidence_sha256s[-1]
+
+
+def test_invalid_google_target_advances_to_real_ollama_attempt(monkeypatch) -> None:
+    from ownership.translation import translate_owner_page
+    from translator import translate as translate_module
+
+    request = _owner_request()
+
+    def response(target: str) -> list[dict]:
+        return [
+            {
+                "texts": [
+                    {
+                        "id": request.owner_id,
+                        "owner_id": request.owner_id,
+                        "translated": target,
+                    }
+                ]
+            }
+        ]
+
+    google = MagicMock(return_value=response(request.source_text))
+    ollama = MagicMock(return_value=response("O JOGADOR TEM 10 ABATES"))
+    monkeypatch.setattr(translate_module, "_translate_with_google", google)
+    monkeypatch.setattr(translate_module, "_translate_with_ollama", ollama)
+    monkeypatch.setattr(
+        translate_module,
+        "_google",
+        type("Google", (), {"_cache": {}, "_persistent_cache": None})(),
+    )
+    controls = (
+        translate_module.TranslationAttemptControl("google", "primary", True),
+        translate_module.TranslationAttemptControl("ollama", "local", True),
+    )
+
+    result = translate_owner_page(
+        (request,),
+        attempt_fn=translate_module.translate_one_owner_attempt,
+        attempt_controls=controls,
+        attempt_kwargs={
+            "obra": "obra",
+            "context": {},
+            "glossario": {},
+            "idioma_destino": "pt-BR",
+            "idioma_origem": "en",
+            "qualidade": "normal",
+            "ollama_host": "http://localhost:11434",
+            "ollama_model": "traduzai-translator",
+            "models_dir": "",
+            "translation_context": None,
+        },
+    )
+
+    assert [attempt.backend for attempt in result.attempts] == ["google", "ollama"]
+    assert [attempt.status for attempt in result.attempts] == ["rejected", "accepted"]
+    assert result.bindings[0].attempt_ids == tuple(
+        attempt.attempt_id for attempt in result.attempts
+    )
+    google.assert_called_once()
+    ollama.assert_called_once()
+
+
+def test_unavailable_real_providers_abort_with_persistable_attempts(monkeypatch) -> None:
+    from ownership.translation import TranslationInfrastructureError, translate_owner_page
+    from translator import translate as translate_module
+
+    request = _owner_request()
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(translate_module, "_translate_with_google", unavailable)
+    monkeypatch.setattr(translate_module, "_translate_with_ollama", unavailable)
+    monkeypatch.setattr(
+        translate_module,
+        "_google",
+        type("Google", (), {"_cache": {}, "_persistent_cache": None})(),
+    )
+    controls = (
+        translate_module.TranslationAttemptControl("google", "primary", True),
+        translate_module.TranslationAttemptControl("ollama", "local", True),
+    )
+
+    with pytest.raises(TranslationInfrastructureError) as exc:
+        translate_owner_page(
+            (request,),
+            attempt_fn=translate_module.translate_one_owner_attempt,
+            attempt_controls=controls,
+            attempt_kwargs={
+                "obra": "obra",
+                "context": {},
+                "glossario": {},
+                "idioma_destino": "pt-BR",
+                "idioma_origem": "en",
+                "qualidade": "normal",
+                "ollama_host": "http://localhost:11434",
+                "ollama_model": "traduzai-translator",
+                "models_dir": "",
+                "translation_context": None,
+            },
+        )
+
+    assert [attempt.status for attempt in exc.value.attempts] == [
+        "operational_error",
+        "operational_error",
+    ]
+    assert all(not attempt.cache_hit for attempt in exc.value.attempts)
+
+
+def test_translation_result_reopens_with_identical_attempts_and_bindings() -> None:
+    from ownership.translation import OwnerPageTranslationResult, translate_owner_page
+
+    request = _owner_request()
+
+    def backend(_owner_request, _variant):
+        return "O JOGADOR TEM 10 ABATES"
+
+    backend.backend_name = "fixture"
+    result = translate_owner_page((request,), backends=(backend,))
+    reopened = OwnerPageTranslationResult.from_canonical_json_bytes(
+        result.canonical_json_bytes
+    )
+
+    assert reopened == result
+    assert reopened.attempts[0].provider_metadata_sha256 == sha256_text(
+        reopened.attempts[0].provider_metadata_json_bytes.decode("utf-8")
+    )
+
+
+def test_validated_binding_advances_same_graph_owner_to_target_ready() -> None:
+    from ownership.translation import apply_owner_translation_result, translate_owner_page
+
+    graph = _graph([("a", "THE PLAYER HAS 10 KILLS")])
+    graph.owners[0].state = "owned"
+    request = _owner_request()
+
+    def backend(_owner_request, _variant):
+        return "O JOGADOR TEM 10 ABATES"
+
+    backend.backend_name = "fixture"
+    result = translate_owner_page((request,), backends=(backend,))
+    merged = apply_owner_translation_result(graph, result)
+
+    assert merged.owners[0].owner_id == graph.owners[0].owner_id
+    assert merged.owners[0].translated_payload == "O JOGADOR TEM 10 ABATES"
+    assert merged.owners[0].state == "target_ready"

@@ -63,6 +63,18 @@ class LocaleValidationResult:
     def blocked(self) -> bool:
         return self.status == "blocked"
 
+    @property
+    def numbers_equivalent_for_binding(self) -> bool:
+        """Stricter numeric verdict used before an owner translation is bound."""
+
+        return self.numeric_equivalent is not False and not any(
+            issue.code in {
+                "numeric_magnitude_mismatch",
+                "numeric_equivalence_ambiguous",
+            }
+            for issue in self.issues
+        )
+
     def to_dict(self) -> dict[str, object]:
         return {
             "target_locale": self.target_locale,

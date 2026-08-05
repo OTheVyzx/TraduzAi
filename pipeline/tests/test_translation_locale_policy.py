@@ -70,10 +70,11 @@ def test_translate_pages_preserves_pt_br_after_backend_language_normalization(
         def attach_persistent_cache(self, _cache) -> None:
             return None
 
-    def fake_google(*_args, **kwargs):
+    def fake_google(*args, **kwargs):
         captured["backend_language"] = kwargs["idioma_destino"]
         captured["target_locale"] = kwargs["target_locale"]
-        return []
+        record = args[0][0]["texts"][0]
+        return [{"texts": [{**record, "translated": "TRADUZIDO"}]}]
 
     monkeypatch.setattr(translate, "_google", None)
     monkeypatch.setattr(translate, "_GoogleTranslator", FakeGoogle)
@@ -81,7 +82,7 @@ def test_translate_pages_preserves_pt_br_after_backend_language_normalization(
     monkeypatch.setattr(translate, "_translate_with_google", fake_google)
 
     translate.translate_pages(
-        [],
+        [{"texts": [{"text": "SOURCE", "tipo": "fala"}]}],
         obra="fixture",
         context={},
         glossario={},
