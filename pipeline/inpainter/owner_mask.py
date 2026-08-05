@@ -509,6 +509,7 @@ def build_repair_cleanup_mask(
     protected_art_mask: Any | None = None,
     positive_residual_mask: Any | None = None,
     strategy: str = "R0",
+    variant: str = "default",
 ) -> np.ndarray:
     """Build R0/R1 masks from positive source evidence inside safe geometry."""
 
@@ -535,8 +536,8 @@ def build_repair_cleanup_mask(
     protected = normalized(protected_art_mask)
     residual = normalized(positive_residual_mask)
     normalized_strategy = str(getattr(strategy, "value", strategy)).upper()
-    if normalized_strategy not in {"R0", "R1", "R2"}:
-        raise UnsafeOwnerMaskError("repair mask strategy is not R0, R1 or R2")
+    if normalized_strategy not in {"R0", "R1", "R2", "R3"}:
+        raise UnsafeOwnerMaskError("repair mask strategy is invalid")
 
     count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
         (positive > 0).astype(np.uint8), connectivity=8
@@ -568,7 +569,7 @@ def build_repair_cleanup_mask(
             cv2.MORPH_CLOSE,
             cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
         )
-    else:
+    elif normalized_strategy == "R2":
         seed = np.maximum(positive, residual)
         component_count, _component_labels, component_stats, _ = (
             cv2.connectedComponentsWithStats((seed > 0).astype(np.uint8), connectivity=8)
@@ -610,12 +611,33 @@ def build_repair_cleanup_mask(
             x2 = min(shape[1], max(item[0] + item[2] for item in group) + halo_x)
             y2 = min(shape[0], max(item[1] + item[3] for item in group) + halo_y)
             expanded[y1:y2, x1:x2] = 255
-    allowed = (
-        (expanded > 0)
-        & (interior > 0)
-        & (border == 0)
-        & (protected == 0)
+    else:
+        normalized_variant = str(variant or "contextual").lower()
+        if normalized_variant == "deterministic_support_local_fill":
+            margin_x = max(3, min(16, int(round(median_height * 0.9))))
+            margin_y = max(2, min(10, int(round(median_height * 0.65))))
+            expanded = cv2.dilate(
+                np.maximum(positive, residual),
+                cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (margin_x * 2 + 1, margin_y * 2 + 1)
+                ),
+                iterations=1,
+            )
+        elif normalized_variant in {"contextual", "deterministic_interior_fill"}:
+            expanded = interior.copy()
+        else:
+            raise UnsafeOwnerMaskError("R3 repair variant is invalid")
+        # Confirmed source glyphs override conservative protection. Genuine
+        # protected artwork elsewhere remains immutable.
+        protected = protected.copy()
+        protected[(positive > 0) | (residual > 0)] = 0
+    inside = (
+        np.ones(shape, dtype=bool)
+        if normalized_strategy == "R3"
+        and str(variant or "").lower() == "deterministic_support_local_fill"
+        else (interior > 0)
     )
+    allowed = (expanded > 0) & inside & (border == 0) & (protected == 0)
     result = np.where(allowed, 255, 0).astype(np.uint8)
     if not np.all(result[positive > 0] > 0):
         raise UnsafeOwnerMaskError("protected geometry excludes source support")

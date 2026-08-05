@@ -207,6 +207,87 @@ def rebuild_r2_text_region(original_rgb: Any, cleanup_mask: Any) -> np.ndarray:
     return result
 
 
+def rebuild_r3_container_interior(
+    original_rgb: Any,
+    cleanup_mask: Any,
+    *,
+    variant: str = "contextual",
+) -> np.ndarray:
+    """Rebuild R3 from local container evidence with deterministic fallbacks."""
+
+    original = np.asarray(original_rgb)
+    mask = np.asarray(cleanup_mask)
+    if (
+        original.dtype != np.uint8
+        or original.ndim != 3
+        or original.shape[2] != 3
+        or mask.shape != original.shape[:2]
+        or not np.any(mask > 0)
+    ):
+        raise ValueError("R3 reconstruction raster contract is invalid")
+    binary = np.where(mask > 0, 255, 0).astype(np.uint8)
+    normalized_variant = str(variant).lower()
+    if normalized_variant == "contextual":
+        coarse = cv2.inpaint(original, binary, inpaintRadius=7, flags=cv2.INPAINT_TELEA)
+        fine = cv2.inpaint(coarse, binary, inpaintRadius=3, flags=cv2.INPAINT_NS)
+        rebuilt = fine
+    elif normalized_variant in {
+        "deterministic_interior_fill",
+        "deterministic_support_local_fill",
+    }:
+        ring_radius = 7 if normalized_variant == "deterministic_interior_fill" else 4
+        ring = (
+            cv2.dilate(
+                binary,
+                cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (ring_radius * 2 + 1, ring_radius * 2 + 1)
+                ),
+                iterations=1,
+            )
+            > 0
+        ) & (binary == 0)
+        ys, xs = np.nonzero(ring)
+        target_y, target_x = np.nonzero(binary)
+        rebuilt = np.array(original, copy=True)
+        if xs.size >= 12:
+            design = np.column_stack(
+                [np.ones(xs.size, dtype=np.float64), xs.astype(float), ys.astype(float)]
+            )
+            target_design = np.column_stack(
+                [
+                    np.ones(target_x.size, dtype=np.float64),
+                    target_x.astype(float),
+                    target_y.astype(float),
+                ]
+            )
+            for channel in range(3):
+                samples = original[ys, xs, channel].astype(np.float64)
+                lower, upper = np.percentile(samples, (10.0, 90.0))
+                keep = (samples >= lower) & (samples <= upper)
+                if np.count_nonzero(keep) >= 6:
+                    coefficients, *_ = np.linalg.lstsq(
+                        design[keep], samples[keep], rcond=None
+                    )
+                    predicted = np.clip(target_design @ coefficients, 0, 255).astype(np.uint8)
+                else:
+                    predicted = np.full(
+                        target_x.size, int(round(float(np.median(samples)))), dtype=np.uint8
+                    )
+                rebuilt[target_y, target_x, channel] = predicted
+        else:
+            free = original[binary == 0]
+            if free.size <= 0:
+                raise ValueError("R3 deterministic fill has no background samples")
+            rebuilt[binary > 0] = np.median(free, axis=0).astype(np.uint8)
+    else:
+        raise ValueError("R3 reconstruction variant is invalid")
+    result = np.array(original, copy=True)
+    result[binary > 0] = rebuilt[binary > 0]
+    result = np.ascontiguousarray(result)
+    result.setflags(write=False)
+    return result
+
+
 @dataclass(frozen=True)
 class RepairLadderResult:
     status: str
@@ -256,8 +337,9 @@ def build_repair_attempt(
         RepairStrategy.R0_PRECISE_GLYPH,
         RepairStrategy.R1_EXPANDED_SUPPORT,
         RepairStrategy.R2_TEXT_REGION_REBUILD,
+        RepairStrategy.R3_CONTAINER_INTERIOR_REBUILD,
     }:
-        raise ValueError("repair strategy is not implemented before R3")
+        raise ValueError("repair strategy is unsupported")
     binding = case.translation
     OwnerRepairRequest.from_dict(request.to_dict())
     expected_identity = (
@@ -276,6 +358,7 @@ def build_repair_attempt(
     )
     if actual_identity != expected_identity:
         raise RepairPolicyIdentityError("repair request belongs to another owner execution")
+    chosen_variant = str(variant or _variant_for(selected))
     cleanup_mask = build_repair_cleanup_mask(
         case.source_support_mask,
         container_interior_mask=case.container_interior_mask,
@@ -286,12 +369,13 @@ def build_repair_attempt(
             if selected in {
                 RepairStrategy.R1_EXPANDED_SUPPORT,
                 RepairStrategy.R2_TEXT_REGION_REBUILD,
+                RepairStrategy.R3_CONTAINER_INTERIOR_REBUILD,
             }
             else None
         ),
         strategy=selected.value,
+        variant=chosen_variant,
     )
-    chosen_variant = str(variant or _variant_for(selected))
     input_sha = canonical_page_sha256(case.original_rgb)
     cleanup_sha = sha256_bytes(np.ascontiguousarray(cleanup_mask).tobytes())
     protected_sha = sha256_bytes(np.ascontiguousarray(case.protected_art_mask).tobytes())
@@ -411,11 +495,11 @@ def run_repair_ladder(
     case: OwnerRepairCase,
     *,
     policy: RepairBudgetPolicy | None = None,
-    max_strategy: RepairStrategy | str = RepairStrategy.R1_EXPANDED_SUPPORT,
+    max_strategy: RepairStrategy | str = RepairStrategy.R3_CONTAINER_INTERIOR_REBUILD,
     start_strategy: RepairStrategy | str = RepairStrategy.R0_PRECISE_GLYPH,
     scheduler: Callable[[float], None] = time.sleep,
 ) -> RepairLadderResult:
-    """Run R0/R1 from the immutable original; never expose rollback as final."""
+    """Run the bounded R0-R3 ladder from the immutable original pixels."""
 
     selected_policy = policy or RepairBudgetPolicy.default()
     maximum = _strategy(max_strategy)
@@ -424,6 +508,7 @@ def run_repair_ladder(
         RepairStrategy.R0_PRECISE_GLYPH,
         RepairStrategy.R1_EXPANDED_SUPPORT,
         RepairStrategy.R2_TEXT_REGION_REBUILD,
+        RepairStrategy.R3_CONTAINER_INTERIOR_REBUILD,
     )
     if start not in supported or maximum not in supported or supported.index(start) > supported.index(maximum):
         raise ValueError("repair ladder strategy range is invalid")
@@ -442,8 +527,9 @@ def run_repair_ladder(
     strategies = list(supported[supported.index(start) : supported.index(maximum) + 1])
     transient_count = 0
     for selected in strategies:
+        current_variant = _variant_for(selected)
         while True:
-            variant = _variant_for(selected)
+            variant = current_variant
             if transient_count:
                 variant = f"{variant}_transient_{transient_count + 1}"
             runtime = build_repair_attempt(
@@ -509,6 +595,31 @@ def run_repair_ladder(
                 runtime, outcome="visual_residual", evidence_ids=feedback.evidence_ids
             )
             attempts.append(previous)
+            if selected is RepairStrategy.R3_CONTAINER_INTERIOR_REBUILD:
+                next_variant = {
+                    "contextual": "deterministic_interior_fill",
+                    "deterministic_interior_fill": "deterministic_support_local_fill",
+                }.get(current_variant)
+                if next_variant is not None:
+                    current_variant = next_variant
+                    request = _request_for(
+                        case,
+                        failed_stage="residual",
+                        reason=feedback.reason,
+                        evidence_ids=feedback.evidence_ids,
+                        next_strategy="R3",
+                    )
+                    requests.append(request)
+                    continue
+                request = _request_for(
+                    case,
+                    failed_stage="residual",
+                    reason=feedback.reason,
+                    evidence_ids=feedback.evidence_ids,
+                    next_strategy="R3",
+                )
+                requests.append(request)
+                break
             next_strategy = {
                 RepairStrategy.R0_PRECISE_GLYPH: "R1",
                 RepairStrategy.R1_EXPANDED_SUPPORT: "R2",
@@ -533,6 +644,7 @@ def run_repair_ladder(
             RepairStrategy.R0_PRECISE_GLYPH: "R1",
             RepairStrategy.R1_EXPANDED_SUPPORT: "R2",
             RepairStrategy.R2_TEXT_REGION_REBUILD: "R3",
+            RepairStrategy.R3_CONTAINER_INTERIOR_REBUILD: "R3",
         }[maximum],
         translation=case.translation,
     )
@@ -553,4 +665,5 @@ __all__ = [
     "build_repair_attempt",
     "run_repair_ladder",
     "rebuild_r2_text_region",
+    "rebuild_r3_container_interior",
 ]

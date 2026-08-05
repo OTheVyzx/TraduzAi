@@ -18,6 +18,7 @@ from ownership.repair import (
     RepairStrategy,
     build_repair_attempt,
     rebuild_r2_text_region,
+    rebuild_r3_container_interior,
     run_repair_ladder,
 )
 from test_owner_source_replacement_enforce import _binding
@@ -327,6 +328,104 @@ def test_r2_background_rebuild_changes_only_the_authorized_text_region():
     outside = attempt.cleanup_mask == 0
 
     assert np.array_equal(before[outside], after[outside])
+    assert np.mean(after[case.source_support_mask > 0]) > np.mean(
+        before[case.source_support_mask > 0]
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["missing_mask", "inpaint_residual", "mixed_overlay", "target_collision"],
+)
+def test_content_failures_reach_r3_deterministic_fill_and_commit(failure):
+    def executor(*, strategy, variant, original_rgb, cleanup_mask, **_kwargs):
+        if strategy != "R3" or variant == "contextual":
+            return RepairExecutionFeedback.visual_residual(failure)
+        final = np.array(original_rgb, copy=True)
+        final[cleanup_mask > 0] = 245
+        final[32:35, 30:60] = (25, 60, 180)
+        return RepairExecutionFeedback.committed(final)
+
+    result = run_repair_ladder(_case(executor), scheduler=lambda _seconds: None)
+
+    assert result.status == "committed"
+    assert result.attempts[-1].strategy == "R3"
+    assert result.attempts[-1].variant == "deterministic_interior_fill"
+    assert result.final_page is not None
+
+
+def test_r3_releases_confirmed_source_from_conservative_protection_only():
+    case = _case()
+    protected = np.array(case.protected_art_mask, copy=True)
+    protected[case.source_support_mask > 0] = 255
+    overlapped = OwnerRepairCase.build(
+        original_rgb=case.original_rgb,
+        translation=case.translation,
+        execution_id=case.execution_id,
+        source_support_mask=case.source_support_mask,
+        container_interior_mask=case.container_interior_mask,
+        container_border_mask=case.container_border_mask,
+        protected_art_mask=protected,
+        positive_residual_mask=case.positive_residual_mask,
+    )
+
+    attempt = build_repair_attempt(
+        overlapped,
+        request=_request(overlapped, request_id="request-r3-protected"),
+        policy=RepairBudgetPolicy.default(),
+        strategy="R3",
+        variant="contextual",
+    )
+
+    assert np.all(attempt.cleanup_mask[case.source_support_mask > 0] > 0)
+    genuine_art = (protected > 0) & (case.source_support_mask == 0)
+    assert not np.any((attempt.cleanup_mask > 0) & genuine_art)
+
+
+def test_r3_support_local_fill_handles_source_outside_uncertain_container():
+    case = _case()
+    interior = np.array(case.container_interior_mask, copy=True)
+    interior[case.source_support_mask > 0] = 0
+    uncertain = OwnerRepairCase.build(
+        original_rgb=case.original_rgb,
+        translation=case.translation,
+        execution_id=case.execution_id,
+        source_support_mask=case.source_support_mask,
+        container_interior_mask=interior,
+        container_border_mask=case.container_border_mask,
+        protected_art_mask=case.protected_art_mask,
+        positive_residual_mask=case.positive_residual_mask,
+    )
+
+    attempt = build_repair_attempt(
+        uncertain,
+        request=_request(uncertain, request_id="request-r3-local"),
+        policy=RepairBudgetPolicy.default(),
+        strategy="R3",
+        variant="deterministic_support_local_fill",
+    )
+
+    assert np.all(attempt.cleanup_mask[case.source_support_mask > 0] > 0)
+    assert not np.any((attempt.cleanup_mask > 0) & (case.container_border_mask > 0))
+
+
+def test_r3_deterministic_rebuild_preserves_every_pixel_outside_safe_interior():
+    case = _case()
+    attempt = build_repair_attempt(
+        case,
+        request=_request(case, request_id="request-r3-rebuild"),
+        policy=RepairBudgetPolicy.default(),
+        strategy="R3",
+        variant="deterministic_interior_fill",
+    )
+    before = np.array(case.original_rgb, copy=True)
+    after = rebuild_r3_container_interior(
+        before,
+        attempt.cleanup_mask,
+        variant="deterministic_interior_fill",
+    )
+
+    assert np.array_equal(before[attempt.cleanup_mask == 0], after[attempt.cleanup_mask == 0])
     assert np.mean(after[case.source_support_mask > 0]) > np.mean(
         before[case.source_support_mask > 0]
     )
