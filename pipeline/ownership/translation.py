@@ -735,6 +735,35 @@ def translate_owner(
     page_language_evidence: PageLanguageEvidence | None = None,
 ) -> tuple[TranslationBinding, tuple[TranslationAttempt, ...]]:
     attempts: list[TranslationAttempt] = []
+    source_verdict = validate_target_language(
+        source=request.source_text,
+        target=request.source_text,
+        role=request.semantic_role,
+        page_language_evidence=page_language_evidence,
+    )
+    if source_verdict.accepted and source_verdict.policy_id in {
+        "already_target_language",
+        "source_neutral_nonlexical",
+        "source_neutral_proper_name",
+    }:
+        attempt = TranslationAttempt.build(
+            request=request,
+            backend="language_policy",
+            variant=source_verdict.policy_id,
+            provider_model=None,
+            provider_metadata={"decision": "preserve_verified_source_pixels"},
+            target_text=request.source_text,
+            provider_called=False,
+            cache_hit=True,
+            status="accepted",
+            language_verdict=source_verdict,
+            attempt_index=1,
+        )
+        return bind_translation(
+            request,
+            request.source_text,
+            (attempt,),
+        ), (attempt,)
     if callable(attempt_fn):
         controls = tuple(attempt_controls)
         if not controls:

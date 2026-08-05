@@ -591,6 +591,37 @@ def test_fresh_complete_owner_evidence_accepts_already_ptbr_provider_noop(
     assert result.bindings[0].preserves_original_pixels
 
 
+def test_complete_ptbr_owner_short_circuits_before_provider_rewrites_spacing() -> None:
+    from ownership.translation import OwnerTranslationRequest, translate_owner_page
+    from translator.language_policy import PageLanguageEvidence
+
+    source = "OQUE ACONTECEU COMMINHA BARRA SEM SOMBRAS?"
+    graph = _graph([("ptbr_glued", source)])
+    request = OwnerTranslationRequest.from_graph(graph, "owner_ptbr_glued")
+    provider_calls = []
+
+    def rewriting_provider(_owner_request, _variant):
+        provider_calls.append(True)
+        return "O QUE ACONTECEU COM MINHA BARRA SEM SOMBRAS?"
+
+    rewriting_provider.backend_name = "fixture"
+    result = translate_owner_page(
+        (request,),
+        backends=(rewriting_provider,),
+        page_language_evidence_by_owner={
+            request.owner_id: PageLanguageEvidence.build(
+                coverage_complete=True,
+                source_only_tokens=(),
+            )
+        },
+    )
+
+    assert provider_calls == []
+    assert result.bindings[0].target_text == source
+    assert result.bindings[0].language_verdict.policy_id == "already_target_language"
+    assert result.bindings[0].preserves_original_pixels
+
+
 def test_fresh_complete_owner_evidence_still_rejects_english_provider_noop() -> None:
     from ownership.translation import TranslationValidationExhausted, translate_owner_page
     from translator.language_policy import PageLanguageEvidence
