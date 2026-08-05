@@ -6487,6 +6487,35 @@ def _owner_bbox_for_page(graph: OwnerGraph, owner_id: str):
     )
 
 
+def _build_owner_translation_attempt_controls(control_type, *, ollama_model: str):
+    """Build the complete bounded provider sequence for one owner payload."""
+
+    return (
+        control_type(
+            backend="google",
+            variant="owner_primary",
+            disable_cache=False,
+        ),
+        control_type(
+            backend="google",
+            variant="owner_contextual",
+            disable_cache=True,
+        ),
+        control_type(
+            backend="ollama",
+            variant="owner_configured",
+            disable_cache=False,
+            provider_model=ollama_model,
+        ),
+        control_type(
+            backend="ollama",
+            variant="owner_contextual",
+            disable_cache=True,
+            provider_model=ollama_model,
+        ),
+    )
+
+
 def run_chapter(
     image_files: list[Path],
     output_dir: Path,
@@ -6913,12 +6942,9 @@ def run_chapter(
                     backends = ()
                     attempt_kwargs = None
                     if isinstance(owner_control_type, type) and callable(owner_attempt_fn):
-                        controls = (
-                            owner_control_type(backend="google", variant="owner_primary", disable_cache=False),
-                            owner_control_type(
-                                backend="ollama", variant="owner_fallback", disable_cache=True,
-                                provider_model=ollama_model,
-                            ),
+                        controls = _build_owner_translation_attempt_controls(
+                            owner_control_type,
+                            ollama_model=ollama_model,
                         )
                         attempt_kwargs = {
                             "obra": obra, "context": context or {},

@@ -436,3 +436,33 @@ def test_real_owner_translate_stage_uses_attempt_boundary_not_legacy_batch():
     assert payload["texts"][0]["translated"] == "OLHE PARA ESSE CARA"
     assert payload["texts"][0]["translation_binding_sha256"]
     assert payload["_owner_graph_snapshot"]["owners"][0]["state"] == "target_ready"
+
+
+def test_runner_uses_full_deterministic_owner_translation_retry_budget() -> None:
+    from strip.run import _build_owner_translation_attempt_controls
+    from translator.translate import TranslationAttemptControl
+
+    controls = _build_owner_translation_attempt_controls(
+        TranslationAttemptControl,
+        ollama_model="qwen2.5:7b",
+    )
+
+    assert [control.backend for control in controls] == [
+        "google",
+        "google",
+        "ollama",
+        "ollama",
+    ]
+    assert [control.variant for control in controls] == [
+        "owner_primary",
+        "owner_contextual",
+        "owner_configured",
+        "owner_contextual",
+    ]
+    assert [control.disable_cache for control in controls] == [False, True, False, True]
+    assert [control.provider_model for control in controls] == [
+        None,
+        None,
+        "qwen2.5:7b",
+        "qwen2.5:7b",
+    ]
