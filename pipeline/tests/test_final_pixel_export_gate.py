@@ -49,6 +49,106 @@ def _reasons(gate):
     }
 
 
+def _terminal_owner_project(path: Path, *, terminal_issue=False):
+    project = _project(path)
+    project["chapter_source_manifest"] = {
+        "pages": [{"page_id": "page_001", "page_source_sha256": "a" * 64}]
+    }
+    historical = {
+        "issue_id": "issue-historical",
+        "kind": "source_language_visible",
+        "repair_required": True,
+    }
+    current = {
+        "issue_id": "issue-current",
+        "kind": "source_language_visible",
+        "repair_required": True,
+    }
+    issues = [historical, *([current] if terminal_issue else [])]
+    project["paginas"][0].update({
+        "page_source_sha256": "a" * 64,
+        "owner_page_result": {
+            "status": "final_verified",
+            "language_residual_issues": issues,
+            "qa_probes": [
+                {
+                    "probe_id": "probe-old",
+                    "ocr_invocation_id": "inv-old",
+                    "root_input_pixel_sha256": "b" * 64,
+                    "fresh_ocr_attempt_ids": ["attempt-old"],
+                    "fresh_ocr_attempt_chain_sha256": "c" * 64,
+                    "issue_ids": ["issue-historical"],
+                },
+                {
+                    "probe_id": "probe-terminal",
+                    "ocr_invocation_id": "inv-terminal",
+                    "root_input_pixel_sha256": "d" * 64,
+                    "fresh_ocr_attempt_ids": ["attempt-terminal"],
+                    "fresh_ocr_attempt_chain_sha256": "e" * 64,
+                    "issue_ids": ["issue-current"] if terminal_issue else [],
+                },
+            ],
+            "terminal_proof": {
+                "final_qa_probe_id": "probe-terminal",
+                "fresh_ocr_invocation_id": "inv-terminal",
+                "fresh_ocr_root_input_pixel_sha256": "d" * 64,
+                "fresh_ocr_attempt_ids": ["attempt-terminal"],
+                "fresh_ocr_attempt_chain_sha256": "e" * 64,
+                "coverage_complete": True,
+                "unowned_material_text_absent": True,
+                "source_support_removed": True,
+                "target_glyph_patch_applied": True,
+            },
+        },
+    })
+    return project
+
+
+def test_export_gate_counts_only_issues_reachable_from_exact_terminal_probe(tmp_path):
+    from qa.export_gate import evaluate_export_gate
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"page-one")
+
+    gate = evaluate_export_gate(_terminal_owner_project(artifact))
+
+    assert gate["english_dialogue_residual_count"] == 0
+    assert gate["status"] == "PASS"
+
+
+def test_export_gate_blocks_source_issue_reachable_from_exact_terminal_probe(tmp_path):
+    from qa.export_gate import evaluate_export_gate
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"page-one")
+
+    gate = evaluate_export_gate(_terminal_owner_project(artifact, terminal_issue=True))
+
+    assert gate["english_dialogue_residual_count"] == 1
+    assert gate["status"] == "BLOCK"
+
+
+@pytest.mark.parametrize("tamper", ["missing", "duplicate", "historical"])
+def test_export_gate_rejects_missing_or_ambiguous_terminal_probe_link(tmp_path, tamper):
+    from qa.export_gate import evaluate_export_gate
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"page-one")
+    project = _terminal_owner_project(artifact)
+    result = project["paginas"][0]["owner_page_result"]
+    if tamper == "missing":
+        result["qa_probes"] = result["qa_probes"][:-1]
+    elif tamper == "duplicate":
+        result["qa_probes"].append(dict(result["qa_probes"][-1]))
+    else:
+        result["terminal_proof"]["final_qa_probe_id"] = "probe-old"
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "BLOCK"
+    assert "terminal_probe_integrity_error" in _reasons(gate)
+
+
 def test_automatic_export_requires_final_pixel_report_for_every_page(tmp_path):
     from qa.export_gate import evaluate_export_gate
 

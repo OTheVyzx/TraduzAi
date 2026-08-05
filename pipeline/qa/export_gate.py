@@ -1189,8 +1189,109 @@ def _artifact_links_for_issue(
     return deduped
 
 
+def _terminal_owner_gate(project: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Validate terminal source-language evidence by exact proof-to-probe linkage."""
+
+    source_manifest = project.get("chapter_source_manifest")
+    if not isinstance(source_manifest, dict):
+        return [], {}
+    expected_pages = source_manifest.get("pages")
+    pages = project.get("paginas")
+    if not isinstance(expected_pages, list) or not isinstance(pages, list):
+        return [_terminal_integrity_issue("source_manifest_page_set_mismatch")], {
+            "english_dialogue_residual_count": 0
+        }
+    expected_identity = [
+        (str(item.get("page_id") or ""), str(item.get("page_source_sha256") or ""))
+        for item in expected_pages if isinstance(item, dict)
+    ]
+    actual_identity = [
+        (str(item.get("page_id") or ""), str(item.get("page_source_sha256") or ""))
+        for item in pages if isinstance(item, dict)
+    ]
+    gate_issues: list[dict[str, Any]] = []
+    if expected_identity != actual_identity or len(actual_identity) != len(pages):
+        gate_issues.append(_terminal_integrity_issue("source_manifest_page_set_mismatch"))
+        return gate_issues, {"english_dialogue_residual_count": 0}
+
+    source_issue_count = 0
+    source_kinds = {
+        "source_language_visible",
+        "mixed_language_overlay",
+        "independently_detected_text_without_owner",
+        "cleanup_incomplete",
+    }
+    for page in pages:
+        result = page.get("owner_page_result") or page.get("page_execution_result")
+        if not isinstance(result, dict):
+            gate_issues.append(_terminal_integrity_issue("page_lifecycle_incomplete", page))
+            continue
+        if str(result.get("status") or "") != "final_verified":
+            gate_issues.append(_terminal_integrity_issue("page_lifecycle_incomplete", page))
+            continue
+        proof = result.get("terminal_proof")
+        probes = result.get("qa_probes")
+        residuals = result.get("language_residual_issues")
+        if not isinstance(proof, dict) or not isinstance(probes, list) or not isinstance(residuals, list):
+            gate_issues.append(_terminal_integrity_issue("terminal_probe_integrity_error", page))
+            continue
+        probe_id = str(proof.get("final_qa_probe_id") or "")
+        matches = [item for item in probes if isinstance(item, dict) and item.get("probe_id") == probe_id]
+        if len(matches) != 1:
+            gate_issues.append(_terminal_integrity_issue("terminal_probe_integrity_error", page))
+            continue
+        probe = matches[0]
+        exact_fields = (
+            ("ocr_invocation_id", "fresh_ocr_invocation_id"),
+            ("root_input_pixel_sha256", "fresh_ocr_root_input_pixel_sha256"),
+            ("fresh_ocr_attempt_ids", "fresh_ocr_attempt_ids"),
+            ("fresh_ocr_attempt_chain_sha256", "fresh_ocr_attempt_chain_sha256"),
+        )
+        if any(probe.get(left) != proof.get(right) for left, right in exact_fields):
+            gate_issues.append(_terminal_integrity_issue("terminal_probe_integrity_error", page))
+            continue
+        issue_by_id: dict[str, list[dict[str, Any]]] = {}
+        for item in residuals:
+            if isinstance(item, dict):
+                issue_by_id.setdefault(str(item.get("issue_id") or ""), []).append(item)
+        terminal_issue_ids = [str(value) for value in probe.get("issue_ids") or []]
+        if len(terminal_issue_ids) != len(set(terminal_issue_ids)) or any(
+            len(issue_by_id.get(issue_id, ())) != 1 for issue_id in terminal_issue_ids
+        ):
+            gate_issues.append(_terminal_integrity_issue("terminal_probe_integrity_error", page))
+            continue
+        terminal_issues = [issue_by_id[issue_id][0] for issue_id in terminal_issue_ids]
+        visible = [item for item in terminal_issues if str(item.get("kind") or "") in source_kinds]
+        source_issue_count += len(visible)
+        for item in visible:
+            gate_issues.append({
+                "page_id": page.get("page_id"),
+                "type": "terminal_source_language_residual",
+                "reason": "terminal_source_language_residual",
+                "severity": "critical",
+                "blocks_export": True,
+                "flags": [str(item.get("kind") or "source_language_visible")],
+                "issue_id": item.get("issue_id"),
+                "owner_id": item.get("owner_id"),
+            })
+    return gate_issues, {"english_dialogue_residual_count": source_issue_count}
+
+
+def _terminal_integrity_issue(reason: str, page: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "page_id": (page or {}).get("page_id"),
+        "type": "owner_terminal_integrity",
+        "reason": reason,
+        "severity": "critical",
+        "blocks_export": True,
+        "flags": [reason],
+    }
+
+
 def evaluate_export_gate(project: dict[str, Any], *, override: bool = False) -> dict[str, Any]:
     issues = collect_export_blocking_issues(project)
+    terminal_issues, terminal_metrics = _terminal_owner_gate(project)
+    issues.extend(terminal_issues)
     review_issues = [issue for issue in issues if issue.get("severity") == "warning"]
     blocking_issues = [
         issue
@@ -1199,12 +1300,14 @@ def evaluate_export_gate(project: dict[str, Any], *, override: bool = False) -> 
     ]
     from qa.gate_composition import normalize_export_gate
 
-    return normalize_export_gate(
+    result = normalize_export_gate(
         issues,
         blocked=bool(blocking_issues),
         review=any(issue.get("type") == "sfx_inpaint_review" for issue in review_issues),
         override=override,
     )
+    result.update(terminal_metrics)
+    return result
 
 
 def append_qa_integrity_failure(

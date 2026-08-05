@@ -68,6 +68,10 @@ class MatrixContractError(ValueError):
     """Raised when the validation corpus itself is not systemic or fresh."""
 
 
+class InspectionEvidenceError(MatrixContractError):
+    """Raised when a visual verdict is not bound to a real native-pixel review."""
+
+
 def _canonical_entry(entry: Any, index: int) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise MatrixContractError(f"matrix entry {index} must be an object")
@@ -1223,6 +1227,11 @@ def build_inspection_template(
             with Image.open(artifact) as image:
                 width, height = image.size
             if digest in by_hash:
+                if relative != by_hash[digest]["artifact_path"]:
+                    raise MatrixContractError(
+                        "distinct output artifacts cannot claim identical pixels: "
+                        f"{by_hash[digest]['artifact_path']} and {relative}"
+                    )
                 categories = by_hash[digest]["categories"]
                 if category not in categories:
                     categories.append(category)
@@ -1273,8 +1282,10 @@ def validate_inspection_manifest(
     manifest: dict[str, Any],
     output_root: Path,
 ) -> list[dict[str, Any]]:
-    if template.get("schema_version") != 2 or manifest.get("schema_version") != 2:
-        raise MatrixContractError("inspection schema v2 is required")
+    template_schema = template.get("schema_version")
+    manifest_schema = manifest.get("schema_version")
+    if template_schema not in {2, 3} or manifest_schema != template_schema:
+        raise MatrixContractError("inspection schemas must match and be supported")
     template_rows = template.get("artifacts") if isinstance(template, dict) else None
     inspection_rows = manifest.get("inspections") if isinstance(manifest, dict) else None
     if not isinstance(template_rows, list) or not isinstance(inspection_rows, list):
@@ -1297,6 +1308,11 @@ def validate_inspection_manifest(
         "functional_note",
         "style_note",
     }
+    if manifest_schema == 3:
+        required_fields.update({
+            "reviewed_at", "reviewer", "source_path", "output_path",
+            "source_sha256", "output_sha256", "width", "height",
+        })
     seen: set[str] = set()
     for index, row in enumerate(inspection_rows):
         if not isinstance(row, dict) or any(not str(row.get(key) or "").strip() for key in required_fields):
@@ -1324,6 +1340,33 @@ def validate_inspection_manifest(
             raise MatrixContractError(f"inspection category mismatch: {raw_path}")
         if str(row.get("owner_or_segment")) != str(expected_row.get("segment")):
             raise MatrixContractError(f"inspection segment mismatch: {raw_path}")
+        if manifest_schema == 3:
+            if str(row.get("output_path")) != raw_path or str(row.get("output_sha256") or "").lower() != actual_hash:
+                raise InspectionEvidenceError(f"inspection output binding mismatch: {raw_path}")
+            if str(row.get("reviewed_at")) != str(row.get("timestamp")):
+                raise InspectionEvidenceError(f"inspection review timestamp mismatch: {raw_path}")
+            if int(row.get("width") or 0) != int(expected_row.get("width") or 0) or int(
+                row.get("height") or 0
+            ) != int(expected_row.get("height") or 0):
+                raise InspectionEvidenceError(f"inspection dimensions mismatch: {raw_path}")
+            source_path = Path(str(row.get("source_path") or ""))
+            if source_path.is_absolute():
+                source_artifact = source_path.resolve()
+            else:
+                source_artifact = (output_root.resolve() / source_path).resolve()
+            if not source_artifact.is_file() or _sha256_file(source_artifact) != str(
+                row.get("source_sha256") or ""
+            ).lower():
+                raise InspectionEvidenceError(f"inspection source binding mismatch: {raw_path}")
+            notes = {
+                str(row.get("functional_note") or "").strip().casefold(),
+                str(row.get("style_note") or "").strip().casefold(),
+            }
+            templated = {"clean", "ok", "go", "inspection pending", "template"}
+            if notes & templated or len(notes) < 2:
+                raise InspectionEvidenceError(
+                    f"inspection notes do not prove an independent review: {raw_path}"
+                )
         functional = str(row.get("functional_verdict")).upper()
         style = str(row.get("style_verdict")).upper()
         if functional not in {"GO", "NO-GO"} or style not in {"GO", "NO-GO"}:

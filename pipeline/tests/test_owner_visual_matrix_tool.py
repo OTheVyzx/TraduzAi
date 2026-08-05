@@ -521,6 +521,22 @@ def test_inspection_template_deduplicates_identical_pixels_and_keeps_categories(
     assert template["artifacts"][0]["categories"] == ["speech", "white_balloon"]
 
 
+def test_inspection_template_rejects_distinct_outputs_with_identical_pixels(tmp_path):
+    from PIL import Image
+
+    from tools.validate_owner_visual_matrix import MatrixContractError, build_inspection_template
+
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    Image.new("RGB", (12, 8), "white").save(first)
+    second.write_bytes(first.read_bytes())
+
+    with pytest.raises(MatrixContractError, match="distinct output artifacts"):
+        build_inspection_template(
+            {"speech": [str(first)], "white_balloon": [str(second)]}, tmp_path
+        )
+
+
 def test_runner_persists_captured_stdout_and_stderr(tmp_path):
     from tools.validate_owner_visual_matrix import _persist_runner_logs
 
@@ -882,6 +898,47 @@ def test_inspection_manifest_requires_artifact_hash_scale_and_verdict(tmp_path):
     incomplete = {"schema_version": 2, "inspections": [{"artifact_path": "sheet.png"}]}
     with pytest.raises(MatrixContractError, match="inspection fields"):
         validate_inspection_manifest(template, incomplete, tmp_path)
+
+
+def test_inspection_manifest_v3_rejects_template_notes_without_real_review_metadata(tmp_path):
+    from PIL import Image
+
+    from tools.validate_owner_visual_matrix import (
+        InspectionEvidenceError,
+        validate_inspection_manifest,
+    )
+
+    source = tmp_path / "source.png"
+    output = tmp_path / "sheet.png"
+    Image.new("RGB", (12, 8), "white").save(source)
+    Image.new("RGB", (12, 8), "black").save(output)
+    source_digest = sha256(source.read_bytes()).hexdigest()
+    output_digest = sha256(output.read_bytes()).hexdigest()
+    template = {
+        "schema_version": 3,
+        "artifacts": [{
+            "artifact_path": "sheet.png", "sha256": output_digest,
+            "category": "burst", "categories": ["burst"], "segment": "entry:1",
+            "width": 12, "height": 8,
+        }],
+    }
+    manifest = {
+        "schema_version": 3,
+        "inspections": [{
+            "artifact_path": "sheet.png", "sha256": output_digest,
+            "scale": "native", "timestamp": "2026-08-05T12:00:00-03:00",
+            "reviewed_at": "2026-08-05T12:00:00-03:00", "reviewer": "codex-visual",
+            "category": "burst", "owner_or_segment": "entry:1",
+            "source_path": "source.png", "output_path": "sheet.png",
+            "source_sha256": source_digest, "output_sha256": output_digest,
+            "width": 12, "height": 8,
+            "functional_verdict": "GO", "style_verdict": "GO",
+            "functional_note": "clean", "style_note": "clean",
+        }],
+    }
+
+    with pytest.raises(InspectionEvidenceError, match="independent review"):
+        validate_inspection_manifest(template, manifest, tmp_path)
 
 
 def test_inspection_manifest_uses_plan_go_no_go_vocabulary(tmp_path):

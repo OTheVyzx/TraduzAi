@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import copy
 from io import BytesIO
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 from PIL import Image
@@ -44,6 +44,57 @@ class PagePipelineIdentityError(ValueError):
 
 class PagePipelineStateError(ValueError):
     """Raised when a page result claims an unsupported lifecycle state."""
+
+
+CANONICAL_VISUAL_STAGE_NAMES = (
+    "original",
+    "inpaint",
+    "typeset",
+    "page_composition",
+    "persisted_final",
+)
+
+
+@dataclass(frozen=True)
+class CanonicalVisualStage:
+    """Hash-linked authority for one canonical page-space visual stage."""
+
+    name: str
+    artifact_ref: Any
+    pixel_sha256: str
+    alias_of: str | None = None
+    alias_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        to_dict = getattr(self.artifact_ref, "to_dict", None)
+        if not callable(to_dict):
+            raise PagePipelineStateError("visual stage has no serializable artifact ref")
+        return {
+            "name": self.name,
+            "artifact_ref": to_dict(),
+            "pixel_sha256": self.pixel_sha256,
+            "alias_of": self.alias_of,
+            "alias_reason": self.alias_reason,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "CanonicalVisualStage":
+        from ownership.execution import PersistedRGBImageArtifactRef
+
+        if set(payload) != {
+            "name", "artifact_ref", "pixel_sha256", "alias_of", "alias_reason"
+        } or not isinstance(payload.get("artifact_ref"), Mapping):
+            raise PagePipelineStateError("visual stage schema is invalid")
+        return cls(
+            name=str(payload.get("name") or ""),
+            artifact_ref=PersistedRGBImageArtifactRef.from_dict(payload["artifact_ref"]),
+            pixel_sha256=str(payload.get("pixel_sha256") or ""),
+            alias_of=(str(payload["alias_of"]) if payload.get("alias_of") is not None else None),
+            alias_reason=(
+                str(payload["alias_reason"])
+                if payload.get("alias_reason") is not None else None
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -243,6 +294,7 @@ class PageExecutionResult:
     qa_probes: tuple[Any, ...] = ()
     final_replacement_verdicts: tuple[Any, ...] = ()
     replacement_verification_policy_sha256: str | None = None
+    visual_stage_artifacts: tuple[CanonicalVisualStage, ...] = ()
 
     @property
     def page_id(self) -> str:
@@ -378,7 +430,9 @@ class PageExecutionResult:
                 self.page_composition.to_dict() if self.page_composition is not None else None
             ),
             "project_asset_refs": [],
-            "visual_stage_artifacts": None,
+            "visual_stage_artifacts": [
+                item.to_dict() for item in self.visual_stage_artifacts
+            ],
             "final_qa_ocr_requests": [
                 _request_json(item) for item in self.final_qa_ocr_requests
             ],
@@ -517,6 +571,10 @@ class PageExecutionResult:
             FinalReplacementVerdict.from_dict(item)
             for item in payload.get("final_replacement_verdicts") or ()
         )
+        visual_stages = tuple(
+            CanonicalVisualStage.from_dict(item)
+            for item in payload.get("visual_stage_artifacts") or ()
+        )
         result = cls.build(
             request=request,
             coverage=coverage,
@@ -541,6 +599,7 @@ class PageExecutionResult:
             replacement_verification_policy_sha256=payload.get(
                 "replacement_verification_policy_sha256"
             ),
+            visual_stage_artifacts=visual_stages,
         )
         if result.to_canonical_dict() != payload:
             raise PagePipelineIdentityError("page execution evidence did not round-trip canonically")
@@ -571,6 +630,7 @@ class PageExecutionResult:
         qa_probes: Sequence[Any] = (),
         final_replacement_verdicts: Sequence[Any] = (),
         replacement_verification_policy_sha256: str | None = None,
+        visual_stage_artifacts: Sequence[CanonicalVisualStage] = (),
     ) -> "PageExecutionResult":
         expected_content = (
             request.run_id,
@@ -671,6 +731,30 @@ class PageExecutionResult:
         language_issues = tuple(language_residual_issues)
         probes = tuple(qa_probes)
         verdicts = tuple(final_replacement_verdicts)
+        visual_stages = tuple(visual_stage_artifacts)
+        stage_by_name = {item.name: item for item in visual_stages}
+        if len(stage_by_name) != len(visual_stages):
+            raise PagePipelineIdentityError("canonical visual stage is duplicated")
+        if visual_stages and tuple(stage_by_name) != CANONICAL_VISUAL_STAGE_NAMES:
+            raise PagePipelineIdentityError("canonical visual stage set or order is invalid")
+        for stage in visual_stages:
+            ref = stage.artifact_ref
+            if stage.pixel_sha256 != getattr(ref, "pixel_sha256", None):
+                raise PagePipelineIdentityError("visual stage pixel hash differs from artifact ref")
+            if (
+                getattr(ref, "page_id", None) != request.page_id
+                or getattr(ref, "artifact_store_id", None)
+                != getattr(request.original_page.artifact_ref, "artifact_store_id", None)
+                or getattr(ref, "generation_id", None)
+                != getattr(request.original_page.artifact_ref, "generation_id", None)
+            ):
+                raise PagePipelineIdentityError("visual stage crossed page artifact authority")
+            if stage.alias_of is not None:
+                target = stage_by_name.get(stage.alias_of)
+                if target is None or not stage.alias_reason:
+                    raise PagePipelineIdentityError("visual stage alias is incomplete")
+                if stage.pixel_sha256 != target.pixel_sha256:
+                    raise PagePipelineIdentityError("visual stage alias pixels differ")
         request_by_invocation: dict[str, OCRRequest] = {}
         for qa_request in qa_requests:
             if not isinstance(qa_request, OCRRequest):
@@ -1067,6 +1151,9 @@ class PageExecutionResult:
             ),
             "final_page_file_sha256": getattr(final_page, "final_file_sha256", None),
             "terminal_proof_sha256": getattr(terminal_proof, "proof_sha256", None),
+            "visual_stage_artifact_sha256s": [
+                sha256_bytes(canonical_json_bytes(item.to_dict())) for item in visual_stages
+            ],
         }
         return cls(
             request=request,
@@ -1091,6 +1178,7 @@ class PageExecutionResult:
             qa_probes=tuple(qa_probes),
             final_replacement_verdicts=tuple(final_replacement_verdicts),
             replacement_verification_policy_sha256=replacement_verification_policy_sha256,
+            visual_stage_artifacts=visual_stages,
         )
 
     @classmethod
@@ -1117,6 +1205,7 @@ class PageExecutionResult:
             "qa_probes": result.qa_probes,
             "final_replacement_verdicts": result.final_replacement_verdicts,
             "replacement_verification_policy_sha256": result.replacement_verification_policy_sha256,
+            "visual_stage_artifacts": result.visual_stage_artifacts,
         }
         values.update(overrides)
         return cls.build(**values)

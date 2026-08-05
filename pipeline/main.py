@@ -18,6 +18,7 @@ import hashlib
 import logging
 import contextlib
 import importlib.util
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 # Adiciona o diretório da pipeline ao path para resolver imports locais no Pyright/Linter
@@ -15675,6 +15676,227 @@ def _run_verified_strip_chapter(
         source_manifest,
         output_pages,
         private_execution_root=private_execution_root,
+    )
+
+
+@dataclass(frozen=True)
+class _PersistedPageOwnerArtifacts:
+    execution: object
+    artifact_manifest: dict
+    visual_stages: dict
+    page_root: Path
+
+
+def _page_artifact_record(value):
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    if hasattr(value, "read") and callable(value.read):
+        return value.read()
+    if hasattr(value, "__dataclass_fields__"):
+        return asdict(value)
+    if isinstance(value, dict):
+        return dict(value)
+    raise TypeError(f"unsupported page artifact record: {type(value).__name__}")
+
+
+def _page_artifact_jsonl(values) -> bytes:
+    from ownership.hash_contract import canonical_json_bytes
+
+    rows = [canonical_json_bytes(_page_artifact_record(item)) for item in values]
+    return b"".join(row + b"\n" for row in rows)
+
+
+def _write_page_artifacts(evidence, *, generation_root: Path):
+    """Persist a page evidence tree derived only from a verified frozen snapshot."""
+
+    import uuid
+
+    from ownership.coverage import (
+        _invocation_json,
+        _jsonable,
+        _ledger_json,
+        _observation_payload,
+        _request_json,
+    )
+    from ownership.execution import (
+        ArtifactGenerationMarker,
+        PageArtifactIntegrityError,
+        PageExecutionEvidenceSnapshot,
+    )
+    from ownership.hash_contract import canonical_json_bytes, sha256_bytes
+    from strip.page_pipeline import CANONICAL_VISUAL_STAGE_NAMES
+
+    if not isinstance(evidence, PageExecutionEvidenceSnapshot):
+        raise TypeError("page artifacts require PageExecutionEvidenceSnapshot")
+    root = Path(generation_root).resolve(strict=True)
+    marker = ArtifactGenerationMarker.read_verified(root)
+    expected = {
+        "run_id": evidence.run_id,
+        "execution_id": evidence.execution_id,
+        "page_id": evidence.page_id,
+        "page_source_sha256": evidence.page_source_sha256,
+        "artifact_store_id": evidence.artifact_store_id,
+        "generation_id": evidence.generation_id,
+        "page_result_sha256": evidence.page_result_sha256,
+        "sha256": evidence.sha256,
+    }
+    if (
+        marker.run_id != evidence.run_id
+        or marker.execution_id != evidence.execution_id
+        or marker.artifact_store_id != evidence.artifact_store_id
+        or marker.generation_id != evidence.generation_id
+    ):
+        raise PageArtifactIntegrityError("page evidence differs from generation marker")
+    result = PageExecutionEvidenceSnapshot.read_verified(
+        evidence.canonical_json_bytes, root, expected=expected
+    )
+    if result.status != "final_verified":
+        raise PageArtifactIntegrityError("page artifacts require a final_verified result")
+
+    stages = tuple(result.visual_stage_artifacts)
+    stage_by_name = {item.name: item for item in stages}
+    if tuple(stage_by_name) != CANONICAL_VISUAL_STAGE_NAMES:
+        raise PageArtifactIntegrityError("canonical visual stage set is incomplete")
+    for stage in stages:
+        pixels = stage.artifact_ref.load_verified(root)
+        if stage.pixel_sha256 != stage.artifact_ref.pixel_sha256:
+            raise PageArtifactIntegrityError("canonical visual stage hash mismatch")
+        if pixels.shape[:2] != (
+            result.request.original_page.height,
+            result.request.original_page.width,
+        ):
+            raise PageArtifactIntegrityError("canonical visual stage dimensions mismatch")
+        if stage.alias_of is not None:
+            aliased = stage_by_name.get(stage.alias_of)
+            if aliased is None or not stage.alias_reason:
+                raise PageArtifactIntegrityError("canonical visual stage alias is incomplete")
+            if aliased.pixel_sha256 != stage.pixel_sha256:
+                raise PageArtifactIntegrityError("canonical visual stage alias hash mismatch")
+
+    coverage_payload = json.loads(result.coverage.canonical_json_bytes.decode("utf-8"))
+    graph_payload = json.loads(result.owner_graph.canonical_json_bytes.decode("utf-8"))
+    files: dict[str, bytes] = {
+        "page_execution_evidence.json": evidence.canonical_json_bytes,
+        "coverage_result.json": canonical_json_bytes(coverage_payload),
+        "coverage_ledgers.jsonl": b"".join(
+            canonical_json_bytes(_ledger_json(item)) + b"\n"
+            for item in result.coverage.ledger_history
+        ),
+        "coverage_recovery_requests.jsonl": b"".join(
+            canonical_json_bytes(_jsonable(asdict(item))) + b"\n"
+            for item in result.coverage.recovery_requests
+        ),
+        "coverage_recovery_decisions.jsonl": b"".join(
+            canonical_json_bytes(_jsonable(asdict(item))) + b"\n"
+            for item in result.coverage.recovery_decisions
+        ),
+        "coverage_pending_request_ids.json": canonical_json_bytes(
+            {
+                "run_id": result.request.run_id,
+                "publication_execution_id": result.request.execution_id,
+                "page_id": result.page_id,
+                "page_source_sha256": result.request.page_source_sha256,
+                "pending_request_ids": list(result.coverage.pending_request_ids),
+            }
+        ),
+        "ocr_requests.jsonl": b"".join(
+            canonical_json_bytes(_request_json(item)) + b"\n"
+            for item in result.coverage.ocr_requests
+        ),
+        "ocr_invocations.jsonl": b"".join(
+            canonical_json_bytes(_invocation_json(item)) + b"\n"
+            for item in result.coverage.ocr_invocations
+        ),
+        "page_owner_observations.jsonl": b"".join(
+            canonical_json_bytes(_observation_payload(item)) + b"\n"
+            for item in result.coverage.observations
+        ),
+        "owner_graph.json": canonical_json_bytes(graph_payload),
+        "translation_attempts.jsonl": _page_artifact_jsonl(
+            result.translation_attempts
+        ),
+        "translation_bindings.json": canonical_json_bytes(
+            [item.to_dict() for item in result.translations]
+        ),
+        "repair_requests.jsonl": _page_artifact_jsonl(result.repair_requests),
+        "repair_attempts.jsonl": _page_artifact_jsonl(result.repair_history),
+        "owner_target_materialization.jsonl": _page_artifact_jsonl(
+            result.owner_target_materializations
+        ),
+        "execution_result.json": canonical_json_bytes(result.to_canonical_dict()),
+        "original.ref.json": canonical_json_bytes(
+            stage_by_name["original"].to_dict()
+        ),
+        "page_composition.json": canonical_json_bytes(
+            result.page_composition.to_dict() if result.page_composition is not None else {}
+        ),
+        "final_qa_ocr_requests.jsonl": b"".join(
+            canonical_json_bytes(_request_json(item)) + b"\n"
+            for item in result.final_qa_ocr_requests
+        ),
+        "final_qa_ocr_invocations.jsonl": b"".join(
+            canonical_json_bytes(_invocation_json(item)) + b"\n"
+            for item in result.final_qa_ocr_invocations
+        ),
+        "language_residual_issues.jsonl": _page_artifact_jsonl(
+            result.language_residual_issues
+        ),
+        "final_qa_probes.jsonl": _page_artifact_jsonl(result.qa_probes),
+        "final_pixel_proof.json": canonical_json_bytes(
+            result.terminal_proof.to_dict()
+        ),
+        "final_replacement_verdicts.jsonl": _page_artifact_jsonl(
+            result.final_replacement_verdicts
+        ),
+        "persisted_final.ref.json": canonical_json_bytes(
+            stage_by_name["persisted_final"].to_dict()
+        ),
+        "visual_stages.json": canonical_json_bytes(
+            [item.to_dict() for item in stages]
+        ),
+    }
+
+    page_relative = Path("evidence") / "pages" / result.page_id
+    page_root = root / page_relative
+    if page_root.exists():
+        raise PageArtifactIntegrityError("page evidence tree already exists")
+    staging = root / "evidence" / "pages" / f".{result.page_id}.{uuid.uuid4().hex}.tmp"
+    artifact_rows = [
+        {
+            "relative_path": (page_relative / name).as_posix(),
+            "file_sha256": sha256_bytes(encoded),
+            "size_bytes": len(encoded),
+            "evidence_reference": (page_relative / name).as_posix(),
+        }
+        for name, encoded in sorted(files.items())
+    ]
+    manifest = {
+        "schema_version": 1,
+        "run_id": result.request.run_id,
+        "publication_execution_id": result.request.execution_id,
+        "page_id": result.page_id,
+        "page_source_sha256": result.request.page_source_sha256,
+        "page_execution_evidence_sha256": evidence.sha256,
+        "page_result_sha256": evidence.page_result_sha256,
+        "visual_stages": [item.to_dict() for item in stages],
+        "artifacts": artifact_rows,
+    }
+    try:
+        staging.mkdir(parents=True)
+        for name, encoded in files.items():
+            (staging / name).write_bytes(encoded)
+        (staging / "artifact_manifest.json").write_bytes(canonical_json_bytes(manifest))
+        page_root.parent.mkdir(parents=True, exist_ok=True)
+        staging.replace(page_root)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+    return _PersistedPageOwnerArtifacts(
+        execution=result,
+        artifact_manifest=manifest,
+        visual_stages=stage_by_name,
+        page_root=page_root,
     )
 
 
