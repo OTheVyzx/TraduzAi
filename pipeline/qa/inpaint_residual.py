@@ -62,6 +62,7 @@ def detect_residual_text(
     min_ratio: float = 0.01,
     include_unchanged_dark: bool = False,
     include_light_residual: bool = False,
+    return_mask: bool = False,
 ) -> dict:
     """Cheap threshold check for dark or bright text-like remnants after inpaint."""
     before = _as_rgb_array(before_rgb)
@@ -69,12 +70,18 @@ def detect_residual_text(
     if before.shape != after.shape:
         raise ValueError("before_rgb and after_rgb must have the same shape")
     if before.size == 0:
-        return {"has_residual": False, "score": 0.0, "flags": ["empty_image"]}
+        result = {"has_residual": False, "score": 0.0, "flags": ["empty_image"]}
+        if return_mask:
+            result["positive_residual_mask"] = np.zeros(before.shape[:2], dtype=np.uint8)
+        return result
 
     region = _as_region_mask(mask, before.shape[:2])
     region_pixels = int(np.count_nonzero(region))
     if region_pixels <= 0:
-        return {"has_residual": False, "score": 0.0, "flags": ["empty_region"]}
+        result = {"has_residual": False, "score": 0.0, "flags": ["empty_region"]}
+        if return_mask:
+            result["positive_residual_mask"] = np.zeros(before.shape[:2], dtype=np.uint8)
+        return result
 
     before_gray = _gray(before)
     after_gray = _gray(after)
@@ -156,7 +163,8 @@ def detect_residual_text(
         colored_residual = np.zeros_like(region, dtype=bool)
         colored_residual_pixels = 0
 
-    residual_pixels = int(np.count_nonzero(dark_residual | light_residual | colored_residual))
+    positive_residual = dark_residual | light_residual | colored_residual
+    residual_pixels = int(np.count_nonzero(positive_residual))
     score = round(float(residual_pixels) / float(region_pixels), 6)
 
     flags: list[str] = []
@@ -174,7 +182,7 @@ def detect_residual_text(
         if score >= 0.05:
             flags.append("high_residual_ratio")
 
-    return {
+    result = {
         "has_residual": bool(has_residual),
         "score": score,
         "flags": flags,
@@ -184,3 +192,9 @@ def detect_residual_text(
         "light_residual_on_dark_context": bool(source_light_text_on_dark),
         "dark_background_context": bool(dark_background_context),
     }
+    if return_mask:
+        residual_mask = np.where(positive_residual, 255, 0).astype(np.uint8)
+        residual_mask = np.ascontiguousarray(residual_mask)
+        residual_mask.setflags(write=False)
+        result["positive_residual_mask"] = residual_mask
+    return result

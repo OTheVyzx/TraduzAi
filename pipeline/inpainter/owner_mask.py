@@ -501,6 +501,87 @@ def _stroke_expansion_radii(mask: np.ndarray) -> tuple[int, ...]:
     return tuple(range(maximum_radius, 2, -1))
 
 
+def build_repair_cleanup_mask(
+    source_support_mask: Any,
+    *,
+    container_interior_mask: Any,
+    container_border_mask: Any | None = None,
+    protected_art_mask: Any | None = None,
+    positive_residual_mask: Any | None = None,
+    strategy: str = "R0",
+) -> np.ndarray:
+    """Build R0/R1 masks from positive source evidence inside safe geometry."""
+
+    support = np.asarray(source_support_mask)
+    if support.ndim == 3:
+        support = support[:, :, 0]
+    if support.ndim != 2 or not np.any(support > 0):
+        raise UnsafeOwnerMaskError("repair source support mask is empty or invalid")
+    shape = support.shape
+
+    def normalized(value: Any | None, *, default: int = 0) -> np.ndarray:
+        if value is None:
+            return np.full(shape, default, dtype=np.uint8)
+        candidate = np.asarray(value)
+        if candidate.ndim == 3:
+            candidate = candidate[:, :, 0]
+        if candidate.shape != shape:
+            raise UnsafeOwnerMaskError("repair mask geometry mismatch")
+        return np.where(candidate > 0, 255, 0).astype(np.uint8)
+
+    positive = normalized(support)
+    interior = normalized(container_interior_mask)
+    border = normalized(container_border_mask)
+    protected = normalized(protected_art_mask)
+    residual = normalized(positive_residual_mask)
+    normalized_strategy = str(getattr(strategy, "value", strategy)).upper()
+    if normalized_strategy not in {"R0", "R1"}:
+        raise UnsafeOwnerMaskError("repair mask strategy is not R0 or R1")
+
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        (positive > 0).astype(np.uint8), connectivity=8
+    )
+    heights = [int(stats[index, cv2.CC_STAT_HEIGHT]) for index in range(1, count)]
+    widths = [int(stats[index, cv2.CC_STAT_WIDTH]) for index in range(1, count)]
+    median_height = max(1, int(round(float(np.median(heights or [1])))))
+    median_width = max(1, int(round(float(np.median(widths or [1])))))
+    if normalized_strategy == "R0":
+        radius = max(1, min(3, int(round(median_height * 0.20))))
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1)
+        )
+        expanded = cv2.dilate(positive, kernel, iterations=1)
+    else:
+        seed = np.maximum(positive, residual)
+        horizontal_radius = max(
+            2,
+            min(12, int(round(max(median_height, median_width * 0.08) * 0.45))),
+        )
+        vertical_radius = max(1, min(6, int(round(median_height * 0.45))))
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (horizontal_radius * 2 + 1, vertical_radius * 2 + 1),
+        )
+        expanded = cv2.dilate(seed, kernel, iterations=1)
+        expanded = cv2.morphologyEx(
+            expanded,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        )
+    allowed = (
+        (expanded > 0)
+        & (interior > 0)
+        & (border == 0)
+        & (protected == 0)
+    )
+    result = np.where(allowed, 255, 0).astype(np.uint8)
+    if not np.all(result[positive > 0] > 0):
+        raise UnsafeOwnerMaskError("protected geometry excludes source support")
+    result = np.ascontiguousarray(result)
+    result.setflags(write=False)
+    return result
+
+
 def _validated_component_geometry(
     *,
     action: np.ndarray,

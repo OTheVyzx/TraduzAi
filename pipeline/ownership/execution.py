@@ -179,6 +179,39 @@ def execute_owner_replacement(
     )
 
 
+def bind_repair_ladder_to_page_result(page_result: Any, ladder_result: Any) -> Any:
+    """Attach the canonical repair journal without promoting runtime pixels."""
+
+    from strip.page_pipeline import PageExecutionResult
+
+    requests_by_id = {
+        item.request_id: item
+        for item in (*page_result.repair_requests, *ladder_result.repair_requests)
+    }
+    attempts_by_id = {
+        item.attempt_id: item
+        for item in (*page_result.repair_history, *ladder_result.attempts)
+    }
+    status = (
+        "repair_pending"
+        if ladder_result.status == "repair_pending"
+        else "candidate_ready"
+    )
+    return PageExecutionResult.build_from(
+        page_result,
+        repair_requests=tuple(
+            sorted(requests_by_id.values(), key=lambda item: item.request_id)
+        ),
+        repair_history=tuple(
+            sorted(attempts_by_id.values(), key=lambda item: item.attempt_id)
+        ),
+        repair_budget_policy_sha256=ladder_result.repair_budget_policy_sha256,
+        status=status,
+        final_page=None,
+        terminal_proof=None,
+    )
+
+
 @dataclass(frozen=True)
 class PageCompositionCandidate:
     final_page: Any
@@ -1344,6 +1377,7 @@ __all__ = [
     "PersistedRGBImageArtifactRef",
     "TerminalPixelProof",
     "build_owner_repair_request",
+    "bind_repair_ladder_to_page_result",
     "canonical_glyph_patch_sha256",
     "execute_owner_replacement",
 ]

@@ -17,7 +17,12 @@ from ownership.hash_contract import (
     sha256_bytes,
     sha256_text,
 )
-from ownership.model import TRANSLATION_ROUTE_ACTIONS, OwnerGraph, OwnerProjection
+from ownership.model import (
+    TRANSLATION_ROUTE_ACTIONS,
+    OwnerGraph,
+    OwnerProjection,
+    RepairAttempt,
+)
 from ownership.owner_builder import build_owner_page_graph_from_coverage
 from ownership.translation import (
     OwnerPageTranslationResult,
@@ -226,6 +231,8 @@ class PageExecutionResult:
     owner_target_materializations: tuple[Any, ...] = ()
     text_layers_view: Any | None = None
     page_composition: Any | None = None
+    repair_history: tuple[RepairAttempt, ...] = ()
+    repair_budget_policy_sha256: str | None = None
 
     @property
     def page_id(self) -> str:
@@ -300,8 +307,8 @@ class PageExecutionResult:
             "translation_attempts": [item.to_dict() for item in self.translation_attempts],
             "translations": [item.to_dict() for item in self.translations],
             "repair_requests": [item.to_dict() for item in self.repair_requests],
-            "repair_history": [],
-            "repair_budget_policy_sha256": None,
+            "repair_history": [item.to_dict() for item in self.repair_history],
+            "repair_budget_policy_sha256": self.repair_budget_policy_sha256,
             "owner_target_materializations": [
                 item.to_dict() for item in self.owner_target_materializations
             ],
@@ -421,6 +428,9 @@ class PageExecutionResult:
         repair_requests = tuple(
             OwnerRepairRequest.from_dict(item) for item in payload.get("repair_requests") or ()
         )
+        repair_history = tuple(
+            RepairAttempt.from_dict(item) for item in payload.get("repair_history") or ()
+        )
         materializations = tuple(
             OwnerTargetMaterialization.from_dict(item)
             for item in payload.get("owner_target_materializations") or ()
@@ -443,6 +453,8 @@ class PageExecutionResult:
             translations=bindings,
             page_commits=tuple(SimpleNamespace(**item) for item in payload.get("page_commits") or ()),
             repair_requests=repair_requests,
+            repair_history=repair_history,
+            repair_budget_policy_sha256=payload.get("repair_budget_policy_sha256"),
             owner_target_materializations=materializations,
             text_layers_view=text_layers_view,
             page_composition=page_composition,
@@ -465,6 +477,8 @@ class PageExecutionResult:
         translations: Sequence[TranslationBinding] = (),
         page_commits: Sequence[Any] = (),
         repair_requests: Sequence[Any] = (),
+        repair_history: Sequence[RepairAttempt] = (),
+        repair_budget_policy_sha256: str | None = None,
         owner_target_materializations: Sequence[Any] = (),
         text_layers_view: Any | None = None,
         page_composition: Any | None = None,
@@ -517,6 +531,7 @@ class PageExecutionResult:
                 if actual is not None and actual != expected:
                     raise PagePipelineIdentityError(f"page commit crossed {field}")
         repairs = tuple(repair_requests)
+        history = tuple(repair_history)
         materializations = tuple(owner_target_materializations)
         for record in (*repairs, *materializations):
             for field, expected in (
@@ -527,6 +542,44 @@ class PageExecutionResult:
             ):
                 if getattr(record, field, None) != expected:
                     raise PagePipelineIdentityError(f"owner artifact crossed {field}")
+        if history:
+            from ownership.repair import RepairPolicyIdentityError
+
+            if (
+                not isinstance(repair_budget_policy_sha256, str)
+                or len(repair_budget_policy_sha256) != 64
+            ):
+                raise RepairPolicyIdentityError("repair history requires a policy hash")
+            request_by_id = {item.request_id: item for item in repairs}
+            if len(request_by_id) != len(repairs):
+                raise PagePipelineIdentityError("repair request identity is duplicated")
+            fingerprints: set[str] = set()
+            consumed: set[str] = set()
+            for attempt in history:
+                if (
+                    attempt.run_id != request.run_id
+                    or attempt.execution_id != request.execution_id
+                    or attempt.page_id != request.page_id
+                    or attempt.page_source_sha256 != request.page_source_sha256
+                ):
+                    raise PagePipelineIdentityError("repair attempt crossed page identity")
+                if attempt.repair_budget_policy_sha256 != repair_budget_policy_sha256:
+                    raise RepairPolicyIdentityError("repair attempt policy hash mismatch")
+                if attempt.input_sha256 != request.original_page.page_source_sha256:
+                    raise PagePipelineIdentityError("repair attempt did not restart from original pixels")
+                if attempt.attempt_fingerprint in fingerprints:
+                    raise PagePipelineIdentityError("repair attempt fingerprint is duplicated")
+                fingerprints.add(attempt.attempt_fingerprint)
+                if attempt.request_id not in request_by_id:
+                    raise PagePipelineIdentityError("repair attempt has an orphan request")
+                if attempt.consumed_request_ids != (attempt.request_id,):
+                    raise PagePipelineIdentityError("repair attempt consumption is not canonical")
+                if attempt.request_id in consumed:
+                    raise PagePipelineIdentityError("repair request was consumed more than once")
+                request_record = request_by_id[attempt.request_id]
+                if attempt.issue_id != request_record.issue_id:
+                    raise PagePipelineIdentityError("repair attempt issue identity mismatch")
+                consumed.add(attempt.request_id)
         bound_commits = tuple(
             item for item in commits
             if bool(getattr(item, "translation_binding_sha256", ""))
@@ -646,6 +699,13 @@ class PageExecutionResult:
                 item.target_payload_sha256 for item in bindings
             ):
                 raise PagePipelineIdentityError("terminal proof payload chain mismatch")
+            if repair_budget_policy_sha256 is not None and (
+                getattr(terminal_proof, "repair_budget_policy_sha256", None)
+                != repair_budget_policy_sha256
+            ):
+                from ownership.repair import RepairPolicyIdentityError
+
+                raise RepairPolicyIdentityError("terminal proof repair policy hash mismatch")
             if not all(
                 bool(getattr(terminal_proof, key, False))
                 for key in (
@@ -666,6 +726,8 @@ class PageExecutionResult:
             "translation_binding_sha256s": [item.translation_binding_sha256 for item in bindings],
             "commit_ids": [str(getattr(item, "commit_id", "")) for item in commits],
             "repair_request_sha256s": [item.request_sha256 for item in repairs],
+            "repair_attempt_sha256s": [item.attempt_sha256 for item in history],
+            "repair_budget_policy_sha256": repair_budget_policy_sha256,
             "target_materialization_sha256s": [
                 item.materialization_sha256 for item in materializations
             ],
@@ -685,6 +747,8 @@ class PageExecutionResult:
             terminal_proof=terminal_proof,
             result_sha256=sha256_bytes(canonical_json_bytes(payload)),
             repair_requests=repairs,
+            repair_history=history,
+            repair_budget_policy_sha256=repair_budget_policy_sha256,
             owner_target_materializations=materializations,
             text_layers_view=text_layers_view,
             page_composition=page_composition,
@@ -700,6 +764,8 @@ class PageExecutionResult:
             "translations": result.translations,
             "page_commits": result.page_commits,
             "repair_requests": result.repair_requests,
+            "repair_history": result.repair_history,
+            "repair_budget_policy_sha256": result.repair_budget_policy_sha256,
             "owner_target_materializations": result.owner_target_materializations,
             "text_layers_view": result.text_layers_view,
             "page_composition": result.page_composition,
