@@ -984,15 +984,26 @@ class PageExecutionResult:
             }
             if len(layer_by_owner) != len(layers):
                 raise PagePipelineIdentityError("text layers contain duplicate or invalid owners")
+            authoritative_layer_owner_ids = {
+                str(getattr(item, "owner_id", "")) for item in bound_commits
+            } | {
+                binding.owner_id
+                for binding in bindings
+                if binding.preserves_original_pixels
+            }
             for binding in ordered_all_bindings:
                 layer = layer_by_owner.get(binding.owner_id)
                 target = str((layer or {}).get("translated") or "")
                 if (
                     layer is None
-                    or layer.get("translation_binding_sha256")
-                    != binding.translation_binding_sha256
-                    or layer.get("target_payload_sha256") != binding.target_payload_sha256
                     or sha256_text(target) != binding.target_payload_sha256
+                ):
+                    raise PagePipelineIdentityError("text layer target binding mismatch")
+                if binding.owner_id in authoritative_layer_owner_ids and (
+                    layer.get("translation_binding_sha256")
+                    != binding.translation_binding_sha256
+                    or layer.get("target_payload_sha256")
+                    != binding.target_payload_sha256
                 ):
                     raise PagePipelineIdentityError("text layer target binding mismatch")
         if bound_commits:

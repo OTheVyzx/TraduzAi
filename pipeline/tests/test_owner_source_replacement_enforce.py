@@ -373,3 +373,23 @@ def test_candidate_excludes_verified_no_repaint_binding_from_commit_cardinality(
     assert len(mixed.translations) == 2
     assert len(mixed.page_commits) == 1
     assert mixed.translations[1].preserves_original_pixels
+
+    repair_layers = [
+        {
+            "owner_id": rendered_binding.owner_id,
+            "translated": rendered_binding.target_text,
+            "state": "repair_pending",
+        },
+        layers[1],
+    ]
+    repair_pending = PageExecutionResult.build_from(
+        result,
+        translations=(rendered_binding, preserved_binding),
+        page_commits=(),
+        owner_target_materializations=(),
+        text_layers_view=FrozenJSONSnapshot.build({"texts": repair_layers}),
+        page_composition=None,
+    )
+
+    assert repair_pending.page_commits == ()
+    assert repair_pending.text_layers_view.read()["texts"][0]["state"] == "repair_pending"
