@@ -233,6 +233,77 @@ def _replace_entries(
     )
 
 
+def _replace_single_component_with_lines(
+    coverage: PageCoverageResult,
+    lines: tuple[tuple[str, tuple[int, int, int, int]], ...],
+) -> PageCoverageResult:
+    invocation = coverage.ocr_invocations[0]
+    record_template = invocation.observations[0]
+    observation_template = coverage.observations[0]
+    records = tuple(
+        replace(
+            record_template,
+            observation_id=f"line-record-{index}",
+            text=text,
+            payload_sha256=sha256_text(text),
+            bbox_page=bbox,
+            polygon_page=(
+                (bbox[0], bbox[1]),
+                (bbox[2], bbox[1]),
+                (bbox[2], bbox[3]),
+                (bbox[0], bbox[3]),
+            ),
+        )
+        for index, (text, bbox) in enumerate(lines, 1)
+    )
+    observations = tuple(
+        replace(
+            observation_template,
+            observation_id=record.observation_id,
+            text=record.text,
+            payload_sha256=record.payload_sha256,
+            bbox_page=record.bbox_page,
+            polygons_page=(record.polygon_page,),
+        )
+        for record in records
+    )
+    rebuilt_invocation = OCRInvocationResult.build(
+        request=invocation.request,
+        observations=records,
+        full_page_lines=records,
+        attempts=invocation.attempts,
+        diagnostics=invocation.diagnostics,
+    )
+    entry = replace(
+        coverage.entries[0],
+        observation_ids=tuple(item.observation_id for item in observations),
+    )
+    ledger = build_page_coverage_ledger(
+        run_id=coverage.run_id,
+        origin_execution_id=coverage.origin_execution_id,
+        page_id=coverage.page_id,
+        page_source_sha256=coverage.page_source_sha256,
+        inventory_version=1,
+        parent_ledger_sha256=None,
+        component_inventory=coverage.ledger.component_inventory,
+        expected_observation_ids=tuple(item.observation_id for item in observations),
+        entries=(entry,),
+    )
+    return PageCoverageResult._build(
+        run_id=coverage.run_id,
+        origin_execution_id=coverage.origin_execution_id,
+        page_id=coverage.page_id,
+        page_source_sha256=coverage.page_source_sha256,
+        ledger_history=(ledger,),
+        components=coverage.components,
+        observations=observations,
+        ocr_requests=coverage.ocr_requests,
+        ocr_invocations=(rebuilt_invocation,),
+        recovery_requests=(),
+        recovery_decisions=(),
+    )
+
+
 def test_zero_ocr_attempts_can_never_produce_no_ocr_non_text_suppression() -> None:
     component = _component("component-a", (20, 20, 120, 50))
     result = PageCoverageResult.initialize(
@@ -261,6 +332,29 @@ def test_fragments_in_one_balloon_produce_one_owner_with_one_complete_body() -> 
     assert len(graph.owners) == 1
     assert graph.owners[0].component_ids == ["component-a", "component-b"]
     assert graph.owners[0].source_payload == "HELLO WORLD"
+
+
+def test_multiple_lines_from_one_invocation_remain_one_complete_owner_body() -> None:
+    coverage = _coverage(
+        (("component-a", "placeholder", (20, 20, 240, 90)),),
+        containers=("container-one",),
+    )
+    coverage = _replace_single_component_with_lines(
+        coverage,
+        (
+            ("UAU, VOCE ME", (35, 30, 210, 50)),
+            ("ASSUSTOU.", (55, 55, 185, 78)),
+        ),
+    )
+
+    graph = build_owner_page_graph_from_coverage(coverage)
+
+    assert len(graph.owners) == 1
+    assert graph.owners[0].selected_observation_ids == [
+        "line-record-1",
+        "line-record-2",
+    ]
+    assert graph.owners[0].source_payload == "UAU, VOCE ME ASSUSTOU."
 
 
 def test_adjacent_containers_remain_separate_owners() -> None:

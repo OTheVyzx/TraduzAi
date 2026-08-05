@@ -58,13 +58,27 @@ def select_consensus_observation(
 def select_ordered_consensus_body(
     observation_groups: Sequence[Sequence[TextObservation]],
 ) -> tuple[tuple[TextObservation, ...], str]:
-    """Select one reading per component and compose it in canonical page order."""
+    """Select one invocation reading per component in canonical page order.
 
+    A provider invocation may legitimately return multiple spatial lines for
+    one component.  Those lines are fragments of one body, not competing OCR
+    votes, so they must remain together.  Multiple invocation origins still
+    use the strict consensus selector.
+    """
+
+    selected_candidates: list[TextObservation] = []
+    for group in observation_groups:
+        materialized = tuple(group)
+        invocation_ids = {
+            observation.invocation_id for observation in materialized
+        }
+        if len(invocation_ids) == 1:
+            selected_candidates.extend(materialized)
+        else:
+            selected_candidates.append(select_consensus_observation(materialized))
     selected_by_id = {
         observation.observation_id: observation
-        for observation in (
-            select_consensus_observation(group) for group in observation_groups
-        )
+        for observation in selected_candidates
     }
     selected = tuple(
         sorted(
