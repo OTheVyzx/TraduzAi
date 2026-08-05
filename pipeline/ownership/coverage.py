@@ -1635,12 +1635,13 @@ def _ocr_empty_component_preserve_policy(
     page_rgb: "np.ndarray",
     component: "SourceTextComponent",
 ) -> tuple[str, str] | None:
-    """Classify only visually empty low-confidence glyph-scan proposals.
+    """Classify OCR-empty hypotheses that have no independent corroboration.
 
     OCR exhaustion alone is never enough to preserve a component.  This
-    disposition is limited to either near-uniform glyph-scan crops or an
-    evidence-bound dark-container heuristic that has no primary/script
-    confirmation.
+    disposition additionally requires either an uncorroborated glyph scan or
+    an evidence-bound dark-container heuristic without primary/script
+    confirmation.  Specific low-confidence visual shapes retain narrower
+    audit policy identifiers.
     """
 
     detector_sources = frozenset(component.detector_sources)
@@ -1653,8 +1654,6 @@ def _ocr_empty_component_preserve_policy(
     if component.script_evidence or component.evidence_ids:
         return None
     confidence = float(component.confidence)
-    if confidence > 0.75:
-        return None
     x1, y1, x2, y2 = (int(value) for value in component.bbox_page)
     box_width = max(0, x2 - x1)
     box_height = max(0, y2 - y1)
@@ -1686,13 +1685,18 @@ def _ocr_empty_component_preserve_policy(
             + 29 * rgb_i32[:, :, 2]
             + 128
         ) // 256
-    if max_channel_span > 24:
-        return None
-    if int(luminance.max()) - int(luminance.min()) > 12:
-        return None
+    if (
+        confidence <= 0.75
+        and max_channel_span <= 24
+        and int(luminance.max()) - int(luminance.min()) <= 12
+    ):
+        return (
+            "visual_non_text",
+            "policy:ocr_empty_near_uniform_false_glyph",
+        )
     return (
         "visual_non_text",
-        "policy:ocr_empty_near_uniform_false_glyph",
+        "policy:ocr_empty_uncorroborated_glyph_scan",
     )
 
 
