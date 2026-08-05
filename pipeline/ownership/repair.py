@@ -451,6 +451,83 @@ class RepairController:
         self._fingerprints.add(attempt.attempt_fingerprint)
 
 
+@dataclass(frozen=True)
+class PageRepairAction:
+    issue_id: str
+    kind: str
+    owner_id: str | None
+    action: str
+    start_strategy: str | None
+    reuse_translation_binding: bool
+    reopen_coverage: bool
+
+
+class PageRepairController:
+    """Route every canonical final QA issue to one monotonic repair action."""
+
+    def __init__(self, *, policy: RepairBudgetPolicy | None = None):
+        self.policy = policy or RepairBudgetPolicy.default()
+
+    def plan(self, issues) -> tuple[PageRepairAction, ...]:
+        from .model import LanguageResidualIssue
+
+        canonical = []
+        identity = None
+        seen: set[str] = set()
+        for issue in issues:
+            LanguageResidualIssue.from_dict(issue.to_dict())
+            current_identity = (
+                issue.run_id,
+                issue.execution_id,
+                issue.page_id,
+                issue.page_source_sha256,
+            )
+            if identity is None:
+                identity = current_identity
+            elif current_identity != identity:
+                raise ValueError("repair issues cross run, execution or page identity")
+            if issue.issue_id in seen:
+                continue
+            seen.add(issue.issue_id)
+            if not issue.repair_required:
+                continue
+            canonical.append(issue)
+
+        routes = {
+            "source_language_visible": ("full_replacement", "R0", True, False),
+            "target_payload_missing": ("rerender_target", None, True, False),
+            "cleanup_incomplete": ("full_replacement", "R0", True, False),
+            "target_glyphs_missing": ("rerender_target", None, True, False),
+            "mixed_language_overlay": ("full_replacement", "R2", True, False),
+            "independently_detected_text_without_owner": (
+                "coverage_recovery",
+                None,
+                False,
+                True,
+            ),
+        }
+        actions = []
+        for issue in sorted(canonical, key=lambda item: item.issue_id):
+            try:
+                action, strategy, reuse_binding, reopen_coverage = routes[issue.kind]
+            except KeyError as exc:
+                raise ValueError(f"unsupported final repair issue kind: {issue.kind}") from exc
+            if action != "coverage_recovery" and not issue.owner_id:
+                raise ValueError("owner-bound repair issue is missing owner identity")
+            actions.append(
+                PageRepairAction(
+                    issue_id=issue.issue_id,
+                    kind=issue.kind,
+                    owner_id=issue.owner_id,
+                    action=action,
+                    start_strategy=strategy,
+                    reuse_translation_binding=reuse_binding,
+                    reopen_coverage=reopen_coverage,
+                )
+            )
+        return tuple(actions)
+
+
 def _request_for(
     case: OwnerRepairCase,
     *,
@@ -656,6 +733,8 @@ __all__ = [
     "RepairAttemptRuntime",
     "RepairBudgetPolicy",
     "RepairController",
+    "PageRepairAction",
+    "PageRepairController",
     "RepairExecutionFeedback",
     "RepairInfrastructureExhausted",
     "RepairLadderResult",

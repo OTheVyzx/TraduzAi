@@ -173,3 +173,69 @@ def advance_owner_with_translation(lifecycle: OwnerLifecycle, binding) -> OwnerL
         payload_sha256=binding_sha256,
     )
     return lifecycle.advance("target_ready", evidence=evidence)
+
+
+def reopen_owner_from_final_issue(lifecycle: OwnerLifecycle, issue) -> OwnerLifecycle:
+    """Move one rendered owner back to repair_pending from its canonical QA issue."""
+
+    if lifecycle.state != "rendered":
+        raise CoverageInvariantError("only a rendered owner can reopen from final QA")
+    issue_identity = (
+        str(getattr(issue, "run_id", "")),
+        str(getattr(issue, "execution_id", "")),
+        str(getattr(issue, "page_id", "")),
+        str(getattr(issue, "page_source_sha256", "")),
+        str(getattr(issue, "owner_id", "")),
+    )
+    expected = (
+        lifecycle.identity.run_id,
+        lifecycle.identity.origin_execution_id,
+        lifecycle.identity.page_id,
+        lifecycle.identity.page_source_sha256,
+        lifecycle.identity.owner_id,
+    )
+    if issue_identity != expected or not bool(getattr(issue, "repair_required", False)):
+        raise CoverageInvariantError("final QA issue belongs to another owner or is not repairable")
+    issue_sha = str(getattr(issue, "issue_sha256", ""))
+    evidence = LifecycleEvidence.build(
+        identity=lifecycle.identity,
+        evidence_id=f"final-qa-issue:{getattr(issue, 'issue_id', '')}",
+        evidence_kind="final_qa_repair",
+        payload_sha256=issue_sha,
+    )
+    return lifecycle.advance("repair_pending", evidence=evidence)
+
+
+def mark_owner_final_verified(lifecycle: OwnerLifecycle, verdict) -> OwnerLifecycle:
+    """Close one rendered owner only with its final replacement verdict."""
+
+    if lifecycle.state != "rendered":
+        raise CoverageInvariantError("only a rendered owner can become final_verified")
+    verdict_identity = (
+        str(getattr(verdict, "run_id", "")),
+        str(getattr(verdict, "execution_id", "")),
+        str(getattr(verdict, "page_id", "")),
+        str(getattr(verdict, "page_source_sha256", "")),
+        str(getattr(verdict, "owner_id", "")),
+    )
+    expected = (
+        lifecycle.identity.run_id,
+        lifecycle.identity.origin_execution_id,
+        lifecycle.identity.page_id,
+        lifecycle.identity.page_source_sha256,
+        lifecycle.identity.owner_id,
+    )
+    if (
+        verdict_identity != expected
+        or getattr(verdict, "status", None) != "final_verified"
+        or not bool(getattr(verdict, "source_support_removed", False))
+        or not bool(getattr(verdict, "target_materialized", False))
+    ):
+        raise CoverageInvariantError("final verdict does not close this owner")
+    evidence = LifecycleEvidence.build(
+        identity=lifecycle.identity,
+        evidence_id=f"final-verdict:{getattr(verdict, 'verdict_id', '')}",
+        evidence_kind="final_replacement_verdict",
+        payload_sha256=str(getattr(verdict, "verdict_sha256", "")),
+    )
+    return lifecycle.advance("final_verified", evidence=evidence)

@@ -18,11 +18,15 @@ from ownership.hash_contract import (
     sha256_text,
 )
 from ownership.model import (
+    FinalQAProbe,
+    FinalReplacementVerdict,
+    LanguageResidualIssue,
     TRANSLATION_ROUTE_ACTIONS,
     OwnerGraph,
     OwnerProjection,
     RepairAttempt,
 )
+from ownership.ocr_contract import OCRInvocationResult, OCRRequest
 from ownership.owner_builder import build_owner_page_graph_from_coverage
 from ownership.translation import (
     OwnerPageTranslationResult,
@@ -233,6 +237,12 @@ class PageExecutionResult:
     page_composition: Any | None = None
     repair_history: tuple[RepairAttempt, ...] = ()
     repair_budget_policy_sha256: str | None = None
+    final_qa_ocr_requests: tuple[Any, ...] = ()
+    final_qa_ocr_invocations: tuple[Any, ...] = ()
+    language_residual_issues: tuple[Any, ...] = ()
+    qa_probes: tuple[Any, ...] = ()
+    final_replacement_verdicts: tuple[Any, ...] = ()
+    replacement_verification_policy_sha256: str | None = None
 
     @property
     def page_id(self) -> str:
@@ -241,6 +251,39 @@ class PageExecutionResult:
     @property
     def lifecycle(self):
         return self.coverage.ledger
+
+    def promote_final(
+        self,
+        *,
+        final_page: Any,
+        terminal_proof: Any,
+        final_qa_ocr_requests: Sequence[Any],
+        final_qa_ocr_invocations: Sequence[Any],
+        language_residual_issues: Sequence[Any],
+        qa_probes: Sequence[Any],
+        final_replacement_verdicts: Sequence[Any],
+        replacement_verification_policy_sha256: str,
+    ) -> "PageExecutionResult":
+        """Return a new terminal result; the candidate instance remains unchanged."""
+
+        if self.status not in {"candidate_ready", "repair_pending"}:
+            raise PagePipelineStateError("only a candidate page can be promoted")
+        return PageExecutionResult.build_from(
+            self,
+            status="final_verified",
+            final_page=final_page,
+            terminal_proof=terminal_proof,
+            final_qa_ocr_requests=tuple(final_qa_ocr_requests),
+            final_qa_ocr_invocations=tuple(final_qa_ocr_invocations),
+            language_residual_issues=tuple(language_residual_issues),
+            qa_probes=tuple(qa_probes),
+            final_replacement_verdicts=tuple(final_replacement_verdicts),
+            replacement_verification_policy_sha256=replacement_verification_policy_sha256,
+            repair_budget_policy_sha256=(
+                self.repair_budget_policy_sha256
+                or getattr(terminal_proof, "repair_budget_policy_sha256", None)
+            ),
+        )
 
     @property
     def page_content_semantic_sha256(self) -> str:
@@ -276,6 +319,8 @@ class PageExecutionResult:
             proof_payload = to_dict()
         original_ref = getattr(self.request.original_page, "artifact_ref", None)
         original_ref_to_dict = getattr(original_ref, "to_dict", None)
+        from ownership.coverage import _invocation_json, _request_json
+
         return {
             "schema_version": 1,
             "run_id": self.request.run_id,
@@ -334,12 +379,20 @@ class PageExecutionResult:
             ),
             "project_asset_refs": [],
             "visual_stage_artifacts": None,
-            "final_qa_ocr_requests": [],
-            "final_qa_ocr_invocations": [],
-            "language_residual_issues": [],
-            "qa_probes": [],
-            "final_replacement_verdicts": [],
-            "replacement_verification_policy_sha256": None,
+            "final_qa_ocr_requests": [
+                _request_json(item) for item in self.final_qa_ocr_requests
+            ],
+            "final_qa_ocr_invocations": [
+                _invocation_json(item) for item in self.final_qa_ocr_invocations
+            ],
+            "language_residual_issues": [
+                item.to_dict() for item in self.language_residual_issues
+            ],
+            "qa_probes": [item.to_dict() for item in self.qa_probes],
+            "final_replacement_verdicts": [
+                item.to_dict() for item in self.final_replacement_verdicts
+            ],
+            "replacement_verification_policy_sha256": self.replacement_verification_policy_sha256,
             "final_page": final_page_payload,
             "terminal_proof": proof_payload,
         }
@@ -362,6 +415,7 @@ class PageExecutionResult:
             PersistedRGBImageArtifactRef,
             TerminalPixelProof,
         )
+        from ownership.coverage import _invocation_from_json
         from ownership.model import OwnerRepairRequest, OwnerTargetMaterialization
 
         if payload.get("schema_version") != 1:
@@ -445,6 +499,24 @@ class PageExecutionResult:
             PageCompositionSnapshot.from_dict(composition_payload)
             if isinstance(composition_payload, dict) else None
         )
+        final_qa_requests = tuple(
+            OCRRequest(**item) for item in payload.get("final_qa_ocr_requests") or ()
+        )
+        final_qa_invocations = tuple(
+            _invocation_from_json(item)
+            for item in payload.get("final_qa_ocr_invocations") or ()
+        )
+        language_issues = tuple(
+            LanguageResidualIssue.from_dict(item)
+            for item in payload.get("language_residual_issues") or ()
+        )
+        qa_probes = tuple(
+            FinalQAProbe.from_dict(item) for item in payload.get("qa_probes") or ()
+        )
+        final_verdicts = tuple(
+            FinalReplacementVerdict.from_dict(item)
+            for item in payload.get("final_replacement_verdicts") or ()
+        )
         result = cls.build(
             request=request,
             coverage=coverage,
@@ -461,6 +533,14 @@ class PageExecutionResult:
             status=str(payload.get("status") or ""),
             final_page=final_page,
             terminal_proof=terminal_proof,
+            final_qa_ocr_requests=final_qa_requests,
+            final_qa_ocr_invocations=final_qa_invocations,
+            language_residual_issues=language_issues,
+            qa_probes=qa_probes,
+            final_replacement_verdicts=final_verdicts,
+            replacement_verification_policy_sha256=payload.get(
+                "replacement_verification_policy_sha256"
+            ),
         )
         if result.to_canonical_dict() != payload:
             raise PagePipelineIdentityError("page execution evidence did not round-trip canonically")
@@ -485,6 +565,12 @@ class PageExecutionResult:
         status: str = "candidate_ready",
         final_page: Any | None = None,
         terminal_proof: Any | None = None,
+        final_qa_ocr_requests: Sequence[Any] = (),
+        final_qa_ocr_invocations: Sequence[Any] = (),
+        language_residual_issues: Sequence[Any] = (),
+        qa_probes: Sequence[Any] = (),
+        final_replacement_verdicts: Sequence[Any] = (),
+        replacement_verification_policy_sha256: str | None = None,
     ) -> "PageExecutionResult":
         expected_content = (
             request.run_id,
@@ -580,6 +666,154 @@ class PageExecutionResult:
                 if attempt.issue_id != request_record.issue_id:
                     raise PagePipelineIdentityError("repair attempt issue identity mismatch")
                 consumed.add(attempt.request_id)
+        qa_requests = tuple(final_qa_ocr_requests)
+        qa_invocations = tuple(final_qa_ocr_invocations)
+        language_issues = tuple(language_residual_issues)
+        probes = tuple(qa_probes)
+        verdicts = tuple(final_replacement_verdicts)
+        request_by_invocation: dict[str, OCRRequest] = {}
+        for qa_request in qa_requests:
+            if not isinstance(qa_request, OCRRequest):
+                raise PagePipelineIdentityError("final QA request has invalid type")
+            if (
+                qa_request.run_id,
+                qa_request.origin_execution_id,
+                qa_request.page_id,
+                qa_request.page_source_sha256,
+            ) != expected_content:
+                raise PagePipelineIdentityError("final QA request crossed page execution")
+            if qa_request.invocation_id in request_by_invocation:
+                raise PagePipelineIdentityError("final QA request invocation is duplicated")
+            request_by_invocation[qa_request.invocation_id] = qa_request
+        invocation_by_id: dict[str, OCRInvocationResult] = {}
+        for invocation in qa_invocations:
+            if not isinstance(invocation, OCRInvocationResult):
+                raise PagePipelineIdentityError("final QA invocation has invalid type")
+            invocation_id = invocation.request.invocation_id
+            if invocation_id in invocation_by_id:
+                raise PagePipelineIdentityError("final QA invocation is duplicated")
+            if request_by_invocation.get(invocation_id) != invocation.request:
+                raise PagePipelineIdentityError("final QA invocation has no matching request")
+            invocation_by_id[invocation_id] = invocation
+        if set(request_by_invocation) != set(invocation_by_id):
+            raise PagePipelineIdentityError("final QA request/invocation journal is incomplete")
+
+        issue_by_id = {}
+        binding_by_hash = {
+            item.translation_binding_sha256: item for item in bindings
+        }
+        for issue in language_issues:
+            try:
+                LanguageResidualIssue.from_dict(issue.to_dict())
+            except (TypeError, ValueError) as exc:
+                raise PagePipelineIdentityError("final language issue is invalid") from exc
+            if (
+                issue.run_id,
+                issue.execution_id,
+                issue.page_id,
+                issue.page_source_sha256,
+            ) != expected_content:
+                raise PagePipelineIdentityError("final language issue crossed page execution")
+            if issue.issue_id in issue_by_id:
+                raise PagePipelineIdentityError("final language issue is duplicated")
+            if any(value not in invocation_by_id for value in issue.invocation_ids):
+                raise PagePipelineIdentityError("final language issue has an orphan invocation")
+            for invocation_id in issue.invocation_ids:
+                if (
+                    invocation_by_id[invocation_id].root_input_pixel_sha256
+                    != issue.page_output_pixel_sha256
+                ):
+                    raise PagePipelineIdentityError("final language issue crossed candidate pixels")
+            if issue.source_binding_sha256 is not None:
+                binding = binding_by_hash.get(issue.source_binding_sha256)
+                if binding is None or binding.owner_id != issue.owner_id:
+                    raise PagePipelineIdentityError("final language issue has a stale binding")
+            issue_by_id[issue.issue_id] = issue
+
+        probe_invocation_ids: set[str] = set()
+        for probe in probes:
+            try:
+                FinalQAProbe.from_dict(probe.to_dict())
+            except (TypeError, ValueError) as exc:
+                raise PagePipelineIdentityError("final QA probe is invalid") from exc
+            if (
+                probe.run_id,
+                probe.execution_id,
+                probe.page_id,
+                probe.page_source_sha256,
+            ) != expected_content:
+                raise PagePipelineIdentityError("final QA probe crossed page execution")
+            if probe.ocr_invocation_id in probe_invocation_ids:
+                raise PagePipelineIdentityError("final QA invocation has multiple probes")
+            invocation = invocation_by_id.get(probe.ocr_invocation_id)
+            if invocation is None:
+                raise PagePipelineIdentityError("final QA probe has an orphan invocation")
+            if (
+                probe.root_input_pixel_sha256 != invocation.root_input_pixel_sha256
+                or probe.candidate_pixel_sha256 != invocation.root_input_pixel_sha256
+                or probe.fresh_ocr_attempt_ids
+                != tuple(item.attempt_id for item in invocation.attempts)
+                or probe.fresh_ocr_attempt_chain_sha256
+                != invocation.attempt_chain_sha256
+            ):
+                raise PagePipelineIdentityError("final QA probe physical chain mismatch")
+            if any(issue_id not in issue_by_id for issue_id in probe.issue_ids):
+                raise PagePipelineIdentityError("final QA probe references an unknown issue")
+            probe_invocation_ids.add(probe.ocr_invocation_id)
+        if probes and probe_invocation_ids != set(invocation_by_id):
+            raise PagePipelineIdentityError("final QA journal lacks one probe per invocation")
+        if qa_invocations and not probes:
+            raise PagePipelineIdentityError("final QA invocations require persisted probes")
+        for repair in repairs:
+            if repair.issue_id is not None and repair.issue_id not in issue_by_id:
+                raise PagePipelineIdentityError("QA repair request has an orphan issue")
+
+        verdict_by_owner = {}
+        materialization_by_owner = {item.owner_id: item for item in materializations}
+        binding_by_owner = {item.owner_id: item for item in bindings}
+        for verdict in verdicts:
+            try:
+                FinalReplacementVerdict.from_dict(verdict.to_dict())
+            except (TypeError, ValueError) as exc:
+                raise PagePipelineIdentityError("final replacement verdict is invalid") from exc
+            if (
+                verdict.run_id,
+                verdict.execution_id,
+                verdict.page_id,
+                verdict.page_source_sha256,
+            ) != expected_content:
+                raise PagePipelineIdentityError("replacement verdict crossed page execution")
+            binding = binding_by_owner.get(verdict.owner_id)
+            materialization = materialization_by_owner.get(verdict.owner_id)
+            if verdict.owner_id in verdict_by_owner:
+                raise PagePipelineIdentityError("replacement verdict owner is duplicated")
+            if (
+                binding is None
+                or materialization is None
+                or verdict.translation_binding_sha256
+                != binding.translation_binding_sha256
+                or verdict.source_payload_sha256 != binding.source_payload_sha256
+                or verdict.target_payload_sha256 != binding.target_payload_sha256
+                or verdict.target_glyph_patch_sha256
+                != materialization.target_glyph_patch_sha256
+                or verdict.target_materialization_sha256
+                != materialization.materialization_sha256
+            ):
+                raise PagePipelineIdentityError("replacement verdict hash chain mismatch")
+            if (
+                replacement_verification_policy_sha256 is None
+                or verdict.replacement_verification_policy_sha256
+                != replacement_verification_policy_sha256
+            ):
+                raise PagePipelineIdentityError("replacement verification policy mismatch")
+            verdict_by_owner[verdict.owner_id] = verdict
+        if replacement_verification_policy_sha256 is not None and (
+            not isinstance(replacement_verification_policy_sha256, str)
+            or len(replacement_verification_policy_sha256) != 64
+        ):
+            raise PagePipelineIdentityError(
+                "replacement verification policy hash is invalid"
+            )
         bound_commits = tuple(
             item for item in commits
             if bool(getattr(item, "translation_binding_sha256", ""))
@@ -671,6 +905,21 @@ class PageExecutionResult:
         if status == "final_verified" and (final_page is None or terminal_proof is None):
             raise PagePipelineStateError("final result requires both final page and terminal proof")
         if status == "final_verified":
+            strict_terminal_journal = bool(
+                qa_requests
+                or qa_invocations
+                or language_issues
+                or probes
+                or verdicts
+                or replacement_verification_policy_sha256
+            )
+            if strict_terminal_journal:
+                if set(verdict_by_owner) != set(binding_by_owner):
+                    raise PagePipelineStateError(
+                        "final result requires exactly one replacement verdict per binding"
+                    )
+                if not probes:
+                    raise PagePipelineStateError("final result requires a fresh final QA probe")
             proof_identity = (
                 getattr(terminal_proof, "run_id", None),
                 getattr(terminal_proof, "execution_id", None),
@@ -690,13 +939,16 @@ class PageExecutionResult:
             ):
                 raise PagePipelineIdentityError("terminal proof is not linked to final pixels")
             if tuple(getattr(terminal_proof, "translation_binding_sha256s", ())) != tuple(
-                item.translation_binding_sha256 for item in bindings
+                item.translation_binding_sha256
+                for item in sorted(bindings, key=lambda item: item.owner_id)
             ):
                 raise PagePipelineIdentityError("terminal proof translation binding chain mismatch")
             if tuple(getattr(terminal_proof, "source_payload_sha256s", ())) != tuple(
-                item.source_payload_sha256 for item in bindings
+                item.source_payload_sha256
+                for item in sorted(bindings, key=lambda item: item.owner_id)
             ) or tuple(getattr(terminal_proof, "target_payload_sha256s", ())) != tuple(
-                item.target_payload_sha256 for item in bindings
+                item.target_payload_sha256
+                for item in sorted(bindings, key=lambda item: item.owner_id)
             ):
                 raise PagePipelineIdentityError("terminal proof payload chain mismatch")
             if repair_budget_policy_sha256 is not None and (
@@ -706,6 +958,70 @@ class PageExecutionResult:
                 from ownership.repair import RepairPolicyIdentityError
 
                 raise RepairPolicyIdentityError("terminal proof repair policy hash mismatch")
+            if strict_terminal_journal:
+                terminal_probes = [
+                    item
+                    for item in probes
+                    if item.probe_id == terminal_proof.final_qa_probe_id
+                ]
+                if len(terminal_probes) != 1:
+                    raise PagePipelineIdentityError(
+                        "terminal proof does not resolve one final QA probe"
+                    )
+                terminal_probe = terminal_probes[0]
+                terminal_invocation = invocation_by_id.get(
+                    terminal_proof.fresh_ocr_invocation_id
+                )
+                if (
+                    terminal_invocation is None
+                    or terminal_probe.ocr_invocation_id
+                    != terminal_proof.fresh_ocr_invocation_id
+                    or terminal_probe.root_input_pixel_sha256
+                    != terminal_proof.fresh_ocr_root_input_pixel_sha256
+                    or terminal_probe.fresh_ocr_attempt_ids
+                    != terminal_proof.fresh_ocr_attempt_ids
+                    or terminal_probe.fresh_ocr_attempt_chain_sha256
+                    != terminal_proof.fresh_ocr_attempt_chain_sha256
+                    or terminal_probe.ocr_payload_sha256
+                    != terminal_proof.fresh_ocr_payload_sha256
+                ):
+                    raise PagePipelineIdentityError(
+                        "terminal proof fresh OCR chain is inconsistent"
+                    )
+                terminal_issue_ids = set(terminal_probe.issue_ids)
+                if any(
+                    issue_by_id[issue_id].repair_required
+                    for issue_id in terminal_issue_ids
+                ):
+                    raise PagePipelineStateError(
+                        "terminal probe still contains a repair-required issue"
+                    )
+                ordered_materializations = tuple(
+                    sorted(materializations, key=lambda item: item.owner_id)
+                )
+                ordered_verdicts = tuple(
+                    sorted(verdicts, key=lambda item: item.owner_id)
+                )
+                if (
+                    terminal_proof.target_glyph_patch_sha256s
+                    != tuple(
+                        item.target_glyph_patch_sha256
+                        for item in ordered_materializations
+                    )
+                    or terminal_proof.target_materialization_sha256s
+                    != tuple(
+                        item.materialization_sha256 for item in ordered_materializations
+                    )
+                    or terminal_proof.final_replacement_verdict_sha256s
+                    != tuple(item.verdict_sha256 for item in ordered_verdicts)
+                    or terminal_proof.replacement_verification_policy_sha256
+                    != replacement_verification_policy_sha256
+                    or page_composition is None
+                    or terminal_proof.composition_sha256 != page_composition.sha256
+                ):
+                    raise PagePipelineIdentityError(
+                        "terminal proof replacement or composition chain mismatch"
+                    )
             if not all(
                 bool(getattr(terminal_proof, key, False))
                 for key in (
@@ -734,6 +1050,23 @@ class PageExecutionResult:
             "text_layers_sha256": getattr(text_layers_view, "sha256", None),
             "page_composition_sha256": getattr(page_composition, "sha256", None),
             "status": status,
+            "final_qa_request_sha256s": [
+                sha256_bytes(canonical_json_bytes(vars(item))) for item in qa_requests
+            ],
+            "final_qa_attempt_chain_sha256s": [
+                item.attempt_chain_sha256 for item in qa_invocations
+            ],
+            "language_issue_sha256s": [item.issue_sha256 for item in language_issues],
+            "qa_probe_sha256s": [item.probe_sha256 for item in probes],
+            "final_replacement_verdict_sha256s": [
+                item.verdict_sha256 for item in verdicts
+            ],
+            "replacement_verification_policy_sha256": replacement_verification_policy_sha256,
+            "final_page_pixel_sha256": getattr(
+                final_page, "page_output_pixel_sha256", None
+            ),
+            "final_page_file_sha256": getattr(final_page, "final_file_sha256", None),
+            "terminal_proof_sha256": getattr(terminal_proof, "proof_sha256", None),
         }
         return cls(
             request=request,
@@ -752,6 +1085,12 @@ class PageExecutionResult:
             owner_target_materializations=materializations,
             text_layers_view=text_layers_view,
             page_composition=page_composition,
+            final_qa_ocr_requests=tuple(final_qa_ocr_requests),
+            final_qa_ocr_invocations=tuple(final_qa_ocr_invocations),
+            language_residual_issues=tuple(language_residual_issues),
+            qa_probes=tuple(qa_probes),
+            final_replacement_verdicts=tuple(final_replacement_verdicts),
+            replacement_verification_policy_sha256=replacement_verification_policy_sha256,
         )
 
     @classmethod
@@ -772,6 +1111,12 @@ class PageExecutionResult:
             "status": result.status,
             "final_page": result.final_page,
             "terminal_proof": result.terminal_proof,
+            "final_qa_ocr_requests": result.final_qa_ocr_requests,
+            "final_qa_ocr_invocations": result.final_qa_ocr_invocations,
+            "language_residual_issues": result.language_residual_issues,
+            "qa_probes": result.qa_probes,
+            "final_replacement_verdicts": result.final_replacement_verdicts,
+            "replacement_verification_policy_sha256": result.replacement_verification_policy_sha256,
         }
         values.update(overrides)
         return cls.build(**values)

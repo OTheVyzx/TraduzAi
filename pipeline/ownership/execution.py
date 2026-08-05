@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
 import mimetypes
+import os
 from pathlib import Path, PurePosixPath
 import re
 import unicodedata
@@ -19,6 +20,7 @@ from .hash_contract import (
     canonical_page_sha256,
     sha256_bytes,
     sha256_file,
+    sha256_text,
 )
 
 
@@ -38,6 +40,26 @@ class PageNotTerminalError(ValueError):
 
 class AtomicReplacementError(ValueError):
     """Raised before a cleanup/target pair can create an owner commit."""
+
+
+class TerminalVerificationIdentityError(PageArtifactIntegrityError):
+    """Raised when terminal evidence does not belong to persisted candidate pixels."""
+
+
+class TerminalVerificationInfrastructureError(RuntimeError):
+    """Raised when a fresh physical terminal OCR attempt is unavailable."""
+
+
+class SourceResidualStillMaterialError(ValueError):
+    """Raised when source-language support remains materially visible."""
+
+
+class TargetMaterializationError(ValueError):
+    """Raised when the translated glyph patch is not materially present."""
+
+
+class PageCandidateRecoveryError(PageArtifactIntegrityError):
+    """Raised before recovery can touch an untrusted page transaction path."""
 
 
 def canonical_glyph_patch_sha256(glyph_patch: Any) -> str:
@@ -653,6 +675,227 @@ class TerminalPixelProof:
         proof_hash = canonical_json_sha256(_json_tuple_lists(payload))
         return cls(**payload, proof_sha256=proof_hash)
 
+    @classmethod
+    def build_from_persisted_candidate(
+        cls,
+        candidate: "FinalPageSnapshot",
+        fresh_ocr: Any,
+        *,
+        final_qa_probe: Any,
+        generation_root: str | Path,
+        cleanup_base_sha256: str,
+        composition_sha256: str,
+        bindings=(),
+        materializations=(),
+        verdicts=(),
+        repair_budget_policy_sha256: str,
+        replacement_verification_policy_sha256: str,
+        source_support_removed: bool,
+        target_glyph_patch_applied: bool,
+        fresh_source_ocr_absent: bool,
+        coverage_complete: bool,
+        unowned_material_text_absent: bool,
+    ) -> "TerminalPixelProof":
+        from .model import FinalQAProbe, FinalReplacementVerdict, OwnerTargetMaterialization
+        from .ocr_contract import OCRInvocationResult
+
+        if not isinstance(candidate, FinalPageSnapshot):
+            raise TypeError("terminal proof requires a persisted FinalPageSnapshot")
+        if not isinstance(fresh_ocr, OCRInvocationResult):
+            raise TypeError("terminal proof requires one request-scoped OCR invocation")
+        try:
+            FinalQAProbe.from_dict(final_qa_probe.to_dict())
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise TerminalVerificationIdentityError("final QA probe is invalid") from exc
+        persisted_pixels = candidate.artifact_ref.load_verified(generation_root)
+        snapshot_pixels = candidate.read_only_rgb()
+        if not np.array_equal(persisted_pixels, snapshot_pixels):
+            raise TerminalVerificationIdentityError("candidate snapshot differs from persisted pixels")
+        candidate_pixel_sha = canonical_page_sha256(persisted_pixels)
+        if (
+            candidate_pixel_sha != candidate.page_output_pixel_sha256
+            or candidate_pixel_sha != candidate.artifact_ref.pixel_sha256
+            or sha256_bytes(candidate.lossless_png_bytes) != candidate.final_file_sha256
+        ):
+            raise TerminalVerificationIdentityError("persisted candidate identity is stale")
+
+        request = fresh_ocr.request
+        ref = candidate.artifact_ref
+        expected_identity = (ref.run_id, ref.execution_id, ref.page_id)
+        if (request.run_id, request.origin_execution_id, request.page_id) != expected_identity:
+            raise TerminalVerificationIdentityError("fresh OCR crossed candidate execution")
+        if request.root_input_pixel_sha256 != candidate_pixel_sha:
+            raise TerminalVerificationIdentityError("fresh OCR root differs from candidate pixels")
+        if (
+            final_qa_probe.run_id,
+            final_qa_probe.execution_id,
+            final_qa_probe.page_id,
+            final_qa_probe.page_source_sha256,
+        ) != (
+            request.run_id,
+            request.origin_execution_id,
+            request.page_id,
+            request.page_source_sha256,
+        ):
+            raise TerminalVerificationIdentityError("final QA probe crossed OCR identity")
+        if (
+            final_qa_probe.input_origin != "redecoded_persisted_candidate"
+            or final_qa_probe.candidate_file_sha256 != candidate.final_file_sha256
+            or final_qa_probe.candidate_pixel_sha256 != candidate_pixel_sha
+            or final_qa_probe.root_input_pixel_sha256 != candidate_pixel_sha
+            or final_qa_probe.ocr_invocation_id != request.invocation_id
+            or final_qa_probe.fresh_ocr_attempt_ids
+            != tuple(item.attempt_id for item in fresh_ocr.attempts)
+            or final_qa_probe.fresh_ocr_attempt_chain_sha256
+            != fresh_ocr.attempt_chain_sha256
+        ):
+            raise TerminalVerificationIdentityError("final QA probe physical chain mismatch")
+        if not final_qa_probe.observer_available or not final_qa_probe.coverage_complete:
+            raise TerminalVerificationInfrastructureError(
+                "terminal observer is unavailable or coverage is incomplete"
+            )
+
+        has_full_page = False
+        for attempt in fresh_ocr.attempts:
+            if not attempt.provider_called or attempt.cache_hit:
+                raise TerminalVerificationInfrastructureError(
+                    "terminal OCR attempt is not a fresh physical provider call"
+                )
+            if attempt.root_input_pixel_sha256 != candidate_pixel_sha:
+                raise TerminalVerificationIdentityError("OCR attempt crossed candidate root")
+            if attempt.parent_input_pixel_sha256 != candidate_pixel_sha:
+                raise TerminalVerificationIdentityError("OCR attempt parent hash is stale")
+            try:
+                physical_input = attempt.transform_spec.replay(persisted_pixels)
+            except (TypeError, ValueError) as exc:
+                raise TerminalVerificationIdentityError("OCR transform cannot be replayed") from exc
+            if (
+                canonical_page_sha256(physical_input) != attempt.input_pixel_sha256
+                or physical_input.shape
+                != (attempt.input_height, attempt.input_width, 3)
+                or attempt.input_mode != "RGB"
+            ):
+                raise TerminalVerificationIdentityError(
+                    "OCR attempt hash or geometry differs from replayed pixels"
+                )
+            if attempt.variant_id == "full_page" and (
+                attempt.input_bbox_page is None
+                and attempt.input_pixel_sha256 == candidate_pixel_sha
+            ):
+                has_full_page = True
+        if not has_full_page:
+            raise TerminalVerificationInfrastructureError(
+                "terminal OCR lacks an uncached physical full-page attempt"
+            )
+
+        ocr_text = "\n".join(
+            record.text for record in (*fresh_ocr.observations, *fresh_ocr.full_page_lines)
+        )
+        ocr_payload_sha = sha256_text(ocr_text)
+        if final_qa_probe.ocr_payload_sha256 != ocr_payload_sha:
+            raise TerminalVerificationIdentityError("final QA OCR payload hash mismatch")
+
+        ordered_bindings = tuple(sorted(bindings, key=lambda item: item.owner_id))
+        ordered_materializations = tuple(
+            sorted(materializations, key=lambda item: item.owner_id)
+        )
+        ordered_verdicts = tuple(sorted(verdicts, key=lambda item: item.owner_id))
+        for materialization in ordered_materializations:
+            OwnerTargetMaterialization.from_dict(materialization.to_dict())
+        for verdict in ordered_verdicts:
+            FinalReplacementVerdict.from_dict(verdict.to_dict())
+        if not (
+            len(ordered_bindings)
+            == len(ordered_materializations)
+            == len(ordered_verdicts)
+        ):
+            raise TargetMaterializationError(
+                "terminal binding, materialization and verdict cardinality differs"
+            )
+        for binding, materialization, verdict in zip(
+            ordered_bindings,
+            ordered_materializations,
+            ordered_verdicts,
+            strict=True,
+        ):
+            if not (
+                binding.owner_id == materialization.owner_id == verdict.owner_id
+                and binding.translation_binding_sha256
+                == materialization.translation_binding_sha256
+                == verdict.translation_binding_sha256
+                and binding.source_payload_sha256
+                == materialization.source_payload_sha256
+                == verdict.source_payload_sha256
+                and binding.target_payload_sha256
+                == materialization.target_payload_sha256
+                == verdict.target_payload_sha256
+                and materialization.target_glyph_patch_sha256
+                == verdict.target_glyph_patch_sha256
+                and materialization.materialization_sha256
+                == verdict.target_materialization_sha256
+                and verdict.replacement_verification_policy_sha256
+                == replacement_verification_policy_sha256
+                and verdict.status == "final_verified"
+            ):
+                raise TerminalVerificationIdentityError(
+                    "terminal replacement hash chain mismatch"
+                )
+            if not verdict.source_support_removed:
+                raise SourceResidualStillMaterialError(
+                    "source support remains material after cleanup"
+                )
+            if not verdict.target_materialized:
+                raise TargetMaterializationError("translated glyph patch is not material")
+
+        if not source_support_removed or not fresh_source_ocr_absent:
+            raise SourceResidualStillMaterialError("terminal source residual remains material")
+        if not target_glyph_patch_applied:
+            raise TargetMaterializationError("terminal target glyph patch is missing")
+        if not coverage_complete or not unowned_material_text_absent:
+            raise TerminalVerificationInfrastructureError(
+                "terminal coverage contains unresolved material text"
+            )
+        return cls.build(
+            run_id=request.run_id,
+            execution_id=request.origin_execution_id,
+            page_id=request.page_id,
+            page_source_sha256=request.page_source_sha256,
+            final_page_pixel_sha256=candidate_pixel_sha,
+            cleanup_base_sha256=cleanup_base_sha256,
+            composition_sha256=composition_sha256,
+            translation_binding_sha256s=tuple(
+                item.translation_binding_sha256 for item in ordered_bindings
+            ),
+            source_payload_sha256s=tuple(
+                item.source_payload_sha256 for item in ordered_bindings
+            ),
+            target_payload_sha256s=tuple(
+                item.target_payload_sha256 for item in ordered_bindings
+            ),
+            target_glyph_patch_sha256s=tuple(
+                item.target_glyph_patch_sha256 for item in ordered_materializations
+            ),
+            target_materialization_sha256s=tuple(
+                item.materialization_sha256 for item in ordered_materializations
+            ),
+            final_replacement_verdict_sha256s=tuple(
+                item.verdict_sha256 for item in ordered_verdicts
+            ),
+            repair_budget_policy_sha256=repair_budget_policy_sha256,
+            replacement_verification_policy_sha256=replacement_verification_policy_sha256,
+            final_qa_probe_id=final_qa_probe.probe_id,
+            fresh_ocr_invocation_id=request.invocation_id,
+            fresh_ocr_root_input_pixel_sha256=candidate_pixel_sha,
+            fresh_ocr_attempt_ids=tuple(item.attempt_id for item in fresh_ocr.attempts),
+            fresh_ocr_attempt_chain_sha256=fresh_ocr.attempt_chain_sha256,
+            fresh_ocr_payload_sha256=ocr_payload_sha,
+            source_support_removed=True,
+            target_glyph_patch_applied=True,
+            fresh_source_ocr_absent=True,
+            coverage_complete=True,
+            unowned_material_text_absent=True,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return _json_tuple_lists({key: getattr(self, key) for key in _terminal_proof_payload_fields()}) | {
             "proof_sha256": self.proof_sha256
@@ -664,6 +907,163 @@ class TerminalPixelProof:
         if rebuilt.proof_sha256 != payload.get("proof_sha256"):
             raise PageArtifactIntegrityError("terminal proof hash mismatch")
         return rebuilt
+
+
+def build_final_qa_probe(
+    candidate: FinalPageSnapshot,
+    fresh_ocr: Any,
+    *,
+    generation_root: str | Path,
+    issues=(),
+) -> Any:
+    """Build the persisted-candidate QA probe record from one OCR invocation."""
+
+    from .model import FinalQAProbe, LanguageResidualIssue
+    from .ocr_contract import OCRInvocationResult
+
+    if not isinstance(candidate, FinalPageSnapshot) or not isinstance(
+        fresh_ocr, OCRInvocationResult
+    ):
+        raise TypeError("final QA probe requires persisted pixels and OCR invocation")
+    pixels = candidate.artifact_ref.load_verified(generation_root)
+    pixel_sha = canonical_page_sha256(pixels)
+    if pixel_sha != candidate.page_output_pixel_sha256:
+        raise TerminalVerificationIdentityError("QA candidate pixels are stale")
+    if fresh_ocr.root_input_pixel_sha256 != pixel_sha:
+        raise TerminalVerificationIdentityError("QA invocation root differs from candidate")
+    normalized_issues = tuple(issues)
+    for issue in normalized_issues:
+        LanguageResidualIssue.from_dict(issue.to_dict())
+        if fresh_ocr.invocation_id not in issue.invocation_ids:
+            raise TerminalVerificationIdentityError(
+                "QA issue does not reference its physical invocation"
+            )
+    ocr_text = "\n".join(
+        record.text for record in (*fresh_ocr.observations, *fresh_ocr.full_page_lines)
+    )
+    probe_id = canonical_json_sha256(
+        {
+            "run_id": fresh_ocr.run_id,
+            "execution_id": fresh_ocr.origin_execution_id,
+            "page_id": fresh_ocr.page_id,
+            "candidate_pixel_sha256": pixel_sha,
+            "ocr_invocation_id": fresh_ocr.invocation_id,
+            "issue_ids": [item.issue_id for item in normalized_issues],
+        }
+    )
+    return FinalQAProbe.build(
+        probe_id=probe_id,
+        run_id=fresh_ocr.run_id,
+        execution_id=fresh_ocr.origin_execution_id,
+        page_id=fresh_ocr.page_id,
+        page_source_sha256=fresh_ocr.page_source_sha256,
+        input_origin="redecoded_persisted_candidate",
+        candidate_file_sha256=candidate.final_file_sha256,
+        candidate_pixel_sha256=pixel_sha,
+        root_input_pixel_sha256=fresh_ocr.root_input_pixel_sha256,
+        ocr_invocation_id=fresh_ocr.invocation_id,
+        fresh_ocr_attempt_ids=tuple(item.attempt_id for item in fresh_ocr.attempts),
+        fresh_ocr_attempt_chain_sha256=fresh_ocr.attempt_chain_sha256,
+        ocr_payload_sha256=sha256_text(ocr_text),
+        observer_available=True,
+        coverage_complete=True,
+        issue_ids=tuple(item.issue_id for item in normalized_issues),
+    )
+
+
+def _mask_contract_sha256(mask: Any) -> tuple[str, int]:
+    array = np.asarray(mask)
+    if array.ndim == 3:
+        array = array[:, :, 0]
+    if array.ndim != 2:
+        raise ValueError("replacement verification mask must be two-dimensional")
+    binary = np.ascontiguousarray(array > 0, dtype=np.uint8)
+    return (
+        canonical_json_sha256(
+            {
+                "shape": list(binary.shape),
+                "bytes_sha256": sha256_bytes(binary.tobytes()),
+            }
+        ),
+        int(np.count_nonzero(binary)),
+    )
+
+
+def build_final_replacement_verdict(
+    *,
+    binding: Any,
+    materialization: Any,
+    execution_id: str,
+    source_support_mask: Any,
+    post_cleanup_residual_mask: Any,
+    target_delta_mask: Any,
+    target_alpha_mask: Any,
+    target_contrast_score: float,
+    target_clipped_pixel_count: int,
+    target_within_safe_region: bool,
+    replacement_verification_policy_sha256: str,
+) -> Any:
+    """Build one fail-closed owner replacement verdict from material pixel evidence."""
+
+    from .model import FinalReplacementVerdict, OwnerTargetMaterialization
+
+    OwnerTargetMaterialization.from_dict(materialization.to_dict())
+    if not (
+        binding.owner_id == materialization.owner_id
+        and binding.translation_binding_sha256
+        == materialization.translation_binding_sha256
+    ):
+        raise TerminalVerificationIdentityError("verdict binding/materialization mismatch")
+    source_support_sha, source_support_count = _mask_contract_sha256(source_support_mask)
+    residual_sha, residual_count = _mask_contract_sha256(post_cleanup_residual_mask)
+    target_delta_sha, target_delta_count = _mask_contract_sha256(target_delta_mask)
+    _, target_alpha_count = _mask_contract_sha256(target_alpha_mask)
+    source_removed = source_support_count > 0 and residual_count == 0
+    target_materialized = (
+        target_delta_count > 0
+        and target_alpha_count > 0
+        and float(target_contrast_score) > 0.0
+        and int(target_clipped_pixel_count) == 0
+        and bool(target_within_safe_region)
+    )
+    if not source_removed:
+        raise SourceResidualStillMaterialError("source residual mask remains material")
+    if not target_materialized:
+        raise TargetMaterializationError("target glyph evidence is not material and contained")
+    verdict_id = canonical_json_sha256(
+        {
+            "translation_binding_sha256": binding.translation_binding_sha256,
+            "target_materialization_sha256": materialization.materialization_sha256,
+            "source_support_sha256": source_support_sha,
+            "target_delta_mask_sha256": target_delta_sha,
+            "replacement_verification_policy_sha256": replacement_verification_policy_sha256,
+        }
+    )
+    return FinalReplacementVerdict.build(
+        verdict_id=verdict_id,
+        run_id=binding.run_id,
+        execution_id=execution_id,
+        page_id=binding.page_id,
+        page_source_sha256=binding.page_source_sha256,
+        owner_id=binding.owner_id,
+        translation_binding_sha256=binding.translation_binding_sha256,
+        source_payload_sha256=binding.source_payload_sha256,
+        target_payload_sha256=binding.target_payload_sha256,
+        target_glyph_patch_sha256=materialization.target_glyph_patch_sha256,
+        target_materialization_sha256=materialization.materialization_sha256,
+        source_support_sha256=source_support_sha,
+        post_cleanup_residual_mask_sha256=residual_sha,
+        source_residual_material_pixel_count=residual_count,
+        target_delta_mask_sha256=target_delta_sha,
+        target_alpha_material_pixel_count=target_alpha_count,
+        target_contrast_score=float(target_contrast_score),
+        target_clipped_pixel_count=int(target_clipped_pixel_count),
+        target_within_safe_region=bool(target_within_safe_region),
+        source_support_removed=True,
+        target_materialized=True,
+        replacement_verification_policy_sha256=replacement_verification_policy_sha256,
+        status="final_verified",
+    )
 
 
 @dataclass(frozen=True)
@@ -898,6 +1298,62 @@ class PageCandidateTransaction:
             commit_ids=tuple(str(getattr(item, "commit_id", "")) for item in ordered),
         )
 
+    def persist_candidate(self, pixels: Any, *, attempt_id: str) -> FinalPageSnapshot:
+        marker = ArtifactGenerationMarker.read_verified(self.private_execution_root)
+        if (
+            marker.run_id,
+            marker.execution_id,
+            marker.artifact_store_id,
+            marker.generation_id,
+        ) != (
+            self.run_id,
+            self.execution_id,
+            self.artifact_store_id,
+            self.generation_id,
+        ):
+            raise PageArtifactIntegrityError(
+                "candidate transaction identity differs from generation marker"
+            )
+        safe_segment = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+        for label, value in (
+            ("execution_id", self.execution_id),
+            ("page_id", self.page_id),
+            ("attempt_id", str(attempt_id)),
+        ):
+            if not safe_segment.fullmatch(str(value or "")):
+                raise PageArtifactIntegrityError(f"candidate {label} is not path-safe")
+        rgb = np.asarray(pixels)
+        if rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise PageArtifactIntegrityError("candidate pixels must be HxWx3 uint8 RGB")
+        relative = (
+            f".staging/{self.execution_id}/{self.page_id}/{attempt_id}/candidate.png"
+        )
+        path = _resolve_asset(self.private_execution_root, relative, must_exist=False)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            raise PageArtifactIntegrityError("immutable candidate attempt already exists")
+        temporary = path.with_name("candidate.tmp.png")
+        if temporary.exists() or temporary.is_symlink():
+            raise PageArtifactIntegrityError("candidate temporary path is not clean")
+        with temporary.open("wb") as handle:
+            Image.fromarray(np.ascontiguousarray(rgb), "RGB").save(
+                handle,
+                format="PNG",
+                optimize=False,
+                compress_level=6,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+        ref = PersistedRGBImageArtifactRef.from_file(
+            self.private_execution_root,
+            relative,
+            marker=marker,
+            page_id=self.page_id,
+            origin_execution_id=self.execution_id,
+        )
+        return FinalPageSnapshot.from_artifact(ref, self.private_execution_root)
+
     def commit_verified_generation(self, result: Any) -> PageExecutionEvidenceRef:
         if getattr(result, "status", None) != "final_verified":
             raise PageNotTerminalError("only final_verified pages can be persisted as current")
@@ -910,19 +1366,81 @@ class PageCandidateTransaction:
             raise PageArtifactIntegrityError("page transaction received another page execution")
         result.request.original_page.artifact_ref.load_verified(self.private_execution_root)
         result.final_page.artifact_ref.load_verified(self.private_execution_root)
-        snapshot = PageExecutionEvidenceSnapshot.build(result)
-        generation_relative = (
-            f".page-generations/{self.page_id}/{self.page_generation_id}/page_execution_evidence.json"
+        safe_segment = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+        for label, value in (
+            ("page_id", self.page_id),
+            ("page_generation_id", self.page_generation_id),
+            ("transaction_id", self.transaction_id),
+        ):
+            if not safe_segment.fullmatch(str(value or "")):
+                raise PageArtifactIntegrityError(f"page transaction {label} is not path-safe")
+        generation_dir_relative = (
+            f".page-generations/{self.page_id}/{self.page_generation_id}"
         )
-        generation_path = _resolve_asset(
-            self.private_execution_root, generation_relative, must_exist=False
+        generation_dir = _resolve_asset(
+            self.private_execution_root, generation_dir_relative, must_exist=False
         )
-        generation_path.parent.mkdir(parents=True, exist_ok=True)
-        if generation_path.exists():
+        generation_dir.parent.mkdir(parents=True, exist_ok=True)
+        if generation_dir.exists():
             raise PageArtifactIntegrityError("immutable page generation already exists")
-        temporary = generation_path.with_name(f".{generation_path.name}.{self.transaction_id}.tmp")
-        temporary.write_bytes(snapshot.canonical_json_bytes)
-        temporary.replace(generation_path)
+        temporary_dir = generation_dir.with_name(
+            f".{self.page_generation_id}.{self.transaction_id}.tmp"
+        )
+        if temporary_dir.exists() or temporary_dir.is_symlink():
+            raise PageArtifactIntegrityError("page generation staging is not clean")
+        temporary_dir.mkdir()
+        final_relative = f"{generation_dir_relative}/final.png"
+        final_path = temporary_dir / "final.png"
+        final_bytes = bytes(result.final_page.lossless_png_bytes)
+        with final_path.open("wb") as handle:
+            handle.write(final_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        final_ref_payload = {
+            "run_id": marker.run_id,
+            "execution_id": marker.execution_id,
+            "origin_execution_id": result.request.origin_execution_id,
+            "source_artifact_ref_sha256": getattr(
+                result.final_page.artifact_ref, "artifact_ref_sha256", None
+            ),
+            "page_id": self.page_id,
+            "artifact_store_id": marker.artifact_store_id,
+            "generation_id": marker.generation_id,
+            "relative_path": final_relative,
+            "file_sha256": sha256_bytes(final_bytes),
+            "pixel_sha256": result.final_page.page_output_pixel_sha256,
+            "width": result.final_page.width,
+            "height": result.final_page.height,
+            "mode": "RGB",
+        }
+        final_ref = PersistedRGBImageArtifactRef(
+            **final_ref_payload,
+            artifact_ref_sha256=canonical_json_sha256(final_ref_payload),
+        )
+        rebound_final = FinalPageSnapshot(
+            lossless_png_bytes=final_bytes,
+            page_output_pixel_sha256=result.final_page.page_output_pixel_sha256,
+            final_file_sha256=sha256_bytes(final_bytes),
+            artifact_ref=final_ref,
+            width=result.final_page.width,
+            height=result.final_page.height,
+        )
+        from strip.page_pipeline import PageExecutionResult
+
+        rebound_result = PageExecutionResult.build_from(result, final_page=rebound_final)
+        snapshot = PageExecutionEvidenceSnapshot.build(rebound_result)
+        for name in ("execution_result.json", "page_execution_evidence.json"):
+            output = temporary_dir / name
+            with output.open("wb") as handle:
+                handle.write(snapshot.canonical_json_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+        temporary_dir.replace(generation_dir)
+        self._fault_checkpoint("after_generation_rename")
+        generation_relative = f"{generation_dir_relative}/page_execution_evidence.json"
+        generation_path = _resolve_asset(
+            self.private_execution_root, generation_relative, must_exist=True
+        )
         evidence_file_sha = sha256_file(generation_path)
         pointer_relative = f".page-current/{self.page_id}/current.json"
         pointer_path = _resolve_asset(self.private_execution_root, pointer_relative, must_exist=False)
@@ -941,13 +1459,20 @@ class PageCandidateTransaction:
             "page_execution_evidence_relative_path": generation_relative,
             "page_execution_evidence_file_sha256": evidence_file_sha,
             "page_execution_evidence_sha256": snapshot.sha256,
-            "page_result_sha256": result.result_sha256,
+            "page_result_sha256": rebound_result.result_sha256,
         }
         pointer_sha = canonical_json_sha256(pointer_payload)
         pointer_bytes = canonical_json_bytes(pointer_payload | {"pointer_sha256": pointer_sha})
         pointer_temporary = pointer_path.with_name(f".{pointer_path.name}.{self.transaction_id}.tmp")
-        pointer_temporary.write_bytes(pointer_bytes)
+        if pointer_temporary.exists() or pointer_temporary.is_symlink():
+            raise PageArtifactIntegrityError("page pointer staging is not clean")
+        with pointer_temporary.open("wb") as handle:
+            handle.write(pointer_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        self._fault_checkpoint("before_pointer_replace")
         pointer_temporary.replace(pointer_path)
+        self._fault_checkpoint("after_pointer_replace")
         return PageExecutionEvidenceRef.build(
             **pointer_payload,
             current_pointer_file_sha256=sha256_bytes(pointer_bytes),
@@ -959,6 +1484,100 @@ class PageCandidateTransaction:
 
     def _fault_checkpoint(self, phase: str) -> None:
         del phase
+
+
+def _reject_reparse_path(path: Path, root: Path) -> None:
+    current = root
+    for part in path.relative_to(root).parts:
+        current = current / part
+        if not current.exists():
+            break
+        is_junction = getattr(current, "is_junction", lambda: False)
+        if current.is_symlink() or is_junction():
+            raise PageCandidateRecoveryError("page recovery path contains a reparse point")
+
+
+def recover_page_candidate_transaction(
+    private_execution_root: str | Path,
+    *,
+    page_id: str,
+) -> PageExecutionEvidenceRef | None:
+    """Reopen the one authoritative pointer without trusting journal paths."""
+
+    try:
+        root = Path(private_execution_root).resolve(strict=True)
+        marker = ArtifactGenerationMarker.read_verified(root)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", str(page_id or "")):
+            raise PageCandidateRecoveryError("page recovery identity is not path-safe")
+        pointer_relative = f".page-current/{page_id}/current.json"
+        pointer_path = _resolve_asset(root, pointer_relative, must_exist=False)
+        _reject_reparse_path(pointer_path, root)
+        if not pointer_path.exists():
+            return None
+        raw_pointer = pointer_path.read_bytes()
+        pointer = json.loads(raw_pointer.decode("utf-8"))
+        expected_fields = {*_page_pointer_fields(), "pointer_sha256"}
+        if not isinstance(pointer, dict) or set(pointer) != expected_fields:
+            raise PageCandidateRecoveryError("page current pointer schema is invalid")
+        supplied_hash = str(pointer.pop("pointer_sha256") or "")
+        if canonical_json_sha256(pointer) != supplied_hash:
+            raise PageCandidateRecoveryError("page current pointer hash is invalid")
+        if (
+            pointer.get("run_id") != marker.run_id
+            or pointer.get("execution_id") != marker.execution_id
+            or pointer.get("artifact_store_id") != marker.artifact_store_id
+            or pointer.get("generation_id") != marker.generation_id
+            or pointer.get("page_id") != page_id
+            or pointer.get("current_pointer_relative_path") != pointer_relative
+        ):
+            raise PageCandidateRecoveryError("page current pointer identity is stale")
+        generation_id = str(pointer.get("page_generation_id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", generation_id):
+            raise PageCandidateRecoveryError("page generation identity is not path-safe")
+        expected_evidence = (
+            f".page-generations/{page_id}/{generation_id}/page_execution_evidence.json"
+        )
+        if pointer.get("page_execution_evidence_relative_path") != expected_evidence:
+            raise PageCandidateRecoveryError("page evidence path is not canonical")
+        evidence_path = _resolve_asset(root, expected_evidence, must_exist=True)
+        _reject_reparse_path(evidence_path, root)
+        ref = PageExecutionEvidenceRef.build(
+            **pointer,
+            current_pointer_file_sha256=sha256_bytes(raw_pointer),
+            pointer_sha256=supplied_hash,
+        )
+        ref.read_verified(root)
+        return ref
+    except PageCandidateRecoveryError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise PageCandidateRecoveryError("page candidate recovery journal is untrusted") from exc
+
+
+def recover_owner_staging(
+    private_execution_root: str | Path,
+    *,
+    run_id: str,
+    execution_id: str,
+) -> tuple[str, ...]:
+    """Remove only orphan temporary candidate files for the exact active execution."""
+
+    root = Path(private_execution_root).resolve(strict=True)
+    marker = ArtifactGenerationMarker.read_verified(root)
+    if marker.run_id != run_id or marker.execution_id != execution_id:
+        raise PageCandidateRecoveryError("staging recovery crossed run execution identity")
+    staging = _resolve_asset(root, f".staging/{execution_id}", must_exist=False)
+    _reject_reparse_path(staging, root)
+    if not staging.exists():
+        return ()
+    removed = []
+    for temporary in staging.rglob("candidate.tmp.png"):
+        _reject_reparse_path(temporary, root)
+        if not temporary.is_file() or temporary.is_symlink():
+            raise PageCandidateRecoveryError("candidate temporary entry is not a regular file")
+        temporary.unlink()
+        removed.append(temporary.relative_to(root).as_posix())
+    return tuple(sorted(removed))
 
 
 def _require_hash(value: str, field: str) -> str:
@@ -1363,6 +1982,7 @@ __all__ = [
     "FrozenJSONSnapshot",
     "PageArtifactIntegrityError",
     "PageCandidateTransaction",
+    "PageCandidateRecoveryError",
     "PageCompositionCandidate",
     "PageCompositionSnapshot",
     "PageExecutionEvidenceRef",
@@ -1375,9 +1995,17 @@ __all__ = [
     "OwnerReplacementTransaction",
     "PersistedAssetRef",
     "PersistedRGBImageArtifactRef",
+    "SourceResidualStillMaterialError",
+    "TargetMaterializationError",
     "TerminalPixelProof",
+    "TerminalVerificationIdentityError",
+    "TerminalVerificationInfrastructureError",
+    "build_final_qa_probe",
+    "build_final_replacement_verdict",
     "build_owner_repair_request",
     "bind_repair_ladder_to_page_result",
     "canonical_glyph_patch_sha256",
     "execute_owner_replacement",
+    "recover_owner_staging",
+    "recover_page_candidate_transaction",
 ]
