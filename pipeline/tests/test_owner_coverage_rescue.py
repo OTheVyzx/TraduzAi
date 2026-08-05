@@ -461,15 +461,15 @@ def test_ocr_empty_near_uniform_false_glyph_gets_explicit_non_text_disposition()
     import cv2
     import numpy as np
 
-    page = np.full((120, 160, 3), (255, 255, 247), dtype=np.uint8)
-    cv2.line(page, (41, 61), (71, 31), (253, 253, 245), 3, cv2.LINE_AA)
+    page = np.full((120, 160, 3), (218, 222, 228), dtype=np.uint8)
+    cv2.line(page, (41, 61), (71, 31), (207, 211, 209), 3, cv2.LINE_AA)
     component = SourceTextComponent(
         component_id="component-border-fragment",
         page_id=PAGE_ID,
         bbox_page=(39, 29, 74, 64),
         polygon_page=((39, 29), (74, 29), (74, 64), (39, 64)),
         detector_sources=("glyph_scan",),
-        confidence=0.585,
+        confidence=0.725,
     )
 
     class EmptyPaddleModel:
@@ -539,15 +539,20 @@ def test_unique_full_page_observation_without_component_materializes_component()
     )
 
 
-def test_two_unassociated_regions_get_distinct_pending_recovery_fingerprints() -> None:
+def test_two_unassociated_regions_materialize_distinct_hash_bound_components() -> None:
     page, initial = _unassociated_coverage("FIRST", "SECOND")
 
-    pending = recover_unassociated_observations(page, initial)
+    result = recover_unassociated_observations(page, initial)
 
-    assert len(pending.pending_requests) == 2
-    assert len({item.anchor_sha256 for item in pending.pending_requests}) == 2
-    assert len({item.attempt_fingerprint for item in pending.pending_requests}) == 2
-    assert not any(item.rejection_reason == "suppressed" for item in pending.observations)
+    assert result.pending_requests == ()
+    assert len(result.components) == 2
+    assert len(result.recovery_requests) == 2
+    assert len(result.recovery_decisions) == 2
+    assert {item.status for item in result.recovery_decisions} == {"succeeded"}
+    assert len({item.anchor_sha256 for item in result.recovery_requests}) == 2
+    assert len({item.attempt_fingerprint for item in result.recovery_requests}) == 2
+    assert len({item.component_ids[0] for item in result.observations}) == 2
+    assert not any(item.rejection_reason == "suppressed" for item in result.observations)
 
 
 def test_ambiguous_full_page_observation_requests_anchored_recovery() -> None:

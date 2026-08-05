@@ -1646,7 +1646,7 @@ def _ocr_empty_component_preserve_policy(
         return None
     if component.script_evidence or component.evidence_ids:
         return None
-    if float(component.confidence) > 0.65:
+    if float(component.confidence) > 0.75:
         return None
     x1, y1, x2, y2 = (int(value) for value in component.bbox_page)
     crop = page_rgb[y1:y2, x1:x2]
@@ -1667,9 +1667,9 @@ def _ocr_empty_component_preserve_policy(
             + 29 * rgb_i32[:, :, 2]
             + 128
         ) // 256
-    if max_channel_span > 12:
+    if max_channel_span > 24:
         return None
-    if int(luminance.max()) - int(luminance.min()) > 3:
+    if int(luminance.max()) - int(luminance.min()) > 12:
         return None
     return (
         "visual_non_text",
@@ -1937,7 +1937,7 @@ def recover_unassociated_observations(
         )
 
     changed_association = False
-    materialize = len(unassociated) == 1
+    materialize_observations: list["TextObservation"] = []
     for observation in unassociated:
         matches = matching_components(observation)
         index = observations.index(observation)
@@ -1947,12 +1947,28 @@ def recover_unassociated_observations(
             )
             changed_association = True
             continue
-        if not materialize or len(matches) > 1:
+        if len(matches) > 1:
             if observation.observation_id not in existing_recovery_observations:
                 recovery_requests.append(
                     request_for(observation, attempt_kind="anchored_association_recovery")
                 )
             continue
+        materialize_observations.append(observation)
+
+    current = coverage
+    if changed_association:
+        current = PageCoverageResult.build_from(
+            current,
+            observations=tuple(observations),
+        )
+
+    for original_observation in materialize_observations:
+        observation = next(
+            item
+            for item in observations
+            if item.observation_id == original_observation.observation_id
+        )
+        index = observations.index(observation)
 
         request = request_for(
             observation, attempt_kind="unassociated_observation_materialization"
@@ -1988,7 +2004,7 @@ def recover_unassociated_observations(
             origin="recovery_materialization",
             introduced_by_decision_id=decision.decision_id,
             anchor_polygon_page=polygon,
-            ordinal=len(coverage.ledger.component_inventory),
+            ordinal=len(current.ledger.component_inventory),
             decision=decision,
         )
         # A full-page OCR/glyph-confirmed region that discovery omitted is
@@ -2022,31 +2038,31 @@ def recover_unassociated_observations(
             origin_execution_id=coverage.origin_execution_id,
             page_id=coverage.page_id,
             page_source_sha256=coverage.page_source_sha256,
-            inventory_version=coverage.ledger.inventory_version + 1,
-            parent_ledger_sha256=coverage.ledger.sha256,
-            component_inventory=(*coverage.ledger.component_inventory, inventory_entry),
+            inventory_version=current.ledger.inventory_version + 1,
+            parent_ledger_sha256=current.ledger.sha256,
+            component_inventory=(*current.ledger.component_inventory, inventory_entry),
             expected_observation_ids=tuple(
                 item.observation_id for item in observations
             ),
-            entries=(*coverage.ledger.entries, entry),
-            observation_dispositions=coverage.ledger.observation_dispositions,
+            entries=(*current.ledger.entries, entry),
+            observation_dispositions=current.ledger.observation_dispositions,
             recovery_requests=tuple(recovery_requests),
             recovery_decisions=tuple(recovery_decisions),
         )
-        validate_inventory_successor(coverage.ledger, ledger)
-        return PageCoverageResult.build_from(
-            coverage,
-            ledger_history=(*coverage.ledger_history, ledger),
+        validate_inventory_successor(current.ledger, ledger)
+        current = PageCoverageResult.build_from(
+            current,
+            ledger_history=(*current.ledger_history, ledger),
             components=tuple(components),
             observations=tuple(observations),
             recovery_requests=tuple(recovery_requests),
             recovery_decisions=tuple(recovery_decisions),
         )
 
-    if not changed_association and tuple(recovery_requests) == coverage.recovery_requests:
-        return coverage
+    if tuple(recovery_requests) == current.recovery_requests:
+        return current
     return PageCoverageResult.build_from(
-        coverage,
+        current,
         observations=tuple(observations),
         recovery_requests=tuple(recovery_requests),
         recovery_decisions=tuple(recovery_decisions),
