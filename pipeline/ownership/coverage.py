@@ -1631,6 +1631,52 @@ def _bbox_overlap_fraction(left: BBox, right: BBox) -> float:
 CoverageOCRRunner = Callable[..., OCRInvocationResult]
 
 
+def _ocr_empty_component_preserve_policy(
+    page_rgb: "np.ndarray",
+    component: "SourceTextComponent",
+) -> tuple[str, str] | None:
+    """Classify only visually empty low-confidence glyph-scan proposals.
+
+    OCR exhaustion alone is never enough to preserve a component.  This
+    disposition is limited to near-uniform crops produced solely by the
+    detector-independent glyph scan, with no script or external evidence.
+    """
+
+    if tuple(component.detector_sources) != ("glyph_scan",):
+        return None
+    if component.script_evidence or component.evidence_ids:
+        return None
+    if float(component.confidence) > 0.65:
+        return None
+    x1, y1, x2, y2 = (int(value) for value in component.bbox_page)
+    crop = page_rgb[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    if crop.ndim == 2:
+        luminance = crop
+        max_channel_span = int(crop.max()) - int(crop.min())
+    else:
+        rgb = crop[:, :, :3]
+        pixels = rgb.reshape((-1, 3))
+        channel_spans = pixels.max(axis=0) - pixels.min(axis=0)
+        max_channel_span = int(channel_spans.max())
+        rgb_i32 = rgb.astype("int32", copy=False)
+        luminance = (
+            77 * rgb_i32[:, :, 0]
+            + 150 * rgb_i32[:, :, 1]
+            + 29 * rgb_i32[:, :, 2]
+            + 128
+        ) // 256
+    if max_channel_span > 12:
+        return None
+    if int(luminance.max()) - int(luminance.min()) > 3:
+        return None
+    return (
+        "visual_non_text",
+        "policy:ocr_empty_near_uniform_false_glyph",
+    )
+
+
 def complete_page_coverage(
     page_rgb: "np.ndarray",
     *,
@@ -1741,27 +1787,44 @@ def complete_page_coverage(
         for invocation in invocations
     }
     full_attempt_ids = attempts_by_invocation[full.invocation_id]
-    entries = tuple(
-        CoverageEntry(
-            component_id=component.component_id,
-            run_id=run_id,
-            origin_execution_id=origin_execution_id,
-            page_id=page_id,
-            page_source_sha256=page_source_sha256,
-            bbox_page=component.bbox_page,
-            polygon_page=component.polygon_page,
-            materiality="material",
-            ocr_attempt_ids=tuple(dict.fromkeys((
-                *full_attempt_ids,
-                *attempts_by_invocation.get(
-                    f"{page_id}:coverage:{component.component_id}", ()
-                ),
-            ))),
-            observation_ids=tuple(item.observation_id for item in associated[component.component_id]),
-            state="observed" if associated[component.component_id] else "challenged",
+    entries: list[CoverageEntry] = []
+    for component in components:
+        component_observations = tuple(associated[component.component_id])
+        preserve = (
+            None
+            if component_observations
+            else _ocr_empty_component_preserve_policy(page_rgb, component)
         )
-        for component in components
-    )
+        entries.append(
+            CoverageEntry(
+                component_id=component.component_id,
+                run_id=run_id,
+                origin_execution_id=origin_execution_id,
+                page_id=page_id,
+                page_source_sha256=page_source_sha256,
+                bbox_page=component.bbox_page,
+                polygon_page=component.polygon_page,
+                materiality="non_text" if preserve else "material",
+                ocr_attempt_ids=tuple(dict.fromkeys((
+                    *full_attempt_ids,
+                    *attempts_by_invocation.get(
+                        f"{page_id}:coverage:{component.component_id}", ()
+                    ),
+                ))),
+                observation_ids=tuple(
+                    item.observation_id for item in component_observations
+                ),
+                semantic_role=preserve[0] if preserve else None,
+                state=(
+                    "observed"
+                    if component_observations
+                    else "explicit_non_dialogue_preserve"
+                    if preserve
+                    else "challenged"
+                ),
+                preserve_policy=preserve[1] if preserve else None,
+            )
+        )
     inventory = tuple(
         build_component_inventory_entry(
             component_id=component.component_id,
@@ -1781,7 +1844,7 @@ def complete_page_coverage(
         parent_ledger_sha256=None,
         component_inventory=inventory,
         expected_observation_ids=tuple(item.observation_id for item in observations),
-        entries=entries,
+        entries=tuple(entries),
     )
     return PageCoverageResult._build(
         run_id=run_id,
