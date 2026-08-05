@@ -557,3 +557,38 @@ def test_require_valid_raises_with_stable_offenders():
         graph.require_valid()
 
     assert exc_info.value.violations[0].offenders == ("component_a",)
+
+
+def test_owner_graph_accepts_canonical_repair_states_but_enforce_rejects_review_terminal():
+    for state in (
+        "target_ready",
+        "execution_attempt",
+        "repair_pending",
+        "cleaned",
+        "rendered",
+        "final_verified",
+    ):
+        graph = _valid_graph()
+        graph.owners[0] = replace(
+            graph.owners[0],
+            state=state,
+            route_action="translate_render_only",
+            action_mask_ref=None,
+        )
+        assert not graph.validate(mode="enforce"), state
+
+    graph = _valid_graph()
+    graph.owners[0] = replace(
+        graph.owners[0],
+        disposition="review",
+        state="review_required",
+        route_action="review_required",
+        execution_tile_id=None,
+    )
+    graph.projections = []
+    graph.component_dispositions[0] = replace(
+        graph.component_dispositions[0],
+        decision="review",
+    )
+    codes = {violation.code for violation in graph.validate(mode="enforce")}
+    assert "review_terminal_forbidden_in_enforce" in codes

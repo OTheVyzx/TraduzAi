@@ -13,6 +13,8 @@ from typing import Any, Iterable, Literal, Mapping
 
 import numpy as np
 
+from .coverage import CANONICAL_COVERAGE_STATES
+
 try:
     from typesetter.owner_render_quality import OwnerRenderQuality
     from typesetter.style_contract import STYLE_V2_ATTRIBUTE_NAME_SET
@@ -29,20 +31,19 @@ OWNER_GRAPH_LEGACY_SCHEMA_VERSION = 1
 
 FINAL_COMPONENT_DECISIONS = frozenset({"owned", "preserve", "suppress", "review"})
 OWNER_DISPOSITIONS = frozenset({"owned", "review"})
-OWNER_STATES = frozenset(
+LEGACY_OWNER_STATES = frozenset(
     {
-        "discovered",
         "ocr_ready",
         "execution_planned",
         "translated",
         "mask_ready",
         "inpainted",
         "laid_out",
-        "rendered",
         "verified",
         "review_required",
     }
 )
+OWNER_STATES = CANONICAL_COVERAGE_STATES | LEGACY_OWNER_STATES
 OWNER_ROUTE_ACTIONS = frozenset(
     {
         "translate_inpaint_render",
@@ -67,10 +68,32 @@ INPAINT_ROUTE_ACTIONS = frozenset(
     }
 )
 POST_TRANSLATION_STATES = frozenset(
-    {"translated", "mask_ready", "inpainted", "laid_out", "rendered", "verified"}
+    {
+        "translated",
+        "mask_ready",
+        "inpainted",
+        "laid_out",
+        "verified",
+        "target_ready",
+        "execution_attempt",
+        "repair_pending",
+        "cleaned",
+        "rendered",
+        "final_verified",
+    }
 )
 MASK_REQUIRED_STATES = frozenset(
-    {"mask_ready", "inpainted", "laid_out", "rendered", "verified"}
+    {
+        "mask_ready",
+        "inpainted",
+        "laid_out",
+        "verified",
+        "execution_attempt",
+        "repair_pending",
+        "cleaned",
+        "rendered",
+        "final_verified",
+    }
 )
 EXECUTOR_REQUIRED_STATES = POST_TRANSLATION_STATES | frozenset({"execution_planned"})
 EXECUTION_ROUTE_ACTIONS = frozenset(
@@ -113,7 +136,9 @@ def _deep_frozen_array_copy(value: Any) -> Any:
     return frozen
 
 
-ACTIVE_OWNER_STATES = OWNER_STATES - frozenset({"review_required"})
+ACTIVE_OWNER_STATES = OWNER_STATES - frozenset(
+    {"review_required", "explicit_non_dialogue_preserve"}
+)
 ROUTE_ALLOWED_STATES = {
     "translate_inpaint_render": ACTIVE_OWNER_STATES,
     "translate_sfx_inpaint_render": ACTIVE_OWNER_STATES,
@@ -122,6 +147,15 @@ ROUTE_ALLOWED_STATES = {
     "inpaint_only": frozenset(
         {
             "discovered",
+            "challenged",
+            "observed",
+            "owned",
+            "target_ready",
+            "execution_attempt",
+            "repair_pending",
+            "cleaned",
+            "rendered",
+            "final_verified",
             "ocr_ready",
             "execution_planned",
             "mask_ready",
@@ -1861,6 +1895,15 @@ class OwnerGraph:
                         owner.state,
                     )
                 )
+            if mode == "enforce" and owner.state in LEGACY_OWNER_STATES:
+                violations.append(
+                    _violation(
+                        "owner_state_legacy_in_enforce",
+                        "Enforce mode requires the canonical owner lifecycle.",
+                        owner.owner_id,
+                        owner.state,
+                    )
+                )
             if not route_is_valid:
                 violations.append(
                     _violation(
@@ -1892,6 +1935,16 @@ class OwnerGraph:
                     _violation(
                         "owner_disposition_lifecycle_mismatch",
                         "Review owner must remain in the review-required lifecycle.",
+                        owner.owner_id,
+                    )
+                )
+            if mode == "enforce" and (
+                owner.disposition == "review" or owner.state == "review_required"
+            ):
+                violations.append(
+                    _violation(
+                        "review_terminal_forbidden_in_enforce",
+                        "Enforce mode cannot terminate an owner in review.",
                         owner.owner_id,
                     )
                 )

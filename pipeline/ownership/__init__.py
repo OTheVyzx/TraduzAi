@@ -1,5 +1,23 @@
 """Page-global text ownership contracts for the automatic pipeline."""
 
+from .coverage import (
+    CANONICAL_COVERAGE_STATES,
+    CoverageComponentInventoryEntry,
+    CoverageEntry,
+    CoverageInvariantError,
+    CoverageObservationDisposition,
+    CoverageRecoveryDecision,
+    CoverageRecoveryExhausted,
+    CoverageRecoveryRequest,
+    PageCoverageLedger,
+    build_component_inventory_entry,
+    build_page_coverage_ledger,
+    build_recovery_decision,
+    build_recovery_request,
+    validate_inventory_successor,
+    validate_recovery_chain,
+)
+from .lifecycle import LifecycleEvidence, OwnerLifecycle, OwnerLifecycleIdentity
 from .model import (
     ComponentDisposition,
     OwnerGraph,
@@ -12,12 +30,30 @@ from .model import (
 )
 
 __all__ = [
+    "CANONICAL_COVERAGE_STATES",
     "ComponentDisposition",
+    "CoverageComponentInventoryEntry",
+    "CoverageEntry",
+    "CoverageInvariantError",
+    "CoverageObservationDisposition",
+    "CoverageRecoveryDecision",
+    "CoverageRecoveryExhausted",
+    "CoverageRecoveryRequest",
+    "LifecycleEvidence",
     "OwnerGraph",
     "OwnerGraphValidationError",
     "OwnerProjection",
+    "OwnerLifecycle",
+    "OwnerLifecycleIdentity",
     "OwnerViolation",
     "SourceTextComponent",
     "TextObservation",
     "TextOwner",
+    "PageCoverageLedger",
+    "build_component_inventory_entry",
+    "build_page_coverage_ledger",
+    "build_recovery_decision",
+    "build_recovery_request",
+    "validate_inventory_successor",
+    "validate_recovery_chain",
 ]
