@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from translator.language_policy import PageLanguageEvidence, validate_target_language
+from translator.language_policy import (
+    PageLanguageEvidence,
+    build_page_language_evidence,
+    validate_target_language,
+)
 
 
 def test_unchanged_english_dialogue_is_not_valid_pt_br() -> None:
@@ -91,6 +95,24 @@ def test_already_ptbr_container_needs_fresh_complete_page_evidence() -> None:
     assert not without_evidence.accepted
     assert with_evidence.accepted
     assert with_evidence.policy_id == "already_target_language"
+
+
+def test_page_language_evidence_tracks_material_english_but_not_ptbr() -> None:
+    english = build_page_language_evidence(
+        texts=("THE PLAYER HAS 10 KILLS",),
+        coverage_complete=True,
+    )
+    ptbr = build_page_language_evidence(
+        texts=("COMO ESPERADO, YUJEONG JA FEZ UM MOVIMENTO", "ANTES"),
+        coverage_complete=True,
+    )
+
+    assert english.coverage_complete
+    assert set(english.source_only_tokens) >= {"the", "player", "has", "kills"}
+    assert ptbr == PageLanguageEvidence.build(
+        coverage_complete=True,
+        source_only_tokens=(),
+    )
 
 
 def test_verdict_is_canonical_and_hash_bound() -> None:

@@ -555,6 +555,64 @@ def _owner_request(owner_suffix: str = "a", *, route_action: str = "translate_in
     return OwnerTranslationRequest.from_graph(graph, graph.owners[0].owner_id)
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "COMO ESPERADO DE UMA RAPOSA, PARECE QUE YUJEONG JA FEZ UM MOVIMENTO",
+        "ANTES",
+    ],
+)
+def test_fresh_complete_owner_evidence_accepts_already_ptbr_provider_noop(
+    source: str,
+) -> None:
+    from ownership.translation import OwnerTranslationRequest, translate_owner_page
+    from translator.language_policy import PageLanguageEvidence
+
+    graph = _graph([("ptbr", source)])
+    request = OwnerTranslationRequest.from_graph(graph, "owner_ptbr")
+
+    def unchanged(owner_request, _variant):
+        return owner_request.source_text
+
+    unchanged.backend_name = "fixture"
+    result = translate_owner_page(
+        (request,),
+        backends=(unchanged,),
+        page_language_evidence_by_owner={
+            request.owner_id: PageLanguageEvidence.build(
+                coverage_complete=True,
+                source_only_tokens=(),
+            )
+        },
+    )
+
+    assert result.bindings[0].target_text == source
+    assert result.bindings[0].language_verdict.policy_id == "already_target_language"
+
+
+def test_fresh_complete_owner_evidence_still_rejects_english_provider_noop() -> None:
+    from ownership.translation import TranslationValidationExhausted, translate_owner_page
+    from translator.language_policy import PageLanguageEvidence
+
+    request = _owner_request()
+
+    def unchanged(owner_request, _variant):
+        return owner_request.source_text
+
+    unchanged.backend_name = "fixture"
+    with pytest.raises(TranslationValidationExhausted):
+        translate_owner_page(
+            (request,),
+            backends=(unchanged,),
+            page_language_evidence_by_owner={
+                request.owner_id: PageLanguageEvidence.build(
+                    coverage_complete=True,
+                    source_only_tokens=(),
+                )
+            },
+        )
+
+
 def test_translation_binding_preserves_owner_and_hash_chain() -> None:
     from ownership.translation import TranslationAttempt, bind_translation
     from translator.language_policy import validate_target_language

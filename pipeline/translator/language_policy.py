@@ -30,7 +30,7 @@ _ENGLISH_WORDS = frozenset(
 )
 _PTBR_WORDS = frozenset(
     """
-    a agora ainda assim ao arena as até bem com como da das de dele dela depois
+    a agora ainda antes assim ao arena as até bem com como da das de dele dela depois
     do dos e ela ele em entrar entrarem entre era esse esta está eu foi há isso
     jogador jogadores já logo mais mas me meu minha não nos nós o os ou para pela
     pelo por porque possa que quem se sem ser seu sua tem todos um uma vamos você
@@ -55,6 +55,27 @@ class PageLanguageEvidence:
             bool(coverage_complete),
             tuple(sorted({str(token).casefold() for token in source_only_tokens if str(token)})),
         )
+
+
+def build_page_language_evidence(
+    *,
+    texts: tuple[str, ...] | list[str],
+    coverage_complete: bool,
+) -> PageLanguageEvidence:
+    """Summarize fresh regional OCR without treating shared PT/EN words as source-only."""
+
+    tokens = {
+        token
+        for text in texts
+        for token in _tokens(str(text or ""))
+    }
+    english_only = tuple(
+        sorted(token for token in tokens if token in _ENGLISH_WORDS and token not in _PTBR_WORDS)
+    )
+    return PageLanguageEvidence.build(
+        coverage_complete=coverage_complete,
+        source_only_tokens=english_only,
+    )
 
 
 @dataclass(frozen=True)
@@ -307,5 +328,6 @@ def validate_target_language(
 __all__ = [
     "PageLanguageEvidence",
     "TargetLanguageVerdict",
+    "build_page_language_evidence",
     "validate_target_language",
 ]

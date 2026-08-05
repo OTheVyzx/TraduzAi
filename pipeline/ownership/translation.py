@@ -11,9 +11,17 @@ from typing import Any, Iterable, Literal, Mapping, Sequence
 from .hash_contract import canonical_json_bytes, canonical_json_sha256, sha256_bytes, sha256_text
 from .model import TRANSLATION_ROUTE_ACTIONS, OwnerGraph, OwnerViolation, TextOwner
 try:
-    from translator.language_policy import TargetLanguageVerdict, validate_target_language
+    from translator.language_policy import (
+        PageLanguageEvidence,
+        TargetLanguageVerdict,
+        validate_target_language,
+    )
 except ImportError:  # pragma: no cover - package import
-    from ..translator.language_policy import TargetLanguageVerdict, validate_target_language
+    from ..translator.language_policy import (
+        PageLanguageEvidence,
+        TargetLanguageVerdict,
+        validate_target_language,
+    )
 
 
 _TRANSLATABLE_STATES = frozenset({"owned", "ocr_ready", "execution_planned"})
@@ -707,6 +715,7 @@ def translate_owner(
     attempt_fn=None,
     attempt_controls: Sequence = (),
     attempt_kwargs: Mapping[str, object] | None = None,
+    page_language_evidence: PageLanguageEvidence | None = None,
 ) -> tuple[TranslationBinding, tuple[TranslationAttempt, ...]]:
     attempts: list[TranslationAttempt] = []
     if callable(attempt_fn):
@@ -764,6 +773,7 @@ def translate_owner(
                     source=request.source_text,
                     target=target_text,
                     role=request.semantic_role,
+                    page_language_evidence=page_language_evidence,
                 )
                 status = "accepted" if verdict.accepted else "rejected"
                 metadata = json.loads(
@@ -830,6 +840,7 @@ def translate_owner(
                     source=request.source_text,
                     target=target_text,
                     role=request.semantic_role,
+                    page_language_evidence=page_language_evidence,
                 )
                 status = "accepted" if verdict.accepted else "rejected"
                 attempt = TranslationAttempt.build(
@@ -877,6 +888,7 @@ def translate_owner_page(
     attempt_fn=None,
     attempt_controls: Sequence = (),
     attempt_kwargs: Mapping[str, object] | None = None,
+    page_language_evidence_by_owner: Mapping[str, PageLanguageEvidence] | None = None,
 ) -> OwnerPageTranslationResult:
     attempts: list[TranslationAttempt] = []
     bindings: list[TranslationBinding] = []
@@ -888,6 +900,9 @@ def translate_owner_page(
                 attempt_fn=attempt_fn,
                 attempt_controls=attempt_controls,
                 attempt_kwargs=attempt_kwargs,
+                page_language_evidence=(page_language_evidence_by_owner or {}).get(
+                    request.owner_id
+                ),
             )
         except (TranslationValidationExhausted, TranslationInfrastructureError) as exc:
             error_type = type(exc)
