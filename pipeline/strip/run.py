@@ -2657,6 +2657,50 @@ def _source_page_bounds(strip: VerticalStrip, page_number: int) -> tuple[int, in
     return 0, int(strip.height)
 
 
+def _ensure_page_owner_scheduler_bands(
+    strip: VerticalStrip,
+    bands: list[Band],
+    *,
+    page_ids,
+) -> list[Band]:
+    """Materialize one page-space commit carrier when detection produced no band."""
+
+    ensured = list(bands)
+    covered_pages = {
+        _source_page_number_for_band(strip, band)
+        for band in ensured
+        if int(band.y_bottom) > int(band.y_top)
+    }
+    requested_pages: set[int] = set()
+    for page_id in page_ids:
+        match = re.fullmatch(r"page_(\d+)", str(page_id or "").strip())
+        if match is not None:
+            requested_pages.add(int(match.group(1)))
+
+    for page_number in sorted(requested_pages - covered_pages):
+        page_y0, page_y1 = _source_page_bounds(strip, page_number)
+        if page_y1 <= page_y0:
+            continue
+        carrier = Band(
+            y_top=int(page_y0),
+            y_bottom=int(page_y1),
+            balloons=[],
+            tile_id=_band_id_for(page_number, 0),
+            strip_offset_xy=(0, int(page_y0)),
+        )
+        carrier.owner_scheduler_carrier = True
+        ensured.append(carrier)
+
+    return sorted(
+        ensured,
+        key=lambda band: (
+            int(band.y_top),
+            int(band.y_bottom),
+            str(getattr(band, "tile_id", "") or ""),
+        ),
+    )
+
+
 def _discover_source_components_for_strip(strip: VerticalStrip, balloons: list) -> dict[str, list]:
     """Discover page-space text evidence before any band OCR is accepted."""
 
@@ -6598,6 +6642,12 @@ def run_chapter(
                 margin=band_margin,
                 page_breaks=list(strip.source_page_breaks or []),
             )
+            if owner_graph_mode == "enforce":
+                bands = _ensure_page_owner_scheduler_bands(
+                    strip,
+                    bands,
+                    page_ids=source_components_by_page,
+                )
         if chapter_telemetry is not None:
             chapter_telemetry["band_count"] = len(bands)
             chapter_telemetry["band_margin_px"] = int(band_margin)

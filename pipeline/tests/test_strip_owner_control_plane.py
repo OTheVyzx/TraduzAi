@@ -860,6 +860,50 @@ def test_grouping_splits_close_balloons_at_page_break_and_clamps_margin() -> Non
     ] == [{"page_001"}, {"page_002"}]
 
 
+def test_missing_page_band_gets_one_idempotent_page_space_scheduler_carrier() -> None:
+    from strip.run import _ensure_page_owner_scheduler_bands
+    from strip.types import VerticalStrip
+
+    strip = VerticalStrip(
+        image=np.full((200, 100, 3), 240, dtype=np.uint8),
+        width=100,
+        height=200,
+        source_page_breaks=[0, 100, 200],
+        page_x_offsets=[0, 0],
+        source_page_widths=[100, 100],
+    )
+    existing = Band(
+        y_top=110,
+        y_bottom=160,
+        balloons=[],
+        tile_id="tile_existing_page_002",
+        strip_offset_xy=(0, 110),
+    )
+
+    ensured = _ensure_page_owner_scheduler_bands(
+        strip,
+        [existing],
+        page_ids=("page_001", "page_002"),
+    )
+
+    assert len(ensured) == 2
+    carrier = ensured[0]
+    assert (carrier.y_top, carrier.y_bottom) == (0, 100)
+    assert carrier.balloons == []
+    assert carrier.strip_offset_xy == (0, 0)
+    assert carrier.tile_id
+    assert carrier is not existing
+    assert ensured[1] is existing
+    assert getattr(carrier, "owner_scheduler_carrier", False) is True
+
+    repeated = _ensure_page_owner_scheduler_bands(
+        strip,
+        ensured,
+        page_ids=("page_001", "page_002"),
+    )
+    assert repeated == ensured
+
+
 def test_corrupt_mixed_page_band_is_rejected_before_legacy_execution() -> None:
     from strip.run import run_chapter
 
