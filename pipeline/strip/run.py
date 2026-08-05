@@ -5934,7 +5934,11 @@ def _assign_owner_executor_projections(
         tiles_by_id[tile.tile_id] = tile
 
     projections: list[OwnerProjection] = []
-    violations = list(assigned.violations)
+    violations = [
+        violation
+        for violation in assigned.violations
+        if violation.code != "owner_executor_full_coverage_missing"
+    ]
     for owner in sorted(assigned.owners, key=lambda item: item.owner_id):
         if owner.disposition != "owned" or owner.state == "review_required":
             continue

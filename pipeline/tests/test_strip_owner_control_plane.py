@@ -717,6 +717,44 @@ def test_non_overlapping_owner_uses_nearest_page_tile_as_enforce_scheduler_carri
     assert projection.offset_xy == (0, 0)
 
 
+def test_executor_assignment_replaces_stale_full_coverage_violation() -> None:
+    from strip.run import _assign_owner_executor_projections
+
+    graph = _graph()
+    graph.violations = [
+        OwnerViolation(
+            code="owner_executor_full_coverage_missing",
+            severity="critical",
+            message="No execution tile fully covers every source component of the owner.",
+            offenders=("owner_a",),
+        ),
+        OwnerViolation(
+            code="unrelated_violation",
+            severity="warning",
+            message="Must survive projection assignment.",
+            offenders=("owner_a",),
+        ),
+    ]
+    tile = TileProjection(
+        page_id="page_001",
+        tile_id="tile_scheduler",
+        offset_xy=(0, 0),
+        page_size=(100, 100),
+        tile_size=(20, 20),
+    )
+
+    assigned = _assign_owner_executor_projections(
+        graph,
+        [tile],
+        page_space_executor=True,
+    )
+
+    assert [violation.code for violation in assigned.violations] == [
+        "unrelated_violation"
+    ]
+    assert assigned.owners[0].execution_tile_id == "tile_scheduler"
+
+
 def test_executor_tie_uses_lexicographically_stable_tile_id() -> None:
     from strip.run import _assign_owner_executor_projections
 
