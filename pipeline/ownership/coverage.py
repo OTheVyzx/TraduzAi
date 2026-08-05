@@ -1652,9 +1652,22 @@ def _ocr_empty_component_preserve_policy(
         return None
     if component.script_evidence or component.evidence_ids:
         return None
-    if float(component.confidence) > 0.75:
+    confidence = float(component.confidence)
+    if confidence > 0.75:
         return None
     x1, y1, x2, y2 = (int(value) for value in component.bbox_page)
+    box_width = max(0, x2 - x1)
+    box_height = max(0, y2 - y1)
+    if (
+        confidence <= 0.60
+        and box_width <= 24
+        and box_height <= 24
+        and box_width * box_height <= 512
+    ):
+        return (
+            "visual_non_text",
+            "policy:ocr_empty_tiny_isolated_false_glyph",
+        )
     crop = page_rgb[y1:y2, x1:x2]
     if crop.size == 0:
         return None

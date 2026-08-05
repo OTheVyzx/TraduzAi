@@ -517,6 +517,68 @@ def test_ocr_empty_near_uniform_false_glyph_gets_explicit_non_text_disposition()
     coverage.require_ready_for_ownership()
 
 
+def test_ocr_empty_tiny_isolated_false_glyph_gets_explicit_non_text_disposition() -> None:
+    import cv2
+    import numpy as np
+
+    gradient = np.linspace(205, 145, 160, dtype=np.float32)
+    gray = np.repeat(gradient[None, :], 120, axis=0)
+    page = np.dstack((gray * 0.88, gray * 0.94, gray)).astype(np.uint8)
+    cv2.line(page, (59, 29), (59, 48), (60, 64, 70), 2, cv2.LINE_AA)
+    component = SourceTextComponent(
+        component_id="component-tiny-art-fragment",
+        page_id=PAGE_ID,
+        bbox_page=(50, 29, 69, 48),
+        polygon_page=((50, 29), (69, 29), (69, 48), (50, 48)),
+        detector_sources=("glyph_scan",),
+        confidence=0.55,
+    )
+
+    class EmptyPaddleModel:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del image, det, rec, cls
+            return [[]]
+
+    engine = OCREngine.__new__(OCREngine)
+    engine._backend = "paddleocr"
+    engine._model = EmptyPaddleModel()
+
+    def runner(page_rgb, *, request, bbox_page, variants):
+        if bbox_page is None:
+            return engine.recognize_page_with_evidence(
+                page_rgb,
+                [],
+                request=request,
+                force_full_page=True,
+            )
+        return engine.recognize_region_with_evidence(
+            page_rgb,
+            bbox_page=bbox_page,
+            request=request,
+            variants=variants,
+        )
+
+    coverage = complete_page_coverage(
+        page,
+        run_id=RUN_ID,
+        origin_execution_id=EXECUTION_ID,
+        page_id=PAGE_ID,
+        page_source_sha256=canonical_page_sha256(page),
+        components=(component,),
+        band_evidence=(),
+        ocr_runner=runner,
+    )
+
+    entry = coverage.entries[0]
+    assert entry.ocr_attempt_ids
+    assert entry.observation_ids == ()
+    assert entry.materiality == "non_text"
+    assert entry.state == "explicit_non_dialogue_preserve"
+    assert entry.semantic_role == "visual_non_text"
+    assert entry.preserve_policy == "policy:ocr_empty_tiny_isolated_false_glyph"
+    coverage.require_ready_for_ownership()
+
+
 def test_ocr_empty_unconfirmed_dark_balloon_heuristic_gets_visual_non_text_disposition() -> None:
     import cv2
     import numpy as np
