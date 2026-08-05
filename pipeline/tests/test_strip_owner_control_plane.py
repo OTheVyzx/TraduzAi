@@ -843,6 +843,7 @@ def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode(
     input_path = tmp_path / "001.jpg"
     cv2.imwrite(str(input_path), np.full((32, 40, 3), 235, dtype=np.uint8))
     band = Band(y_top=0, y_bottom=32)
+    page_sha256 = canonical_page_sha256(np.full((32, 40, 3), 235, dtype=np.uint8))
     legacy_process = MagicMock(side_effect=AssertionError("legacy band execution called"))
     monkeypatch.setattr(run, "detect_strip_balloons", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(run, "group_balloons_into_bands", lambda *_args, **_kwargs: [band])
@@ -851,7 +852,7 @@ def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode(
         page_id="page_001",
         run_id="run-strip-owner-control-empty",
         origin_execution_id="execution-strip-owner-control-empty",
-        page_source_sha256="b" * 64,
+        page_source_sha256=page_sha256,
         components=[],
         observations=[],
         owners=[],
@@ -875,10 +876,15 @@ def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode(
         typesetter=MagicMock(),
         owner_graph_mode="enforce",
         skip_page_cleanup_rerender=True,
+        run_id="run-strip-owner-control-empty",
+        execution_id="execution-strip-owner-control-empty",
     )
 
     assert len(pages) == 1
     legacy_process.assert_not_called()
+    assert pages[0].owner_page_result is not None
+    assert pages[0].owner_page_result.status == "candidate_ready"
+    assert pages[0].owner_page_evidence_ref is None
 
 
 def test_enforce_owner_resolution_never_calls_legacy_reconcile() -> None:

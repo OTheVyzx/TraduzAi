@@ -20,6 +20,8 @@ if TYPE_CHECKING:
         TextObservation,
     )
     from ownership.ocr_adapter import TileProjection
+    from strip.page_pipeline import PageExecutionResult
+    from ownership.execution import PageExecutionEvidenceRef
     from strip.page_surface_geometry import PageSurfaceGeometry
 
 
@@ -143,6 +145,8 @@ class OutputPage:
     owner_graph: Optional["OwnerGraph"] = None
     owner_composition: Optional["PageCompositionResult"] = None
     page_surface_geometry: Optional["PageSurfaceGeometry"] = None
+    owner_page_evidence_ref: Optional["PageExecutionEvidenceRef"] = None
+    owner_page_result: Optional["PageExecutionResult"] = None
 
     @property
     def page_surface_geometry_sha256(self) -> Optional[str]:

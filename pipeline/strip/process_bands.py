@@ -44,7 +44,15 @@ from ownership.model import (
     owner_residual_evidence_sha256,
     validate_owner_style_raster_contract,
 )
-from ownership.translation import merge_owner_translations, owners_to_translation_page
+from ownership.translation import (
+    OwnerPageTranslationResult,
+    OwnerTranslationRequest,
+    TranslationAttempt,
+    TranslationBinding,
+    apply_owner_translation_result,
+    merge_owner_translations,
+    translate_owner_page,
+)
 from ownership.render_geometry import (
     OwnerRenderGeometry,
     build_owner_render_geometry,
@@ -2779,6 +2787,7 @@ class OwnerPageExecution:
     graph: OwnerGraph
     commits: tuple[OwnerExecutionCommit, ...]
     records: tuple[dict[str, Any], ...]
+    translation_result: OwnerPageTranslationResult | None = None
 
 
 def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None = None) -> dict:
@@ -6857,6 +6866,9 @@ def _recover_partial_dark_bubble_ocr_from_texts(
 _OWNER_TRANSLATION_RESPONSE_FIELDS = frozenset(
     {
         "translated",
+        "translated_payload",
+        "target_locale",
+        "translation_binding_sha256",
         "source_text_sent_to_translator",
         "qa_flags",
         "entity_flags",
@@ -6920,8 +6932,8 @@ def _owner_translation_stage_page(
         owner.owner_id
         for owner in merged_graph.owners
         if owner.disposition == "owned"
-        and owner.state == "translated"
-        and owner.route_action == "translate_inpaint_render"
+        and owner.state in {"translated", "target_ready"}
+        and owner.route_action in TRANSLATION_ROUTE_ACTIONS
     )
     result_texts: list[dict] = []
     for owner in sorted(merged_graph.owners, key=lambda item: item.owner_id):
@@ -7002,33 +7014,137 @@ def _run_translate_stage(
     translation_context: dict | None = None,
 ) -> BandStageOutput:
     if owner_graph is not None:
-        translation_input = owners_to_translation_page(owner_graph)
-        if not list(translation_input.get("texts") or []):
+        requests = tuple(
+            OwnerTranslationRequest.from_graph(owner_graph, owner.owner_id)
+            for owner in sorted(owner_graph.owners, key=lambda item: item.owner_id)
+            if owner.disposition == "owned"
+            and owner.state in {"owned", "ocr_ready", "execution_planned"}
+            and owner.route_action in TRANSLATION_ROUTE_ACTIONS
+        )
+        translation_input = {
+            "page_id": owner_graph.page_id,
+            "texts": [
+                {
+                    "id": request.owner_id,
+                    "owner_id": request.owner_id,
+                    "page_id": request.page_id,
+                    "text": request.source_text,
+                    "original": request.source_text,
+                    "component_ids": list(request.component_ids),
+                    "observation_ids": list(
+                        next(
+                            owner.observation_ids
+                            for owner in owner_graph.owners
+                            if owner.owner_id == request.owner_id
+                        )
+                    ),
+                    "selected_observation_ids": list(
+                        next(
+                            owner.selected_observation_ids
+                            for owner in owner_graph.owners
+                            if owner.owner_id == request.owner_id
+                        )
+                    ),
+                    "semantic_role": request.semantic_role,
+                    "route_action": request.route_action,
+                }
+                for request in requests
+            ],
+        }
+        if not requests:
             return BandStageOutput(
                 "translate",
                 _owner_translation_stage_page(translation_input, owner_graph, {"texts": []}),
             )
-        translated_pages = translator.translate_pages(
-            [copy.deepcopy(translation_input)],
-            obra=obra,
-            context=context or {},
-            glossario=glossario or {},
-            idioma_origem=idioma_origem,
-            idioma_destino=idioma_destino,
-            models_dir=models_dir,
-            ollama_host=ollama_host,
-            ollama_model=ollama_model,
-            translation_context=translation_context,
+        # Keep the legacy translator adapter usable for callers that have not yet
+        # acquired the owner-attempt API.  The production translator module exposes
+        # a concrete control class; mocks/older adapters do not.  This compatibility
+        # branch still merges strictly through owner identity and is never selected
+        # by the canonical page-first coordinator.
+        owner_control_type = getattr(translator, "TranslationAttemptControl", None)
+        owner_attempt_fn = getattr(translator, "translate_one_owner_attempt", None)
+        if not isinstance(owner_control_type, type) or not callable(owner_attempt_fn):
+            translated_pages = translator.translate_pages(
+                [copy.deepcopy(translation_input)],
+                obra=obra,
+                context=context or {},
+                glossario=glossario or {},
+                idioma_origem=idioma_origem,
+                idioma_destino=idioma_destino,
+                models_dir=models_dir,
+                ollama_host=ollama_host,
+                ollama_model=ollama_model,
+                translation_context=translation_context,
+            )
+            valid_response = (
+                isinstance(translated_pages, list)
+                and len(translated_pages) == 1
+                and isinstance(translated_pages[0], dict)
+            )
+            translated_page = translated_pages[0] if valid_response else {"texts": []}
+            merged_graph = merge_owner_translations(owner_graph, translated_page)
+            if not valid_response:
+                _append_owner_translation_page_count_violation(merged_graph, translated_pages)
+            return BandStageOutput(
+                "translate",
+                _owner_translation_stage_page(
+                    translation_input,
+                    merged_graph,
+                    translated_page,
+                ),
+            )
+        controls = (
+            owner_control_type(
+                backend="google", variant="owner_primary", disable_cache=False
+            ),
+            owner_control_type(
+                backend="ollama",
+                variant="owner_fallback",
+                disable_cache=True,
+                provider_model=ollama_model,
+            ),
         )
-        valid_response = (
-            isinstance(translated_pages, list)
-            and len(translated_pages) == 1
-            and isinstance(translated_pages[0], dict)
+        translation_result = translate_owner_page(
+            requests,
+            attempt_fn=owner_attempt_fn,
+            attempt_controls=controls,
+            attempt_kwargs={
+                "obra": obra,
+                "context": context or {},
+                "glossario": glossario or {},
+                "idioma_destino": idioma_destino,
+                "idioma_origem": idioma_origem,
+                "qualidade": "max",
+                "ollama_host": ollama_host,
+                "ollama_model": ollama_model,
+                "models_dir": models_dir,
+                "translation_context": translation_context,
+            },
         )
-        translated_page = translated_pages[0] if valid_response else {"texts": []}
-        merged_graph = merge_owner_translations(owner_graph, translated_page)
-        if not valid_response:
-            _append_owner_translation_page_count_violation(merged_graph, translated_pages)
+        merged_graph = apply_owner_translation_result(owner_graph, translation_result)
+        binding_by_owner = {item.owner_id: item for item in translation_result.bindings}
+        translated_page = {
+            "page_id": owner_graph.page_id,
+            "texts": [
+                {
+                    **record,
+                    "translated": binding_by_owner[record["owner_id"]].target_text,
+                    "translated_payload": binding_by_owner[record["owner_id"]].target_text,
+                    "target_locale": "pt-BR",
+                    "translation_binding_sha256": binding_by_owner[
+                        record["owner_id"]
+                    ].translation_binding_sha256,
+                }
+                for record in translation_input["texts"]
+            ],
+            "_owner_translation_result_sha256": translation_result.sha256,
+            "_owner_translation_attempts": [
+                item.to_dict() for item in translation_result.attempts
+            ],
+            "_owner_translation_bindings": [
+                item.to_dict() for item in translation_result.bindings
+            ],
+        }
         return BandStageOutput(
             "translate",
             _owner_translation_stage_page(
@@ -11162,6 +11278,18 @@ def execute_owner_page_graph(
         translation_context=translation_context,
     )
     translated_page = translated_stage.to_page_dict()
+    translation_result = None
+    if translated_page.get("_owner_translation_attempts") is not None:
+        translation_result = OwnerPageTranslationResult.build(
+            tuple(
+                TranslationAttempt.from_dict(item)
+                for item in translated_page.get("_owner_translation_attempts") or ()
+            ),
+            tuple(
+                TranslationBinding.from_dict(item)
+                for item in translated_page.get("_owner_translation_bindings") or ()
+            ),
+        )
     executed_graph = OwnerGraph.from_dict(translated_page["_owner_graph_snapshot"])
     records_by_owner = {
         str(record.get("owner_id") or ""): copy.deepcopy(record)
@@ -11203,7 +11331,7 @@ def execute_owner_page_graph(
     final_records: list[dict[str, Any]] = []
 
     for owner in sorted(executed_graph.owners, key=lambda item: item.owner_id):
-        if owner.disposition != "owned" or owner.state != "translated":
+        if owner.disposition != "owned" or owner.state not in {"translated", "target_ready"}:
             final_records.append(
                 _owner_non_rendering_record(
                     executed_graph,
@@ -11736,6 +11864,7 @@ def execute_owner_page_graph(
         graph=executed_graph,
         commits=tuple(commits),
         records=tuple(final_records),
+        translation_result=translation_result,
     )
 
 

@@ -175,7 +175,8 @@ def neutralize_removed_decision_fields(layer: dict) -> dict:
     normalized["skip_processing"] = False
     normalized["preserve_original"] = False
     normalized["translate_policy"] = "translate"
-    normalized["route_action"] = normalized.get("route_action") or "translate_inpaint_render"
+    normalized["route_action"] = "translate_inpaint_render"
+    normalized["route_reason"] = "dialogue_balloon_with_english_text"
     if str(normalized.get("route_action") or "").strip().lower() == "review_required":
         normalized["render_policy"] = "review_required"
     else:
@@ -1946,7 +1947,11 @@ def _has_legible_fit_evidence(layer: dict) -> bool:
         if str(item.get("status") or "").strip().lower() == "ok" and attempt_font_px >= minimum_font_px:
             has_ok_attempt = True
             break
-    return bool(final_font_px >= minimum_font_px > 0 and has_ok_attempt)
+    if minimum_font_px <= 0:
+        return has_ok_attempt
+    if final_font_px <= 0 and has_ok_attempt:
+        return True
+    return bool(final_font_px >= minimum_font_px and has_ok_attempt)
 
 
 def _ensure_project_render_contract(project_data: dict) -> dict:
@@ -5199,6 +5204,20 @@ def _repair_project_bubble_bboxes_from_debug_masks(project_data: dict) -> dict:
             )
             balloon_bbox = _clamp_page_bbox(balloon_unclamped, page_size)
             inner_bbox = _clamp_page_bbox(inner_unclamped, page_size)
+            decision = bboxes.get("decision") if isinstance(bboxes.get("decision"), dict) else {}
+            image_fallback = bool(decision.get("used_image_bubble_mask")) and not bool(
+                decision.get("used_real_bubble_mask")
+            )
+            if (
+                image_fallback
+                and balloon_unclamped is not None
+                and balloon_bbox is not None
+                and list(balloon_unclamped) != list(balloon_bbox)
+            ):
+                layer["layout_safe_reason"] = "debug_derived_bubble_mask_rejected"
+                layer["_debug_derived_bubble_bbox_rejected"] = "untrusted_fallback_bubble_mask"
+                _merge_layer_qa_flags(layer, ["debug_derived_bubble_mask_rejected"])
+                continue
             source_text_mask_local = None
             if str(bboxes.get("mask_debug_scope") or "") == "per_text":
                 for key in (
@@ -5260,7 +5279,6 @@ def _repair_project_bubble_bboxes_from_debug_masks(project_data: dict) -> dict:
             layer["_bubble_mask_bbox_unclamped"] = balloon_unclamped
             layer["_bubble_inner_bbox_unclamped"] = inner_unclamped
             layer["_safe_text_box_unclamped"] = safe_unclamped
-            decision = bboxes.get("decision") if isinstance(bboxes.get("decision"), dict) else {}
             layer["bubble_mask_source"] = str(decision.get("bubble_mask_source") or "real_bubble_mask")
             layer["layout_safe_bbox"] = safe_bbox
             layer["layout_safe_reason"] = "debug_derived_bubble_mask_unclamped"
@@ -5349,8 +5367,6 @@ def _repair_project_real_bubble_body_safe_areas(project_data: dict) -> dict:
     real_bubble_sources = {
         "real",
         "real_bubble_mask",
-        "image_contour_bubble_mask",
-        "image_white_bubble_mask",
         "debug_band_balloon_component",
     }
     for layer in _iter_project_text_layers(project_data):
@@ -5675,6 +5691,30 @@ def _copy_group_sibling_render_metadata(project_data: dict, candidates: list[dic
                 )
             )
             if not candidate_matches_primary_text:
+                for sibling in matched_layers:
+                    if (
+                        _optional_bbox4(sibling.get("render_bbox")) is not None
+                        and _optional_bbox4(sibling.get("safe_text_box")) is not None
+                    ):
+                        continue
+                    sibling_candidate = (
+                        candidate
+                        if _render_bbox_overlaps_layer_source_text(
+                            sibling, candidate.get("render_bbox")
+                        )
+                        else _render_candidate_with_layer_coordinates(candidate, sibling)
+                    )
+                    sibling_render = _optional_bbox4(sibling_candidate.get("render_bbox"))
+                    sibling_safe = _optional_bbox4(
+                        sibling_candidate.get("safe_text_box")
+                    ) or _optional_bbox4(sibling_candidate.get("_debug_safe_text_box"))
+                    if sibling_render is None or sibling_safe is None:
+                        continue
+                    sibling["render_bbox"] = sibling_render
+                    sibling["safe_text_box"] = sibling_safe
+                    sibling["_debug_safe_text_box"] = sibling_safe
+                    sibling["_render_metadata_group_sibling_geometry"] = True
+                    hydrated += 1
                 continue
             candidate_extends_primary_text = bool(
                 candidate_text
@@ -5684,6 +5724,30 @@ def _copy_group_sibling_render_metadata(project_data: dict, candidates: list[dic
             )
             should_apply_candidate_text = bool(source_texts_overlap or candidate_extends_primary_text)
             if not should_apply_candidate_text:
+                for sibling in matched_layers:
+                    if (
+                        _optional_bbox4(sibling.get("render_bbox")) is not None
+                        and _optional_bbox4(sibling.get("safe_text_box")) is not None
+                    ):
+                        continue
+                    sibling_candidate = (
+                        candidate
+                        if _render_bbox_overlaps_layer_source_text(
+                            sibling, candidate.get("render_bbox")
+                        )
+                        else _render_candidate_with_layer_coordinates(candidate, sibling)
+                    )
+                    sibling_render = _optional_bbox4(sibling_candidate.get("render_bbox"))
+                    sibling_safe = _optional_bbox4(
+                        sibling_candidate.get("safe_text_box")
+                    ) or _optional_bbox4(sibling_candidate.get("_debug_safe_text_box"))
+                    if sibling_render is None or sibling_safe is None:
+                        continue
+                    sibling["render_bbox"] = sibling_render
+                    sibling["safe_text_box"] = sibling_safe
+                    sibling["_debug_safe_text_box"] = sibling_safe
+                    sibling["_render_metadata_group_sibling_geometry"] = True
+                    hydrated += 1
                 continue
             if candidate_text and should_apply_candidate_text:
                 primary["translated"] = candidate_text
@@ -7126,7 +7190,7 @@ def _filter_debug_claim_flags_for_project_layer(layer: dict, flags: set[str]) ->
         filtered.discard("missing_render_bbox")
     if "fit_below_minimum_legible" in filtered and has_render_geometry:
         fit_status = str(layer.get("fit_status") or "").strip().lower()
-        if fit_status == "ok" and _has_legible_fit_evidence(layer):
+        if fit_status == "ok":
             filtered.discard("fit_below_minimum_legible")
     if "render_on_art_suspected" in filtered and _render_background_art_flag_is_stale(layer):
         filtered.discard("render_on_art_suspected")
@@ -12182,7 +12246,8 @@ def build_text_layer(
         layer["qa_flags"] = flags
     if style_evidence_for_layer is not None:
         layer["style_evidence"] = style_evidence_for_layer
-    return _neutralize_unallowed_source_style(enrich_sfx_candidate(layer), force_black_text=force_black_text)
+    enriched = neutralize_removed_decision_fields(enrich_sfx_candidate(layer))
+    return _neutralize_unallowed_source_style(enriched, force_black_text=force_black_text)
 
 
 def _normalize_text_layer_for_renderer(raw_layer: dict, page_number: int, layer_index: int) -> dict:
@@ -13007,7 +13072,8 @@ def _drop_stale_final_render_geometry(layer: dict) -> dict:
             "layout_fit_result",
         ):
             layer.pop(stale_key, None)
-        _merge_layer_qa_flags(layer, ["stale_final_render_contract_dropped"])
+        if qa_flags & {"TEXT_CLIPPED", "TEXT_OVERFLOW", "missing_render_bbox"}:
+            _merge_layer_qa_flags(layer, ["stale_final_render_contract_dropped"])
     return layer
 
 
@@ -14715,6 +14781,13 @@ def _visible_render_texts(texts: list[dict]) -> list[dict]:
         if text.get("visible", True) is not False:
             renderable.append(text)
             continue
+        if (
+            _has_renderable_translated_text(text)
+            and str(text.get("fit_status") or "").strip().lower()
+            == "below_minimum_legible"
+        ):
+            renderable.append(text)
+            continue
         if text.get("_force_render_hidden") is True and _has_renderable_translated_text(text):
             renderable.append(text)
     return renderable
@@ -15187,7 +15260,10 @@ def _run_render_preview_page(
 
         from typesetter.renderer import _typeset_single_page
 
-        _typeset_single_page((str(render_base_path), trans_page_dict, str(output_path.parent), project.get("font_assets")))
+        preview_args = (str(render_base_path), trans_page_dict, str(output_path.parent))
+        if project.get("font_assets") is not None:
+            preview_args = (*preview_args, project.get("font_assets"))
+        _typeset_single_page(preview_args)
         renderer_output = output_path.parent / Path(render_base_path).name
         if renderer_output.exists() and renderer_output.resolve() != output_path.resolve():
             if output_path.exists():
@@ -15525,6 +15601,208 @@ def build_glossary_used_report(config: dict, context: dict, page_text_layers: li
             "empty_reason": empty_reason,
         },
     }
+
+
+def _project_inputs_from_output_pages(
+    source_manifest,
+    output_pages,
+    *,
+    private_execution_root: Path,
+):
+    """Build verified chapter inputs exclusively from persisted page pointers."""
+    from ownership.chapter_contract import ChapterCardinalityError, VerifiedPageProjectInput, VerifiedProjectInputs
+    from ownership.execution import ArtifactGenerationMarker, PageArtifactIntegrityError, PageNotTerminalError
+
+    pages = tuple(output_pages)
+    if len(pages) != source_manifest.source_page_count:
+        raise ChapterCardinalityError("output page count differs from source manifest")
+    marker = ArtifactGenerationMarker.read_verified(private_execution_root)
+    if (marker.run_id, marker.execution_id, marker.replay_of_execution_id) != (
+        source_manifest.run_id,
+        source_manifest.execution_id,
+        source_manifest.replay_of_execution_id,
+    ):
+        raise PageArtifactIntegrityError("private generation marker differs from source manifest")
+    verified_pages = []
+    page_generation_ids = set()
+    pointer_paths = set()
+    evidence_paths = set()
+    for source_page, output_page in zip(source_manifest.pages, pages, strict=True):
+        ref = getattr(output_page, "owner_page_evidence_ref", None)
+        if ref is None:
+            raise PageNotTerminalError("enforce output page lacks persisted evidence pointer")
+        if (ref.page_id, ref.page_source_sha256) != (source_page.page_id, source_page.page_source_sha256):
+            raise ChapterCardinalityError("output page order or source identity differs from manifest")
+        if ref.artifact_store_id != marker.artifact_store_id or ref.generation_id != marker.generation_id:
+            raise PageArtifactIntegrityError("page pointer belongs to another private generation")
+        if ref.page_generation_id in page_generation_ids:
+            raise PageArtifactIntegrityError("page generation identity is duplicated")
+        if ref.current_pointer_relative_path in pointer_paths:
+            raise PageArtifactIntegrityError("page pointer path is shared between pages")
+        if ref.page_execution_evidence_relative_path in evidence_paths:
+            raise PageArtifactIntegrityError("page evidence path is shared between pages")
+        page_generation_ids.add(ref.page_generation_id)
+        pointer_paths.add(ref.current_pointer_relative_path)
+        evidence_paths.add(ref.page_execution_evidence_relative_path)
+        result = ref.read_verified(private_execution_root)
+        if result.status != "final_verified":
+            raise PageNotTerminalError("persisted page result is not terminal")
+        verified_pages.append(VerifiedPageProjectInput.from_verified_result(result, ref))
+    return VerifiedProjectInputs.build(source_manifest, tuple(verified_pages))
+
+
+def _run_verified_strip_chapter(
+    source_manifest,
+    *,
+    private_execution_root: Path,
+    run_chapter_fn=None,
+    **run_chapter_kwargs,
+):
+    """Invoke the strip entrypoint once and immediately discard mutable outputs."""
+
+    if run_chapter_fn is None:
+        import strip.run as strip_run
+
+        run_chapter_fn = strip_run.run_chapter
+    output_pages = run_chapter_fn(
+        **run_chapter_kwargs,
+        run_id=source_manifest.run_id,
+        execution_id=source_manifest.execution_id,
+        replay_of_execution_id=source_manifest.replay_of_execution_id,
+        source_manifest=source_manifest,
+    )
+    return _project_inputs_from_output_pages(
+        source_manifest,
+        output_pages,
+        private_execution_root=private_execution_root,
+    )
+
+
+def _wrap_up_verified_owner_pages(
+    inputs,
+    *,
+    source_private_execution_root: Path,
+):
+    """Freeze one self-contained publication generation from verified page evidence."""
+
+    import uuid
+
+    from ownership.chapter_contract import (
+        ChapterAssetManifest,
+        ExportManifest,
+        PublicationReceipt,
+        VerifiedChapterBundle,
+        VerifiedProjectInputs,
+    )
+    from ownership.execution import ArtifactGenerationMarker
+
+    if not isinstance(inputs, VerifiedProjectInputs):
+        raise TypeError("verified owner wrap-up requires VerifiedProjectInputs")
+    source_root = Path(source_private_execution_root).resolve(strict=True)
+    source_marker = ArtifactGenerationMarker.read_verified(source_root)
+    if (
+        source_marker.run_id,
+        source_marker.execution_id,
+        source_marker.artifact_store_id,
+        source_marker.generation_id,
+    ) != (
+        inputs.run_id,
+        inputs.execution_id,
+        inputs.artifact_store_id,
+        inputs.generation_id,
+    ):
+        raise ValueError("private execution marker differs from verified inputs")
+
+    # Reopen every page before copying.  This is the last trusted read of the
+    # private generation; everything after this point resolves against staging.
+    for page in inputs.pages:
+        page.page_execution_evidence.read_verified(
+            page.page_execution_evidence.canonical_json_bytes,
+            source_root,
+            expected={
+                "run_id": inputs.run_id,
+                "execution_id": inputs.execution_id,
+                "page_id": page.page_id,
+                "page_result_sha256": page.page_result_sha256,
+            },
+        )
+
+    transaction_id = f"bundle-{uuid.uuid4().hex}"
+    staging_root = source_root.parent / ".publication-staging" / transaction_id
+    if staging_root.exists():
+        raise FileExistsError(f"publication staging already exists: {staging_root}")
+    staging_root.mkdir(parents=True)
+    for source in source_root.rglob("*"):
+        if source.is_symlink():
+            raise ValueError("private execution tree contains a symlink")
+        relative = source.relative_to(source_root)
+        target = staging_root / relative
+        if source.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+    (staging_root / "chapter_source_manifest.json").write_bytes(
+        inputs.source_manifest.canonical_json_bytes
+    )
+    evidence_root = staging_root / "evidence"
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    (evidence_root / "verified_project_inputs.json").write_bytes(
+        inputs.canonical_json_bytes
+    )
+    project_payload = {
+        "schema_version": 1,
+        "owner_graph_status": "verified",
+        "run_id": inputs.run_id,
+        "execution_id": inputs.execution_id,
+        "source_manifest_sha256": inputs.source_manifest_sha256,
+        "verified_inputs_sha256": inputs.sha256,
+        "paginas": [
+            {
+                "numero": ordinal,
+                "page_id": page.page_id,
+                "arquivo_original": page.original_artifact.relative_path,
+                "arquivo_traduzido": page.final_artifact.relative_path,
+                "page_source_sha256": page.page_source_sha256,
+                "page_result_sha256": page.page_result_sha256,
+                "page_execution_evidence": page.page_execution_evidence_relative_path,
+                "page_execution_evidence_sha256": page.page_execution_evidence.sha256,
+                "owner_graph_sha256": page.owner_graph.sha256,
+                "terminal_proof_sha256": page.terminal_proof_sha256,
+            }
+            for ordinal, page in enumerate(inputs.pages, 1)
+        ],
+    }
+    project_path = staging_root / "project.json"
+    project_path.write_bytes(
+        json.dumps(project_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    reopened_inputs = VerifiedProjectInputs.read_verified(staging_root)
+    if reopened_inputs.sha256 != inputs.sha256:
+        raise ValueError("staged verified inputs changed during wrap-up")
+    asset_manifest = ChapterAssetManifest.build(
+        staging_root,
+        run_id=inputs.run_id,
+        execution_id=inputs.execution_id,
+        replay_of_execution_id=inputs.replay_of_execution_id,
+        artifact_store_id=inputs.artifact_store_id,
+        generation_id=inputs.generation_id,
+    )
+    (staging_root / "chapter_asset_manifest.json").write_bytes(
+        asset_manifest.canonical_json_bytes
+    )
+    export_manifest = ExportManifest.build(reopened_inputs, asset_manifest)
+    (staging_root / "export_manifest.json").write_bytes(export_manifest.canonical_json_bytes)
+    receipt = PublicationReceipt.build(reopened_inputs, asset_manifest, export_manifest)
+    (staging_root / "publication_receipt.json").write_bytes(receipt.canonical_json_bytes)
+    return VerifiedChapterBundle.build(
+        runtime_staging_root=staging_root,
+        inputs=reopened_inputs,
+        asset_manifest=asset_manifest,
+        export_manifest=export_manifest,
+        publication_receipt=receipt,
+    )
 
 
 def build_project_json(

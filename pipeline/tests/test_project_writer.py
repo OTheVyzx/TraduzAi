@@ -69,7 +69,7 @@ def _verified_owner_project():
                 "source_payload": "HELLO THERE",
                 "translated_payload": None,
                 "disposition": "owned",
-                "state": "ocr_ready",
+                "state": "owned",
                 "route_action": "translate_inpaint_render",
                 "execution_tile_id": None,
                 "action_mask_ref": None,

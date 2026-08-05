@@ -1,0 +1,854 @@
+"""Persisted page-execution artifacts and transactional evidence shells."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import mimetypes
+from pathlib import Path, PurePosixPath
+import re
+import unicodedata
+from typing import Any, Mapping
+
+import numpy as np
+from PIL import Image
+
+from .hash_contract import (
+    canonical_json_bytes,
+    canonical_json_sha256,
+    canonical_page_sha256,
+    sha256_bytes,
+    sha256_file,
+)
+
+
+ARTIFACT_GENERATION_MARKER_SCHEMA_VERSION = 1
+PAGE_EXECUTION_EVIDENCE_SCHEMA_VERSION = 1
+PAGE_EXECUTION_EVIDENCE_REF_SCHEMA_VERSION = 1
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class PageArtifactIntegrityError(ValueError):
+    """Raised before exposing bytes whose path, identity, or hashes diverge."""
+
+
+class PageNotTerminalError(ValueError):
+    """Raised when candidate-only evidence reaches an export boundary."""
+
+
+@dataclass(frozen=True)
+class FrozenJSONSnapshot:
+    canonical_json_bytes: bytes
+    sha256: str
+
+    @classmethod
+    def build(cls, value: Mapping[str, Any]) -> "FrozenJSONSnapshot":
+        encoded = canonical_json_bytes(dict(value))
+        return cls(canonical_json_bytes=encoded, sha256=sha256_bytes(encoded))
+
+    def read(self) -> dict[str, Any]:
+        if sha256_bytes(self.canonical_json_bytes) != self.sha256:
+            raise PageArtifactIntegrityError("frozen JSON snapshot hash mismatch")
+        value = json.loads(self.canonical_json_bytes.decode("utf-8"))
+        if not isinstance(value, dict):
+            raise PageArtifactIntegrityError("frozen JSON snapshot root is not an object")
+        return value
+
+
+@dataclass(frozen=True)
+class PageGeometrySnapshot:
+    run_id: str
+    execution_id: str
+    page_id: str
+    page_source_sha256: str
+    canonical_json_bytes: bytes
+    sha256: str
+    y_top: int
+    y_bottom: int
+    width: int
+    height: int
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        run_id: str,
+        execution_id: str,
+        page_id: str,
+        page_source_sha256: str,
+        y_top: int,
+        y_bottom: int,
+        width: int,
+        height: int,
+    ) -> "PageGeometrySnapshot":
+        _require_hash(page_source_sha256, "page_source_sha256")
+        if not run_id or not execution_id or not page_id:
+            raise PageArtifactIntegrityError("page geometry identity is incomplete")
+        if min(width, height) <= 0 or y_top < 0 or y_bottom <= y_top or y_bottom - y_top != height:
+            raise PageArtifactIntegrityError("page geometry dimensions are invalid")
+        payload = {
+            "run_id": run_id,
+            "execution_id": execution_id,
+            "page_id": page_id,
+            "page_source_sha256": page_source_sha256,
+            "y_top": int(y_top),
+            "y_bottom": int(y_bottom),
+            "width": int(width),
+            "height": int(height),
+        }
+        encoded = canonical_json_bytes(payload)
+        return cls(**payload, canonical_json_bytes=encoded, sha256=sha256_bytes(encoded))
+
+    def read(self) -> dict[str, Any]:
+        if sha256_bytes(self.canonical_json_bytes) != self.sha256:
+            raise PageArtifactIntegrityError("page geometry snapshot hash mismatch")
+        return json.loads(self.canonical_json_bytes.decode("utf-8"))
+
+
+@dataclass(frozen=True)
+class FinalPageSnapshot:
+    lossless_png_bytes: bytes
+    page_output_pixel_sha256: str
+    final_file_sha256: str
+    artifact_ref: "PersistedRGBImageArtifactRef"
+    width: int
+    height: int
+    mode: str = "RGB"
+
+    @classmethod
+    def from_artifact(
+        cls,
+        artifact_ref: "PersistedRGBImageArtifactRef",
+        generation_root: str | Path,
+    ) -> "FinalPageSnapshot":
+        pixels = artifact_ref.load_verified(generation_root)
+        path = _resolve_asset(generation_root, artifact_ref.relative_path, must_exist=True)
+        encoded = path.read_bytes()
+        return cls(
+            lossless_png_bytes=encoded,
+            page_output_pixel_sha256=artifact_ref.pixel_sha256,
+            final_file_sha256=artifact_ref.file_sha256,
+            artifact_ref=artifact_ref,
+            width=int(pixels.shape[1]),
+            height=int(pixels.shape[0]),
+        )
+
+    def read_only_rgb(self) -> np.ndarray:
+        if sha256_bytes(self.lossless_png_bytes) != self.final_file_sha256:
+            raise PageArtifactIntegrityError("final page file hash mismatch")
+        with Image.open(__import__("io").BytesIO(self.lossless_png_bytes)) as opened:
+            rgb = np.asarray(opened.convert("RGB"), dtype=np.uint8).copy()
+        if (
+            rgb.shape != (self.height, self.width, 3)
+            or self.mode != "RGB"
+            or canonical_page_sha256(rgb) != self.page_output_pixel_sha256
+            or self.page_output_pixel_sha256 != self.artifact_ref.pixel_sha256
+        ):
+            raise PageArtifactIntegrityError("final page pixel identity mismatch")
+        rgb.setflags(write=False)
+        return rgb
+
+
+@dataclass(frozen=True)
+class TerminalPixelProof:
+    run_id: str
+    execution_id: str
+    page_id: str
+    page_source_sha256: str
+    final_page_pixel_sha256: str
+    cleanup_base_sha256: str
+    composition_sha256: str
+    translation_binding_sha256s: tuple[str, ...]
+    source_payload_sha256s: tuple[str, ...]
+    target_payload_sha256s: tuple[str, ...]
+    target_glyph_patch_sha256s: tuple[str, ...]
+    target_materialization_sha256s: tuple[str, ...]
+    final_replacement_verdict_sha256s: tuple[str, ...]
+    repair_budget_policy_sha256: str
+    replacement_verification_policy_sha256: str
+    final_qa_probe_id: str
+    fresh_ocr_invocation_id: str
+    fresh_ocr_root_input_pixel_sha256: str
+    fresh_ocr_attempt_ids: tuple[str, ...]
+    fresh_ocr_attempt_chain_sha256: str
+    fresh_ocr_payload_sha256: str
+    source_support_removed: bool
+    target_glyph_patch_applied: bool
+    fresh_source_ocr_absent: bool
+    coverage_complete: bool
+    unowned_material_text_absent: bool
+    proof_sha256: str
+
+    @classmethod
+    def build(cls, **values: Any) -> "TerminalPixelProof":
+        normalized = dict(values)
+        for key in (
+            "translation_binding_sha256s", "source_payload_sha256s", "target_payload_sha256s",
+            "target_glyph_patch_sha256s", "target_materialization_sha256s",
+            "final_replacement_verdict_sha256s", "fresh_ocr_attempt_ids",
+        ):
+            normalized[key] = tuple(str(value) for value in normalized.get(key) or ())
+        for key in (
+            "page_source_sha256", "final_page_pixel_sha256", "cleanup_base_sha256",
+            "composition_sha256", "repair_budget_policy_sha256",
+            "replacement_verification_policy_sha256", "fresh_ocr_root_input_pixel_sha256",
+            "fresh_ocr_attempt_chain_sha256", "fresh_ocr_payload_sha256",
+        ):
+            _require_hash(str(normalized.get(key) or ""), key)
+        for key in (
+            "translation_binding_sha256s", "source_payload_sha256s", "target_payload_sha256s",
+            "target_glyph_patch_sha256s", "target_materialization_sha256s",
+            "final_replacement_verdict_sha256s",
+        ):
+            for value in normalized[key]:
+                _require_hash(value, key)
+        if not all(str(normalized.get(key) or "").strip() for key in (
+            "run_id", "execution_id", "page_id", "final_qa_probe_id", "fresh_ocr_invocation_id"
+        )):
+            raise PageArtifactIntegrityError("terminal proof identity is incomplete")
+        payload = {key: normalized[key] for key in _terminal_proof_payload_fields()}
+        proof_hash = canonical_json_sha256(_json_tuple_lists(payload))
+        return cls(**payload, proof_sha256=proof_hash)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _json_tuple_lists({key: getattr(self, key) for key in _terminal_proof_payload_fields()}) | {
+            "proof_sha256": self.proof_sha256
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "TerminalPixelProof":
+        rebuilt = cls.build(**{key: payload.get(key) for key in _terminal_proof_payload_fields()})
+        if rebuilt.proof_sha256 != payload.get("proof_sha256"):
+            raise PageArtifactIntegrityError("terminal proof hash mismatch")
+        return rebuilt
+
+
+@dataclass(frozen=True)
+class PageExecutionEvidenceSnapshot:
+    schema_version: int
+    run_id: str
+    execution_id: str
+    replay_of_execution_id: str | None
+    replay_source_page_evidence_sha256: str | None
+    page_id: str
+    page_source_sha256: str
+    page_result_sha256: str
+    page_content_semantic_sha256: str
+    artifact_store_id: str
+    generation_id: str
+    canonical_json_bytes: bytes
+    sha256: str
+
+    @classmethod
+    def build(cls, result: Any) -> "PageExecutionEvidenceSnapshot":
+        payload = result.to_canonical_dict()
+        encoded = canonical_json_bytes(payload)
+        original_ref = getattr(result.request.original_page, "artifact_ref", None)
+        if original_ref is None:
+            raise PageArtifactIntegrityError("page evidence requires persisted original artifact")
+        final_ref = getattr(getattr(result, "final_page", None), "artifact_ref", None)
+        authority_ref = final_ref or original_ref
+        return cls(
+            schema_version=PAGE_EXECUTION_EVIDENCE_SCHEMA_VERSION,
+            run_id=result.request.run_id,
+            execution_id=result.request.execution_id,
+            replay_of_execution_id=result.request.replay_of_execution_id,
+            replay_source_page_evidence_sha256=payload.get("replay_source_page_evidence_sha256"),
+            page_id=result.page_id,
+            page_source_sha256=result.request.page_source_sha256,
+            page_result_sha256=result.result_sha256,
+            page_content_semantic_sha256=result.page_content_semantic_sha256,
+            artifact_store_id=authority_ref.artifact_store_id,
+            generation_id=authority_ref.generation_id,
+            canonical_json_bytes=encoded,
+            sha256=sha256_bytes(encoded),
+        )
+
+    @classmethod
+    def read_verified(
+        cls,
+        encoded: bytes,
+        generation_root: str | Path,
+        *,
+        expected: Mapping[str, Any] | None = None,
+    ) -> Any:
+        try:
+            payload = json.loads(encoded.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PageArtifactIntegrityError("page execution evidence JSON is invalid") from exc
+        if not isinstance(payload, dict) or payload.get("schema_version") != PAGE_EXECUTION_EVIDENCE_SCHEMA_VERSION:
+            raise PageArtifactIntegrityError("page execution evidence schema is unsupported")
+        from strip.page_pipeline import PageExecutionResult
+
+        result = PageExecutionResult.from_canonical_dict(payload, generation_root=generation_root)
+        rebuilt = cls.build(result)
+        if rebuilt.canonical_json_bytes != encoded:
+            raise PageArtifactIntegrityError("page execution evidence is not canonical")
+        for key, value in dict(expected or {}).items():
+            if getattr(rebuilt, key) != value:
+                raise PageArtifactIntegrityError(f"page execution evidence {key} mismatch")
+        return result
+
+
+@dataclass(frozen=True)
+class PageExecutionEvidenceRef:
+    schema_version: int
+    run_id: str
+    execution_id: str
+    replay_of_execution_id: str | None
+    page_id: str
+    page_source_sha256: str
+    artifact_store_id: str
+    generation_id: str
+    page_generation_id: str
+    current_pointer_relative_path: str
+    current_pointer_file_sha256: str
+    page_execution_evidence_relative_path: str
+    page_execution_evidence_file_sha256: str
+    page_execution_evidence_sha256: str
+    page_result_sha256: str
+    pointer_sha256: str
+    canonical_json_bytes: bytes
+    sha256: str
+
+    @classmethod
+    def build(cls, **values: Any) -> "PageExecutionEvidenceRef":
+        normalized = dict(values)
+        for key in ("current_pointer_relative_path", "page_execution_evidence_relative_path"):
+            normalized[key] = _relative_path(str(normalized.get(key) or ""))
+        for key in (
+            "page_source_sha256", "current_pointer_file_sha256",
+            "page_execution_evidence_file_sha256", "page_execution_evidence_sha256",
+            "page_result_sha256", "pointer_sha256",
+        ):
+            _require_hash(str(normalized.get(key) or ""), key)
+        normalized["schema_version"] = PAGE_EXECUTION_EVIDENCE_REF_SCHEMA_VERSION
+        payload = {key: normalized.get(key) for key in _page_evidence_ref_payload_fields()}
+        encoded = canonical_json_bytes(payload)
+        return cls(**payload, canonical_json_bytes=encoded, sha256=sha256_bytes(encoded))
+
+    def read_verified(self, private_execution_root: str | Path) -> Any:
+        marker = ArtifactGenerationMarker.read_verified(private_execution_root)
+        _require_marker_identity(self, marker)
+        pointer_path = _resolve_asset(
+            private_execution_root, self.current_pointer_relative_path, must_exist=True
+        )
+        pointer_bytes = pointer_path.read_bytes()
+        if sha256_bytes(pointer_bytes) != self.current_pointer_file_sha256:
+            raise PageArtifactIntegrityError("page current pointer file hash mismatch")
+        try:
+            pointer = json.loads(pointer_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PageArtifactIntegrityError("page current pointer JSON is invalid") from exc
+        supplied_pointer_hash = pointer.pop("pointer_sha256", None)
+        if canonical_json_sha256(pointer) != supplied_pointer_hash or supplied_pointer_hash != self.pointer_sha256:
+            raise PageArtifactIntegrityError("page current pointer hash mismatch")
+        for key in _page_pointer_fields():
+            if pointer.get(key) != getattr(self, key):
+                raise PageArtifactIntegrityError(f"page current pointer {key} mismatch")
+        evidence_path = _resolve_asset(
+            private_execution_root, self.page_execution_evidence_relative_path, must_exist=True
+        )
+        evidence_bytes = evidence_path.read_bytes()
+        if sha256_bytes(evidence_bytes) != self.page_execution_evidence_file_sha256:
+            raise PageArtifactIntegrityError("page execution evidence file hash mismatch")
+        return PageExecutionEvidenceSnapshot.read_verified(
+            evidence_bytes,
+            private_execution_root,
+            expected={
+                "run_id": self.run_id,
+                "execution_id": self.execution_id,
+                "page_id": self.page_id,
+                "page_source_sha256": self.page_source_sha256,
+                "artifact_store_id": self.artifact_store_id,
+                "generation_id": self.generation_id,
+                "sha256": self.page_execution_evidence_sha256,
+                "page_result_sha256": self.page_result_sha256,
+            },
+        )
+
+
+@dataclass
+class PageCandidateTransaction:
+    private_execution_root: Path
+    run_id: str
+    execution_id: str
+    page_id: str
+    artifact_store_id: str
+    generation_id: str
+    page_generation_id: str
+    transaction_id: str
+
+    def commit_verified_generation(self, result: Any) -> PageExecutionEvidenceRef:
+        if getattr(result, "status", None) != "final_verified":
+            raise PageNotTerminalError("only final_verified pages can be persisted as current")
+        marker = ArtifactGenerationMarker.read_verified(self.private_execution_root)
+        if (
+            marker.run_id, marker.execution_id, marker.artifact_store_id, marker.generation_id
+        ) != (self.run_id, self.execution_id, self.artifact_store_id, self.generation_id):
+            raise PageArtifactIntegrityError("page transaction identity differs from generation marker")
+        if result.page_id != self.page_id or result.request.execution_id != self.execution_id:
+            raise PageArtifactIntegrityError("page transaction received another page execution")
+        result.request.original_page.artifact_ref.load_verified(self.private_execution_root)
+        result.final_page.artifact_ref.load_verified(self.private_execution_root)
+        snapshot = PageExecutionEvidenceSnapshot.build(result)
+        generation_relative = (
+            f".page-generations/{self.page_id}/{self.page_generation_id}/page_execution_evidence.json"
+        )
+        generation_path = _resolve_asset(
+            self.private_execution_root, generation_relative, must_exist=False
+        )
+        generation_path.parent.mkdir(parents=True, exist_ok=True)
+        if generation_path.exists():
+            raise PageArtifactIntegrityError("immutable page generation already exists")
+        temporary = generation_path.with_name(f".{generation_path.name}.{self.transaction_id}.tmp")
+        temporary.write_bytes(snapshot.canonical_json_bytes)
+        temporary.replace(generation_path)
+        evidence_file_sha = sha256_file(generation_path)
+        pointer_relative = f".page-current/{self.page_id}/current.json"
+        pointer_path = _resolve_asset(self.private_execution_root, pointer_relative, must_exist=False)
+        pointer_path.parent.mkdir(parents=True, exist_ok=True)
+        pointer_payload = {
+            "schema_version": PAGE_EXECUTION_EVIDENCE_REF_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "execution_id": self.execution_id,
+            "replay_of_execution_id": result.request.replay_of_execution_id,
+            "page_id": self.page_id,
+            "page_source_sha256": result.request.page_source_sha256,
+            "artifact_store_id": self.artifact_store_id,
+            "generation_id": self.generation_id,
+            "page_generation_id": self.page_generation_id,
+            "current_pointer_relative_path": pointer_relative,
+            "page_execution_evidence_relative_path": generation_relative,
+            "page_execution_evidence_file_sha256": evidence_file_sha,
+            "page_execution_evidence_sha256": snapshot.sha256,
+            "page_result_sha256": result.result_sha256,
+        }
+        pointer_sha = canonical_json_sha256(pointer_payload)
+        pointer_bytes = canonical_json_bytes(pointer_payload | {"pointer_sha256": pointer_sha})
+        pointer_temporary = pointer_path.with_name(f".{pointer_path.name}.{self.transaction_id}.tmp")
+        pointer_temporary.write_bytes(pointer_bytes)
+        pointer_temporary.replace(pointer_path)
+        return PageExecutionEvidenceRef.build(
+            **pointer_payload,
+            current_pointer_file_sha256=sha256_bytes(pointer_bytes),
+            pointer_sha256=pointer_sha,
+        )
+
+    def recover(self) -> None:
+        """Current pointers are atomic; immutable orphan generations remain non-authoritative."""
+
+    def _fault_checkpoint(self, phase: str) -> None:
+        del phase
+
+
+def _require_hash(value: str, field: str) -> str:
+    normalized = str(value or "")
+    if not _SHA256_RE.fullmatch(normalized):
+        raise PageArtifactIntegrityError(f"{field} is not a lowercase SHA-256")
+    return normalized
+
+
+def _relative_path(value: str) -> str:
+    raw = str(value or "")
+    if not raw or raw.startswith("/") or "\\" in raw or re.match(r"^[A-Za-z]:", raw):
+        raise PageArtifactIntegrityError(f"artifact path is not relative and portable: {raw!r}")
+    parsed = PurePosixPath(raw)
+    if any(part in {"", ".", ".."} for part in parsed.parts) or parsed.as_posix() != raw:
+        raise PageArtifactIntegrityError(f"artifact path is not canonical: {raw!r}")
+    return raw
+
+
+def _resolve_asset(generation_root: str | Path, relative_path: str, *, must_exist: bool) -> Path:
+    root = Path(generation_root).resolve(strict=True)
+    relative = _relative_path(relative_path)
+    lexical = root.joinpath(*PurePosixPath(relative).parts)
+    try:
+        resolved = lexical.resolve(strict=must_exist)
+        resolved.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise PageArtifactIntegrityError(f"artifact path escapes generation root: {relative}") from exc
+    if must_exist and not resolved.is_file():
+        raise PageArtifactIntegrityError(f"artifact is missing or not a file: {relative}")
+    return resolved
+
+
+def _validate_generation_tree_names(root: Path) -> None:
+    seen: dict[str, str] = {}
+    for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        key = unicodedata.normalize("NFC", relative).casefold()
+        previous = seen.get(key)
+        if previous is not None and previous != relative:
+            raise PageArtifactIntegrityError(
+                f"generation contains NFC/casefold path collision: {previous!r} and {relative!r}"
+            )
+        seen[key] = relative
+
+
+@dataclass(frozen=True)
+class ArtifactGenerationMarker:
+    schema_version: int
+    artifact_store_id: str
+    generation_id: str
+    run_id: str
+    execution_id: str
+    replay_of_execution_id: str | None
+    canonical_json_bytes: bytes
+    sha256: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        artifact_store_id: str,
+        generation_id: str,
+        run_id: str,
+        execution_id: str,
+        replay_of_execution_id: str | None = None,
+    ) -> "ArtifactGenerationMarker":
+        if not all(str(value or "").strip() for value in (artifact_store_id, generation_id, run_id, execution_id)):
+            raise PageArtifactIntegrityError("artifact generation identity is incomplete")
+        payload = {
+            "schema_version": ARTIFACT_GENERATION_MARKER_SCHEMA_VERSION,
+            "artifact_store_id": artifact_store_id,
+            "generation_id": generation_id,
+            "run_id": run_id,
+            "execution_id": execution_id,
+            "replay_of_execution_id": replay_of_execution_id,
+        }
+        encoded = canonical_json_bytes(payload)
+        return cls(
+            schema_version=ARTIFACT_GENERATION_MARKER_SCHEMA_VERSION,
+            artifact_store_id=artifact_store_id,
+            generation_id=generation_id,
+            run_id=run_id,
+            execution_id=execution_id,
+            replay_of_execution_id=replay_of_execution_id,
+            canonical_json_bytes=encoded,
+            sha256=sha256_bytes(encoded),
+        )
+
+    def write(self, generation_root: str | Path) -> Path:
+        root = Path(generation_root).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / "artifact_generation.json"
+        payload = json.loads(self.canonical_json_bytes.decode("utf-8"))
+        payload["marker_sha256"] = self.sha256
+        path.write_bytes(canonical_json_bytes(payload))
+        return path
+
+    @classmethod
+    def read_verified(cls, generation_root: str | Path) -> "ArtifactGenerationMarker":
+        root = Path(generation_root).resolve(strict=True)
+        path = root / "artifact_generation.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PageArtifactIntegrityError("artifact generation marker is missing or invalid") from exc
+        expected = {
+            "schema_version", "artifact_store_id", "generation_id", "run_id",
+            "execution_id", "replay_of_execution_id", "marker_sha256",
+        }
+        if not isinstance(payload, dict) or set(payload) != expected:
+            raise PageArtifactIntegrityError("artifact generation marker fields are invalid")
+        if payload["schema_version"] != ARTIFACT_GENERATION_MARKER_SCHEMA_VERSION:
+            raise PageArtifactIntegrityError("artifact generation marker schema is unsupported")
+        marker = cls.create(
+            artifact_store_id=str(payload["artifact_store_id"]),
+            generation_id=str(payload["generation_id"]),
+            run_id=str(payload["run_id"]),
+            execution_id=str(payload["execution_id"]),
+            replay_of_execution_id=(
+                str(payload["replay_of_execution_id"])
+                if payload["replay_of_execution_id"] is not None else None
+            ),
+        )
+        if marker.sha256 != payload["marker_sha256"]:
+            raise PageArtifactIntegrityError("artifact generation marker hash mismatch")
+        _validate_generation_tree_names(root)
+        return marker
+
+
+@dataclass(frozen=True)
+class PersistedAssetRef:
+    run_id: str
+    execution_id: str
+    origin_execution_id: str
+    source_artifact_ref_sha256: str | None
+    page_id: str | None
+    artifact_store_id: str
+    generation_id: str
+    relative_path: str
+    file_sha256: str
+    size_bytes: int
+    media_type: str
+    decoded_mode: str | None
+    decoded_pixel_sha256: str | None
+    width: int | None
+    height: int | None
+    artifact_ref_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return _asset_ref_payload(self) | {"artifact_ref_sha256": self.artifact_ref_sha256}
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "PersistedAssetRef":
+        supplied_hash = str(payload.get("artifact_ref_sha256") or "")
+        rebuilt = cls.build(**{key: payload.get(key) for key in _asset_ref_payload_fields()})
+        if rebuilt.artifact_ref_sha256 != supplied_hash:
+            raise PageArtifactIntegrityError("artifact ref hash mismatch")
+        return rebuilt
+
+    @classmethod
+    def build(cls, **values: Any) -> "PersistedAssetRef":
+        normalized = dict(values)
+        normalized["relative_path"] = _relative_path(str(normalized.get("relative_path") or ""))
+        _require_hash(str(normalized.get("file_sha256") or ""), "file_sha256")
+        source_hash = normalized.get("source_artifact_ref_sha256")
+        if source_hash is not None:
+            _require_hash(str(source_hash), "source_artifact_ref_sha256")
+        pixel_hash = normalized.get("decoded_pixel_sha256")
+        if pixel_hash is not None:
+            _require_hash(str(pixel_hash), "decoded_pixel_sha256")
+        if int(normalized.get("size_bytes") or 0) < 0:
+            raise PageArtifactIntegrityError("artifact size is invalid")
+        if not all(str(normalized.get(key) or "").strip() for key in ("run_id", "execution_id", "origin_execution_id", "artifact_store_id", "generation_id", "media_type")):
+            raise PageArtifactIntegrityError("artifact ref identity is incomplete")
+        payload = {
+            key: normalized.get(key)
+            for key in (
+                "run_id", "execution_id", "origin_execution_id", "source_artifact_ref_sha256",
+                "page_id", "artifact_store_id", "generation_id", "relative_path", "file_sha256",
+                "size_bytes", "media_type", "decoded_mode", "decoded_pixel_sha256", "width", "height",
+            )
+        }
+        return cls(**payload, artifact_ref_sha256=canonical_json_sha256(payload))
+
+    @classmethod
+    def from_file(
+        cls,
+        generation_root: str | Path,
+        relative_path: str,
+        *,
+        marker: ArtifactGenerationMarker | None = None,
+        page_id: str | None = None,
+        media_type: str | None = None,
+        origin_execution_id: str | None = None,
+        source_artifact_ref_sha256: str | None = None,
+    ) -> "PersistedAssetRef":
+        marker = marker or ArtifactGenerationMarker.read_verified(generation_root)
+        path = _resolve_asset(generation_root, relative_path, must_exist=True)
+        return cls.build(
+            run_id=marker.run_id,
+            execution_id=marker.execution_id,
+            origin_execution_id=origin_execution_id or marker.execution_id,
+            source_artifact_ref_sha256=source_artifact_ref_sha256,
+            page_id=page_id,
+            artifact_store_id=marker.artifact_store_id,
+            generation_id=marker.generation_id,
+            relative_path=relative_path,
+            file_sha256=sha256_file(path),
+            size_bytes=path.stat().st_size,
+            media_type=media_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            decoded_mode=None,
+            decoded_pixel_sha256=None,
+            width=None,
+            height=None,
+        )
+
+    def load_verified_bytes(self, generation_root: str | Path) -> bytes:
+        marker = ArtifactGenerationMarker.read_verified(generation_root)
+        _require_marker_identity(self, marker)
+        path = _resolve_asset(generation_root, self.relative_path, must_exist=True)
+        data = path.read_bytes()
+        if len(data) != self.size_bytes or sha256_bytes(data) != self.file_sha256:
+            raise PageArtifactIntegrityError("artifact byte hash or size mismatch")
+        if canonical_json_sha256(_asset_ref_payload(self)) != self.artifact_ref_sha256:
+            raise PageArtifactIntegrityError("artifact ref hash mismatch")
+        return data
+
+
+@dataclass(frozen=True)
+class PersistedRGBImageArtifactRef:
+    run_id: str
+    execution_id: str
+    origin_execution_id: str
+    source_artifact_ref_sha256: str | None
+    page_id: str
+    artifact_store_id: str
+    generation_id: str
+    relative_path: str
+    file_sha256: str
+    pixel_sha256: str
+    width: int
+    height: int
+    mode: str
+    artifact_ref_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return _rgb_ref_payload(self) | {"artifact_ref_sha256": self.artifact_ref_sha256}
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "PersistedRGBImageArtifactRef":
+        values = {key: payload.get(key) for key in _rgb_ref_payload_fields()}
+        values["relative_path"] = _relative_path(str(values["relative_path"] or ""))
+        for field in ("file_sha256", "pixel_sha256"):
+            _require_hash(str(values[field] or ""), field)
+        if values["source_artifact_ref_sha256"] is not None:
+            _require_hash(str(values["source_artifact_ref_sha256"]), "source_artifact_ref_sha256")
+        if values["mode"] != "RGB" or int(values["width"] or 0) <= 0 or int(values["height"] or 0) <= 0:
+            raise PageArtifactIntegrityError("RGB artifact metadata is invalid")
+        normalized = {
+            **values,
+            "width": int(values["width"]),
+            "height": int(values["height"]),
+            "page_id": str(values["page_id"] or ""),
+        }
+        expected = canonical_json_sha256(normalized)
+        if expected != payload.get("artifact_ref_sha256"):
+            raise PageArtifactIntegrityError("RGB artifact ref hash mismatch")
+        return cls(**normalized, artifact_ref_sha256=expected)
+
+    @classmethod
+    def from_file(
+        cls,
+        generation_root: str | Path,
+        relative_path: str,
+        *,
+        marker: ArtifactGenerationMarker | None = None,
+        page_id: str,
+        origin_execution_id: str | None = None,
+        source_artifact_ref_sha256: str | None = None,
+    ) -> "PersistedRGBImageArtifactRef":
+        marker = marker or ArtifactGenerationMarker.read_verified(generation_root)
+        path = _resolve_asset(generation_root, relative_path, must_exist=True)
+        with Image.open(path) as opened:
+            rgb = np.asarray(opened.convert("RGB"), dtype=np.uint8)
+        payload = {
+            "run_id": marker.run_id,
+            "execution_id": marker.execution_id,
+            "origin_execution_id": origin_execution_id or marker.execution_id,
+            "source_artifact_ref_sha256": source_artifact_ref_sha256,
+            "page_id": page_id,
+            "artifact_store_id": marker.artifact_store_id,
+            "generation_id": marker.generation_id,
+            "relative_path": _relative_path(relative_path),
+            "file_sha256": sha256_file(path),
+            "pixel_sha256": canonical_page_sha256(rgb),
+            "width": int(rgb.shape[1]),
+            "height": int(rgb.shape[0]),
+            "mode": "RGB",
+        }
+        return cls(**payload, artifact_ref_sha256=canonical_json_sha256(payload))
+
+    def load_verified(self, generation_root: str | Path) -> np.ndarray:
+        marker = ArtifactGenerationMarker.read_verified(generation_root)
+        _require_marker_identity(self, marker)
+        path = _resolve_asset(generation_root, self.relative_path, must_exist=True)
+        if sha256_file(path) != self.file_sha256:
+            raise PageArtifactIntegrityError("RGB artifact file hash mismatch")
+        with Image.open(path) as opened:
+            rgb = np.asarray(opened.convert("RGB"), dtype=np.uint8).copy()
+        if (
+            rgb.shape != (self.height, self.width, 3)
+            or self.mode != "RGB"
+            or canonical_page_sha256(rgb) != self.pixel_sha256
+        ):
+            raise PageArtifactIntegrityError("RGB artifact decoded pixel identity mismatch")
+        payload = _rgb_ref_payload(self)
+        if canonical_json_sha256(payload) != self.artifact_ref_sha256:
+            raise PageArtifactIntegrityError("RGB artifact ref hash mismatch")
+        rgb.setflags(write=False)
+        return rgb
+
+
+def _require_marker_identity(ref: Any, marker: ArtifactGenerationMarker) -> None:
+    if (
+        ref.run_id != marker.run_id
+        or ref.execution_id != marker.execution_id
+        or ref.artifact_store_id != marker.artifact_store_id
+        or ref.generation_id != marker.generation_id
+    ):
+        raise PageArtifactIntegrityError("artifact ref belongs to another generation")
+
+
+def _asset_ref_payload(ref: PersistedAssetRef) -> dict[str, Any]:
+    return {key: getattr(ref, key) for key in _asset_ref_payload_fields()}
+
+
+def _asset_ref_payload_fields() -> tuple[str, ...]:
+    return (
+        "run_id", "execution_id", "origin_execution_id", "source_artifact_ref_sha256",
+        "page_id", "artifact_store_id", "generation_id", "relative_path", "file_sha256",
+        "size_bytes", "media_type", "decoded_mode", "decoded_pixel_sha256", "width", "height",
+    )
+
+
+def _rgb_ref_payload_fields() -> tuple[str, ...]:
+    return (
+        "run_id", "execution_id", "origin_execution_id", "source_artifact_ref_sha256",
+        "page_id", "artifact_store_id", "generation_id", "relative_path", "file_sha256",
+        "pixel_sha256", "width", "height", "mode",
+    )
+
+
+def _rgb_ref_payload(ref: PersistedRGBImageArtifactRef) -> dict[str, Any]:
+    return {key: getattr(ref, key) for key in _rgb_ref_payload_fields()}
+
+
+def _terminal_proof_payload_fields() -> tuple[str, ...]:
+    return (
+        "run_id", "execution_id", "page_id", "page_source_sha256",
+        "final_page_pixel_sha256", "cleanup_base_sha256", "composition_sha256",
+        "translation_binding_sha256s", "source_payload_sha256s", "target_payload_sha256s",
+        "target_glyph_patch_sha256s", "target_materialization_sha256s",
+        "final_replacement_verdict_sha256s", "repair_budget_policy_sha256",
+        "replacement_verification_policy_sha256", "final_qa_probe_id",
+        "fresh_ocr_invocation_id", "fresh_ocr_root_input_pixel_sha256",
+        "fresh_ocr_attempt_ids", "fresh_ocr_attempt_chain_sha256", "fresh_ocr_payload_sha256",
+        "source_support_removed", "target_glyph_patch_applied", "fresh_source_ocr_absent",
+        "coverage_complete", "unowned_material_text_absent",
+    )
+
+
+def _page_pointer_fields() -> tuple[str, ...]:
+    return (
+        "schema_version", "run_id", "execution_id", "replay_of_execution_id", "page_id",
+        "page_source_sha256", "artifact_store_id", "generation_id", "page_generation_id",
+        "current_pointer_relative_path", "page_execution_evidence_relative_path",
+        "page_execution_evidence_file_sha256", "page_execution_evidence_sha256",
+        "page_result_sha256",
+    )
+
+
+def _page_evidence_ref_payload_fields() -> tuple[str, ...]:
+    return (
+        *_page_pointer_fields(),
+        "current_pointer_file_sha256",
+        "pointer_sha256",
+    )
+
+
+def _json_tuple_lists(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: list(value) if isinstance(value, tuple) else value
+        for key, value in payload.items()
+    }
+
+
+__all__ = [
+    "ARTIFACT_GENERATION_MARKER_SCHEMA_VERSION",
+    "ArtifactGenerationMarker",
+    "FinalPageSnapshot",
+    "FrozenJSONSnapshot",
+    "PageArtifactIntegrityError",
+    "PageCandidateTransaction",
+    "PageExecutionEvidenceRef",
+    "PageExecutionEvidenceSnapshot",
+    "PageGeometrySnapshot",
+    "PageNotTerminalError",
+    "PersistedAssetRef",
+    "PersistedRGBImageArtifactRef",
+    "TerminalPixelProof",
+]

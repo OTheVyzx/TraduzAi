@@ -27,7 +27,7 @@ from ownership.coverage import (
     complete_page_coverage,
     recover_unassociated_observations,
 )
-from ownership.hash_contract import canonical_page_sha256
+from ownership.hash_contract import canonical_page_sha256, sha256_file
 from ownership.model import (
     OwnerGlyphPatch,
     OwnerExecutionCommit,
@@ -38,6 +38,7 @@ from ownership.model import (
     OwnerProjection,
     OwnerViolation,
     TextObservation,
+    bind_owner_execution_commit_identity,
 )
 from ownership.ocr_adapter import TileProjection
 from ownership.owner_builder import build_owner_page_graph_from_coverage
@@ -56,6 +57,11 @@ from strip.process_bands import (
 from strip.reassemble import assemble_output_pages
 from strip.page_surface_geometry import PageSurfaceGeometry
 from strip.types import Band, BandEvidenceResult, OutputPage, VerticalStrip
+from strip.page_pipeline import (
+    OriginalPageSnapshot,
+    PageExecutionResult,
+    PagePipelineRequest,
+)
 
 
 _LEGACY_DECISION_FIELDS = frozenset(
@@ -6154,6 +6160,10 @@ def run_chapter(
     skip_page_cleanup_rerender: bool = False,
     owner_graph_mode: str = "shadow",
     legacy_project_status: str | None = None,
+    run_id: str | None = None,
+    execution_id: str | None = None,
+    replay_of_execution_id: str | None = None,
+    source_manifest=None,
 
     progress_callback=None,
 ) -> list[OutputPage]:
@@ -6162,6 +6172,17 @@ def run_chapter(
         return []
 
     page_paths = image_files
+    identity_nonce = time.time_ns()
+    run_id = str(run_id or f"strip-run-{identity_nonce}")
+    execution_id = str(execution_id or f"strip-execution-{identity_nonce}")
+    if source_manifest is not None:
+        if (
+            source_manifest.run_id != run_id
+            or source_manifest.execution_id != execution_id
+            or source_manifest.replay_of_execution_id != replay_of_execution_id
+            or source_manifest.source_page_count != len(page_paths)
+        ):
+            raise ValueError("source manifest identity or cardinality differs from run_chapter")
     owner_graph_mode = _normalise_owner_graph_mode(owner_graph_mode)
     if owner_graph_mode == "legacy" and legacy_project_status != "legacy_unverified":
         raise ValueError("legacy owner mode requires legacy_project_status='legacy_unverified'")
@@ -6198,14 +6219,13 @@ def run_chapter(
 
         page_coverages_by_page: dict[str, PageCoverageResult] = {}
         if owner_graph_mode != "legacy":
-            coverage_execution_nonce = time.time_ns()
             with _timed(chapter_telemetry, "page_ocr_coverage"):
                 page_coverages_by_page = _complete_page_coverages_for_strip(
                     strip,
                     source_components_by_page,
                     runtime=runtime,
-                    run_id=f"strip-run-{coverage_execution_nonce}",
-                    origin_execution_id=f"strip-execution-{coverage_execution_nonce}",
+                    run_id=run_id,
+                    origin_execution_id=replay_of_execution_id or execution_id,
                     idioma_origem=idioma_origem,
                 )
             if chapter_telemetry is not None:
@@ -6401,6 +6421,7 @@ def run_chapter(
         running_glossary: dict = dict(glossario or {})
         running_history: list[dict] = []
         owner_execution_records_by_page: dict[str, list[dict]] = {}
+        owner_page_executions_by_page = {}
         if owner_graph_mode == "enforce":
             band_by_tile = {
                 evidence.tile_id: evidence.band
@@ -6434,6 +6455,18 @@ def run_chapter(
                         ),
                         enforce_graph=True,
                     )
+                    coverage = page_coverages_by_page[page_id]
+                    bound_commits = tuple(
+                        bind_owner_execution_commit_identity(
+                            commit,
+                            run_id=run_id,
+                            execution_id=execution_id,
+                            page_source_sha256=coverage.page_source_sha256,
+                        )
+                        for commit in execution.commits
+                    )
+                    execution = replace(execution, commits=bound_commits)
+                    owner_page_executions_by_page[page_id] = execution
                     owner_graphs[page_id] = execution.graph
                     owner_execution_records_by_page[page_id] = [
                         copy.deepcopy(record) for record in execution.records
@@ -6832,6 +6865,8 @@ def run_chapter(
         page.text_layers = {"texts": []}
 
     if owner_composition_active:
+        if len(output_pages) != len(page_paths):
+            raise ValueError("enforce output pages must be bijective with source pages")
         for page_index, page in enumerate(output_pages, start=1):
             page_id = _page_id_for(page_index)
             page.owner_graph = owner_graphs[page_id]
@@ -6848,6 +6883,44 @@ def run_chapter(
                     "_owner_graph_mode": "enforce",
                     "_owner_graph_snapshot": owner_graphs[page_id].to_dict(),
                 }
+            )
+            coverage = page_coverages_by_page[page_id]
+            execution = owner_page_executions_by_page[page_id]
+            x1, source_y1, x2, source_y2 = _source_page_geometry(strip, page_index - 1)
+            original_pixels = original_strip_image[source_y1:source_y2, x1:x2].copy()
+            source_file_sha256 = (
+                source_manifest.pages[page_index - 1].source_file_sha256
+                if source_manifest is not None
+                else sha256_file(page_paths[page_index - 1])
+            )
+            original_snapshot = OriginalPageSnapshot.from_pixels(
+                original_pixels,
+                source_file_sha256=source_file_sha256,
+            )
+            if original_snapshot.page_source_sha256 != coverage.page_source_sha256:
+                raise ValueError("page request pixels differ from completed coverage identity")
+            page_bands = tuple(
+                band
+                for band in bands
+                if _source_page_number_for_band(strip, band) == page_index
+            )
+            request = PagePipelineRequest.from_legacy_bands(
+                original_snapshot,
+                page_bands,
+                run_id=run_id,
+                execution_id=execution_id,
+                replay_of_execution_id=replay_of_execution_id,
+                page_id=page_id,
+            )
+            translation_result = execution.translation_result
+            page.owner_page_result = PageExecutionResult.build(
+                request=request,
+                coverage=coverage,
+                owner_graph=execution.graph,
+                translation_attempts=(translation_result.attempts if translation_result else ()),
+                translations=(translation_result.bindings if translation_result else ()),
+                page_commits=execution.commits,
+                status="candidate_ready",
             )
 
     for band_index, band in enumerate(bands, start=1):

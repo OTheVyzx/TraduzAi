@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import KW_ONLY, dataclass, field
+from dataclasses import KW_ONLY, dataclass, field, fields, replace
 from hashlib import sha256
 import json
 import math
 from pathlib import PurePosixPath
 import re
 from types import MappingProxyType
-from typing import Any, Iterable, Literal, Mapping
+from typing import Any, ClassVar, Iterable, Literal, Mapping
 
 import numpy as np
 
 from .coverage import CANONICAL_COVERAGE_STATES
+from .hash_contract import canonical_json_sha256
 
 try:
     from typesetter.owner_render_quality import OwnerRenderQuality
@@ -1380,8 +1381,32 @@ class OwnerExecutionCommit:
     rollback_mask_sha256: str
     rollback_pixels: int
     execution_tile_id: str | None = None
+    commit_id: str = ""
+    run_id: str = ""
+    execution_id: str = ""
+    page_source_sha256: str = ""
 
     def __post_init__(self) -> None:
+        identity_values = (self.commit_id, self.run_id, self.execution_id, self.page_source_sha256)
+        if any(identity_values):
+            if not all(identity_values) or len(self.page_source_sha256) != 64:
+                raise ValueError("owner execution commit identity is incomplete")
+            expected_commit_id = canonical_json_sha256(
+                {
+                    "run_id": self.run_id,
+                    "execution_id": self.execution_id,
+                    "page_id": self.page_id,
+                    "page_source_sha256": self.page_source_sha256,
+                    "owner_id": self.owner_id,
+                    "execution_tile_id": self.execution_tile_id,
+                    "before_sha256": self.before_sha256,
+                    "after_sha256": self.after_sha256,
+                    "state": self.state,
+                    "committed": self.committed,
+                }
+            )
+            if self.commit_id != expected_commit_id:
+                raise ValueError("owner execution commit hash identity mismatch")
         copy_value = getattr(self.result_rgb, "copy", None)
         if not callable(copy_value):
             return
@@ -1390,6 +1415,36 @@ class OwnerExecutionCommit:
         if callable(setflags):
             setflags(write=False)
         object.__setattr__(self, "result_rgb", frozen_value)
+
+
+def bind_owner_execution_commit_identity(
+    commit: OwnerExecutionCommit,
+    *,
+    run_id: str,
+    execution_id: str,
+    page_source_sha256: str,
+) -> OwnerExecutionCommit:
+    """Bind a physical owner commit to one exact page execution."""
+
+    payload = {
+        "run_id": run_id,
+        "execution_id": execution_id,
+        "page_id": commit.page_id,
+        "page_source_sha256": page_source_sha256,
+        "owner_id": commit.owner_id,
+        "execution_tile_id": commit.execution_tile_id,
+        "before_sha256": commit.before_sha256,
+        "after_sha256": commit.after_sha256,
+        "state": commit.state,
+        "committed": commit.committed,
+    }
+    return replace(
+        commit,
+        commit_id=canonical_json_sha256(payload),
+        run_id=run_id,
+        execution_id=execution_id,
+        page_source_sha256=page_source_sha256,
+    )
 
 
 @dataclass(frozen=True)
@@ -2646,6 +2701,203 @@ class OwnerGraph:
         if enforce:
             graph.require_valid(mode="enforce")
         return graph
+
+
+FINAL_OWNER_RECORD_SCHEMA_VERSION = 1
+
+
+class _CanonicalFinalRecord:
+    """Strict hash-linked codec shared by the final repair/QA records."""
+
+    _HASH_FIELD: ClassVar[str]
+    _TUPLE_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for item in fields(self):
+            value = getattr(self, item.name)
+            payload[item.name] = list(value) if item.name in self._TUPLE_FIELDS else value
+        return payload
+
+    def canonical_payload(self) -> dict[str, Any]:
+        payload = self.to_dict()
+        payload.pop(self._HASH_FIELD)
+        return payload
+
+    @classmethod
+    def build(cls, **values: Any):
+        normalized = dict(values)
+        normalized.pop(cls._HASH_FIELD, None)
+        normalized["schema_version"] = FINAL_OWNER_RECORD_SCHEMA_VERSION
+        for name in cls._TUPLE_FIELDS:
+            normalized[name] = tuple(str(value) for value in normalized.get(name, ()))
+        provisional = cls(**normalized, **{cls._HASH_FIELD: "0" * 64})
+        digest = canonical_json_sha256(provisional.canonical_payload())
+        return replace(provisional, **{cls._HASH_FIELD: digest})
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]):
+        expected = {item.name for item in fields(cls)}
+        if set(payload) != expected:
+            raise ValueError(f"{cls.__name__} contains missing or unknown fields")
+        if payload.get("schema_version") != FINAL_OWNER_RECORD_SCHEMA_VERSION:
+            raise ValueError(f"unsupported {cls.__name__} schema version")
+        supplied_hash = str(payload.get(cls._HASH_FIELD) or "")
+        rebuilt = cls.build(**{key: value for key, value in payload.items() if key != cls._HASH_FIELD})
+        if getattr(rebuilt, cls._HASH_FIELD) != supplied_hash or rebuilt.to_dict() != dict(payload):
+            raise ValueError(f"{cls.__name__} hash or canonical form mismatch")
+        return rebuilt
+
+
+@dataclass(frozen=True)
+class OwnerRepairRequest(_CanonicalFinalRecord):
+    request_id: str
+    issue_id: str | None
+    run_id: str
+    execution_id: str
+    page_id: str
+    page_source_sha256: str
+    owner_id: str
+    original_page_sha256: str
+    failed_stage: str
+    reason: str
+    evidence_ids: tuple[str, ...]
+    next_strategy: str
+    schema_version: int
+    request_sha256: str
+    _HASH_FIELD: ClassVar[str] = "request_sha256"
+    _TUPLE_FIELDS: ClassVar[frozenset[str]] = frozenset({"evidence_ids"})
+
+
+@dataclass(frozen=True)
+class RepairAttempt(_CanonicalFinalRecord):
+    run_id: str
+    execution_id: str
+    page_id: str
+    page_source_sha256: str
+    attempt_id: str
+    request_id: str
+    issue_id: str | None
+    consumed_request_ids: tuple[str, ...]
+    translation_binding_sha256: str
+    repair_budget_policy_sha256: str
+    strategy: str
+    variant: str
+    owner_id: str
+    input_sha256: str
+    cleanup_mask_sha256: str
+    protected_mask_sha256: str
+    geometry_sha256: str
+    attempt_fingerprint: str
+    outcome: str
+    evidence_ids: tuple[str, ...]
+    schema_version: int
+    attempt_sha256: str
+    _HASH_FIELD: ClassVar[str] = "attempt_sha256"
+    _TUPLE_FIELDS: ClassVar[frozenset[str]] = frozenset({"consumed_request_ids", "evidence_ids"})
+
+
+@dataclass(frozen=True)
+class OwnerTargetMaterialization(_CanonicalFinalRecord):
+    materialization_id: str
+    run_id: str
+    execution_id: str
+    page_id: str
+    page_source_sha256: str
+    owner_id: str
+    translation_binding_sha256: str
+    source_payload_sha256: str
+    target_payload_sha256: str
+    target_glyph_patch_sha256: str
+    glyph_mask_sha256: str
+    base_pixel_sha256: str
+    result_pixel_sha256: str
+    schema_version: int
+    materialization_sha256: str
+    _HASH_FIELD: ClassVar[str] = "materialization_sha256"
+
+
+@dataclass(frozen=True)
+class LanguageResidualIssue(_CanonicalFinalRecord):
+    issue_id: str
+    run_id: str
+    execution_id: str
+    page_id: str
+    page_source_sha256: str
+    page_output_pixel_sha256: str
+    owner_id: str | None
+    component_id: str | None
+    container_id: str | None
+    invocation_ids: tuple[str, ...]
+    kind: Literal[
+        "source_language_visible", "independently_detected_text_without_owner",
+        "target_payload_missing", "cleanup_incomplete", "target_glyphs_missing",
+        "mixed_language_overlay",
+    ]
+    observed_text: str
+    observed_text_sha256: str
+    source_binding_sha256: str | None
+    region_sha256: str
+    source_only_tokens: tuple[str, ...]
+    repair_required: bool
+    schema_version: int
+    issue_sha256: str
+    _HASH_FIELD: ClassVar[str] = "issue_sha256"
+    _TUPLE_FIELDS: ClassVar[frozenset[str]] = frozenset({"invocation_ids", "source_only_tokens"})
+
+
+@dataclass(frozen=True)
+class FinalQAProbe(_CanonicalFinalRecord):
+    probe_id: str
+    run_id: str
+    execution_id: str
+    page_id: str
+    page_source_sha256: str
+    input_origin: Literal["redecoded_persisted_candidate"]
+    candidate_file_sha256: str
+    candidate_pixel_sha256: str
+    root_input_pixel_sha256: str
+    ocr_invocation_id: str
+    fresh_ocr_attempt_ids: tuple[str, ...]
+    fresh_ocr_attempt_chain_sha256: str
+    ocr_payload_sha256: str
+    observer_available: bool
+    coverage_complete: bool
+    issue_ids: tuple[str, ...]
+    schema_version: int
+    probe_sha256: str
+    _HASH_FIELD: ClassVar[str] = "probe_sha256"
+    _TUPLE_FIELDS: ClassVar[frozenset[str]] = frozenset({"fresh_ocr_attempt_ids", "issue_ids"})
+
+
+@dataclass(frozen=True)
+class FinalReplacementVerdict(_CanonicalFinalRecord):
+    verdict_id: str
+    run_id: str
+    execution_id: str
+    page_id: str
+    page_source_sha256: str
+    owner_id: str
+    translation_binding_sha256: str
+    source_payload_sha256: str
+    target_payload_sha256: str
+    target_glyph_patch_sha256: str
+    target_materialization_sha256: str
+    source_support_sha256: str
+    post_cleanup_residual_mask_sha256: str
+    source_residual_material_pixel_count: int
+    target_delta_mask_sha256: str
+    target_alpha_material_pixel_count: int
+    target_contrast_score: float
+    target_clipped_pixel_count: int
+    target_within_safe_region: bool
+    source_support_removed: bool
+    target_materialized: bool
+    replacement_verification_policy_sha256: str
+    status: Literal["final_verified"]
+    schema_version: int
+    verdict_sha256: str
+    _HASH_FIELD: ClassVar[str] = "verdict_sha256"
 
 
 def _violation(code: str, message: str, *offenders: str) -> OwnerViolation:
