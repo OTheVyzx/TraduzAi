@@ -6095,7 +6095,21 @@ def _run_owner_control_plane(
         evidence_by_page.setdefault(str(item.page_id), []).append(item)
     for page_id in sorted(graphs):
         graph = graphs[page_id]
-        if not graph.projections:
+        executor_owner_ids = {
+            projection.owner_id
+            for projection in graph.projections
+            if projection.role == "executor"
+        }
+        needs_executor_assignment = not graph.projections or any(
+            owner.disposition == "owned"
+            and owner.state != "review_required"
+            and (
+                not owner.execution_tile_id
+                or owner.owner_id not in executor_owner_ids
+            )
+            for owner in graph.owners
+        )
+        if needs_executor_assignment:
             graph = _assign_owner_executor_projections(
                 graph,
                 [

@@ -755,6 +755,60 @@ def test_executor_assignment_replaces_stale_full_coverage_violation() -> None:
     assert assigned.owners[0].execution_tile_id == "tile_scheduler"
 
 
+def test_enforce_reconciles_graph_with_context_projection_but_no_executor() -> None:
+    from strip.run import _run_owner_control_plane
+
+    graph = _graph(
+        projections=[
+            OwnerProjection(
+                owner_id="owner_a",
+                tile_id="tile_scheduler",
+                role="context_only",
+                bbox_page=(30, 30, 70, 70),
+                bbox_tile=(30, 30, 70, 70),
+                offset_xy=(0, 0),
+            )
+        ]
+    )
+    graph.violations = [
+        OwnerViolation(
+            code="owner_executor_full_coverage_missing",
+            severity="critical",
+            message="No execution tile fully covers every source component of the owner.",
+            offenders=("owner_a",),
+        )
+    ]
+    tile = TileProjection(
+        page_id="page_001",
+        tile_id="tile_scheduler",
+        offset_xy=(0, 0),
+        page_size=(100, 100),
+        tile_size=(100, 100),
+    )
+    band = SimpleNamespace(tile_id="tile_scheduler")
+    evidence = SimpleNamespace(
+        page_id="page_001",
+        tile_id="tile_scheduler",
+        band_index=0,
+        tile_projection=tile,
+        band=band,
+    )
+
+    graphs = _run_owner_control_plane(
+        [band],
+        owner_graph_mode="enforce",
+        collector=lambda _band: evidence,
+        resolver=lambda _page_id, _evidence: graph,
+    )
+
+    assigned = graphs["page_001"]
+    assert assigned.owners[0].execution_tile_id == "tile_scheduler"
+    assert [projection.role for projection in assigned.projections] == ["executor"]
+    assert "owner_executor_full_coverage_missing" not in {
+        violation.code for violation in assigned.violations
+    }
+
+
 def test_executor_tie_uses_lexicographically_stable_tile_id() -> None:
     from strip.run import _assign_owner_executor_projections
 
