@@ -180,16 +180,77 @@ def _semantic_role(entries: Sequence[CoverageEntry]) -> str:
     return roles[0] if len(roles) == 1 else "dialogue_body"
 
 
-def _owner_id(coverage: PageCoverageResult, entries: Sequence[CoverageEntry]) -> str:
+def _owner_id(
+    coverage: PageCoverageResult,
+    entries: Sequence[CoverageEntry],
+    *,
+    container_id: str | None = None,
+) -> str:
     seed = {
         "run_id": coverage.run_id,
         "origin_execution_id": coverage.origin_execution_id,
         "page_id": coverage.page_id,
         "page_source_sha256": coverage.page_source_sha256,
-        "container_id": entries[0].container_id,
+        "container_id": container_id or entries[0].container_id,
         "component_ids": [entry.component_id for entry in entries],
     }
     return f"owner:{canonical_json_sha256(seed)[:24]}"
+
+
+def _group_material_entries(
+    entries: Sequence[CoverageEntry],
+) -> tuple[tuple[str, tuple[CoverageEntry, ...]], ...]:
+    """Join components proven equivalent by container or OCR observation."""
+
+    ordered = tuple(sorted(entries, key=_entry_page_order))
+    parents = list(range(len(ordered)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parents[max(left_root, right_root)] = min(left_root, right_root)
+
+    by_container: dict[str, int] = {}
+    by_observation: dict[str, int] = {}
+    for index, entry in enumerate(ordered):
+        container_id = str(entry.container_id or "")
+        if container_id:
+            previous = by_container.setdefault(container_id, index)
+            union(previous, index)
+        for observation_id in entry.observation_ids:
+            previous = by_observation.setdefault(observation_id, index)
+            union(previous, index)
+
+    grouped: dict[int, list[CoverageEntry]] = {}
+    for index, entry in enumerate(ordered):
+        grouped.setdefault(find(index), []).append(entry)
+
+    result: list[tuple[str, tuple[CoverageEntry, ...]]] = []
+    for members in grouped.values():
+        canonical_members = tuple(sorted(members, key=_entry_page_order))
+        container_ids = tuple(
+            sorted({str(entry.container_id) for entry in canonical_members})
+        )
+        if len(container_ids) == 1:
+            group_container_id = container_ids[0]
+        else:
+            seed = {
+                "container_ids": list(container_ids),
+                "component_ids": [entry.component_id for entry in canonical_members],
+            }
+            group_container_id = (
+                f"container-evidence-group:{canonical_json_sha256(seed)[:24]}"
+            )
+        result.append((group_container_id, canonical_members))
+    return tuple(
+        sorted(result, key=lambda item: _entry_page_order(item[1][0]))
+    )
 
 
 def build_owner_page_graph_from_coverage(
@@ -205,7 +266,7 @@ def build_owner_page_graph_from_coverage(
         observation.observation_id: observation
         for observation in coverage.observations
     }
-    groups: dict[str, list[CoverageEntry]] = {}
+    material_entries: list[CoverageEntry] = []
     preserved_entries: list[CoverageEntry] = []
     for entry in coverage.entries:
         if entry.state == "explicit_non_dialogue_preserve":
@@ -219,14 +280,16 @@ def build_owner_page_graph_from_coverage(
             raise CoverageInvariantError(
                 f"translatable component lacks container: {entry.component_id}"
             )
-        groups.setdefault(entry.container_id, []).append(entry)
+        material_entries.append(entry)
 
-    translatable_container_ids = frozenset(groups)
+    translatable_container_ids = frozenset(
+        str(entry.container_id) for entry in material_entries
+    )
+    groups = _group_material_entries(material_entries)
 
     owners: list[TextOwner] = []
     dispositions: list[ComponentDisposition] = []
-    for container_id, group_entries in sorted(groups.items()):
-        entries = tuple(sorted(group_entries, key=_entry_page_order))
+    for container_id, entries in groups:
         observation_groups: list[tuple[TextObservation, ...]] = []
         all_observation_ids: list[str] = []
         for entry in entries:
@@ -245,7 +308,7 @@ def build_owner_page_graph_from_coverage(
             all_observation_ids.extend(item.observation_id for item in candidates)
 
         selected, source_payload = select_ordered_consensus_body(observation_groups)
-        owner_id = _owner_id(coverage, entries)
+        owner_id = _owner_id(coverage, entries, container_id=container_id)
         component_ids = [entry.component_id for entry in entries]
         owner = TextOwner(
             owner_id=owner_id,

@@ -357,6 +357,32 @@ def test_multiple_lines_from_one_invocation_remain_one_complete_owner_body() -> 
     assert graph.owners[0].source_payload == "UAU, VOCE ME ASSUSTOU."
 
 
+def test_shared_observation_unifies_overlapping_fallback_containers() -> None:
+    coverage = _coverage(
+        (
+            ("component-broad", "SAME BODY", (20, 20, 240, 100)),
+            ("component-tight", "SAME BODY", (70, 35, 190, 80)),
+        ),
+        containers=("container-broad", "container-tight"),
+    )
+    shared = replace(
+        coverage.observations[0],
+        component_ids=("component-broad", "component-tight"),
+    )
+    entries = tuple(
+        replace(entry, observation_ids=(shared.observation_id,))
+        for entry in coverage.entries
+    )
+    coverage = _replace_entries(coverage, entries, observations=(shared,))
+
+    graph = build_owner_page_graph_from_coverage(coverage)
+
+    assert len(graph.owners) == 1
+    assert graph.owners[0].component_ids == ["component-broad", "component-tight"]
+    assert graph.owners[0].selected_observation_ids == [shared.observation_id]
+    assert graph.owners[0].source_payload == "SAME BODY"
+
+
 def test_adjacent_containers_remain_separate_owners() -> None:
     coverage = _coverage(
         (
