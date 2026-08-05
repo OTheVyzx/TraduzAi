@@ -18,6 +18,9 @@ from .locale_policy import validate_target_locale
 
 _TOKEN_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:'[A-Za-z]+)?", re.UNICODE)
 _PLACEHOLDER_RE = re.compile(r"\{[^{}]+\}")
+_DIGIT_LED_NUMERIC_OCR_ZERO_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<token>[0-9][0-9Oo]*[Oo][0-9Oo]*)(?![A-Za-z0-9])"
+)
 _ENGLISH_WORDS = frozenset(
     """
     a an and are arena as at away be begin behind but can could did do does down
@@ -258,9 +261,18 @@ def _entities_equivalent(
     )
 
 
+def repair_source_numeric_ocr_confusions(text: str) -> str:
+    """Repair O/0 confusion only inside digit-led numeric OCR tokens."""
+
+    return _DIGIT_LED_NUMERIC_OCR_ZERO_RE.sub(
+        lambda match: match.group("token").replace("O", "0").replace("o", "0"),
+        str(text or ""),
+    )
+
+
 def _numbers_equivalent(source: str, target: str) -> bool:
     validation = validate_target_locale(
-        source_text=source,
+        source_text=repair_source_numeric_ocr_confusions(source),
         target_text=target,
         target_locale="pt-BR",
     )
@@ -590,6 +602,7 @@ __all__ = [
     "PageLanguageEvidence",
     "TargetLanguageVerdict",
     "build_page_language_evidence",
+    "repair_source_numeric_ocr_confusions",
     "recover_noisy_source_anchors",
     "validate_target_language",
 ]

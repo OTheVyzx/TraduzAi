@@ -38,9 +38,9 @@ except ImportError:
     from .locale_policy import canonical_target_locale, validate_target_locale
 
 try:
-    from translator.language_policy import recover_noisy_source_anchors
+    from translator.language_policy import recover_noisy_source_anchors, repair_source_numeric_ocr_confusions
 except ImportError:
-    from .language_policy import recover_noisy_source_anchors
+    from .language_policy import recover_noisy_source_anchors, repair_source_numeric_ocr_confusions
 
 try:
     from ownership.hash_contract import canonical_json_bytes, sha256_bytes
@@ -761,7 +761,7 @@ def _prepare_source_text_for_translation(
     *,
     preserve_case: bool = False,
 ) -> str:
-    result = text.strip()
+    result = repair_source_numeric_ocr_confusions(text.strip())
     if not result:
         return result
 
@@ -1655,7 +1655,9 @@ def _apply_target_locale_validation(
     locale = canonical_target_locale(target_locale)
     for page in translated_pages:
         for item in page.get("texts", []) or []:
-            source = str(item.get("original") or item.get("text") or "")
+            source = repair_source_numeric_ocr_confusions(
+                str(item.get("original") or item.get("text") or "")
+            )
             target = str(item.get("translated") or "")
             validation = validate_target_locale(
                 source_text=source,
