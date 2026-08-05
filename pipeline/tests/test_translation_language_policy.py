@@ -45,6 +45,20 @@ def test_unknown_english_source_terms_cannot_hide_inside_ptbr_padding() -> None:
     assert set(verdict.source_only_tokens) == {"achievement", "unlocked"}
 
 
+def test_shared_unknown_names_do_not_turn_valid_ptbr_into_english_residual() -> None:
+    verdict = validate_target_language(
+        source="YUJEONG SIHYEOK EXPECTED FOX",
+        target="YUJEONG SIHYEOK, A RAPOSA AVANCOU",
+        role="dialogue_body",
+        explicit_entities=(),
+    )
+
+    assert verdict.accepted
+    assert verdict.reason == "valid_pt_br"
+    assert verdict.english_token_ratio_ppm == 0
+    assert verdict.source_only_tokens == ()
+
+
 def test_pt_br_with_explicit_proper_name_and_equivalent_number_is_valid() -> None:
     verdict = validate_target_language(
         source="KIM SIMUN HAS 10 KILLS",

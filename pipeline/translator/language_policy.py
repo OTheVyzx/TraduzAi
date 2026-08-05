@@ -347,20 +347,27 @@ def validate_target_language(
         for token in considered_tokens
         if _is_ptbr_specific_token(token) and token not in _ENGLISH_WORDS
     )
-    source_counter = Counter(source_tokens)
+    source_english_markers = {
+        marker
+        for token in source_tokens
+        for marker in _english_only_markers(token)
+    }
+    target_english_markers = {
+        marker
+        for token in considered_tokens
+        for marker in _english_only_markers(token)
+    }
     source_only_tokens = tuple(
-        sorted(
-            {
-                token
-                for token in considered_tokens
-                if source_counter[token] > 0 and not _is_ptbr_token(token)
-            }
-        )
+        sorted(source_english_markers & target_english_markers)
     )
     english_ratio = _ratio_ppm(len(english_tokens), len(considered_tokens))
     ptbr_ratio = _ratio_ppm(len(ptbr_tokens), len(considered_tokens))
     source_only_ratio = _ratio_ppm(
-        sum(1 for token in considered_tokens if token in set(source_only_tokens)),
+        sum(
+            1
+            for token in considered_tokens
+            if set(_english_only_markers(token)) & set(source_only_tokens)
+        ),
         len(considered_tokens),
     )
     entities_ok = _entities_equivalent(source, target, explicit_entities)
