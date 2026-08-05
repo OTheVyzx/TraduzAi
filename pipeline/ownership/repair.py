@@ -8,6 +8,7 @@ import time
 from typing import Any, Callable
 
 import numpy as np
+import cv2
 
 from .hash_contract import (
     canonical_json_sha256,
@@ -165,6 +166,48 @@ class RepairAttemptRuntime:
 
 
 @dataclass(frozen=True)
+class RepairRenderCommit:
+    owner_id: str
+    target_text: str
+    translation_binding_sha256: str
+    text_layer_count: int = 1
+
+
+def _single_body_commit(binding: Any) -> RepairRenderCommit:
+    return RepairRenderCommit(
+        owner_id=str(binding.owner_id),
+        target_text=str(binding.target_text),
+        translation_binding_sha256=str(binding.translation_binding_sha256),
+    )
+
+
+def rebuild_r2_text_region(original_rgb: Any, cleanup_mask: Any) -> np.ndarray:
+    """Reconstruct one complete text region from its own surrounding context."""
+
+    original = np.asarray(original_rgb)
+    mask = np.asarray(cleanup_mask)
+    if (
+        original.dtype != np.uint8
+        or original.ndim != 3
+        or original.shape[2] != 3
+        or mask.shape != original.shape[:2]
+        or not np.any(mask > 0)
+    ):
+        raise ValueError("R2 reconstruction raster contract is invalid")
+    binary = np.where(mask > 0, 255, 0).astype(np.uint8)
+    rebuilt = cv2.inpaint(
+        np.ascontiguousarray(original),
+        binary,
+        inpaintRadius=max(2, min(7, int(round(np.sqrt(np.count_nonzero(binary)) / 18.0)))),
+        flags=cv2.INPAINT_TELEA,
+    )
+    result = np.ascontiguousarray(original).copy()
+    result[binary > 0] = rebuilt[binary > 0]
+    result.setflags(write=False)
+    return result
+
+
+@dataclass(frozen=True)
 class RepairLadderResult:
     status: str
     repair_requests: tuple[OwnerRepairRequest, ...]
@@ -172,6 +215,8 @@ class RepairLadderResult:
     repair_budget_policy_sha256: str
     final_page: np.ndarray | None
     next_strategy: str | None
+    translation: Any | None = None
+    commit: Any | None = None
 
     def __post_init__(self) -> None:
         if self.final_page is not None:
@@ -210,8 +255,9 @@ def build_repair_attempt(
     if selected not in {
         RepairStrategy.R0_PRECISE_GLYPH,
         RepairStrategy.R1_EXPANDED_SUPPORT,
+        RepairStrategy.R2_TEXT_REGION_REBUILD,
     }:
-        raise ValueError("Task 11 only materializes R0 and R1")
+        raise ValueError("repair strategy is not implemented before R3")
     binding = case.translation
     OwnerRepairRequest.from_dict(request.to_dict())
     expected_identity = (
@@ -237,7 +283,11 @@ def build_repair_attempt(
         protected_art_mask=case.protected_art_mask,
         positive_residual_mask=(
             case.positive_residual_mask
-            if selected is RepairStrategy.R1_EXPANDED_SUPPORT else None
+            if selected in {
+                RepairStrategy.R1_EXPANDED_SUPPORT,
+                RepairStrategy.R2_TEXT_REGION_REBUILD,
+            }
+            else None
         ),
         strategy=selected.value,
     )
@@ -362,32 +412,34 @@ def run_repair_ladder(
     *,
     policy: RepairBudgetPolicy | None = None,
     max_strategy: RepairStrategy | str = RepairStrategy.R1_EXPANDED_SUPPORT,
+    start_strategy: RepairStrategy | str = RepairStrategy.R0_PRECISE_GLYPH,
     scheduler: Callable[[float], None] = time.sleep,
 ) -> RepairLadderResult:
     """Run R0/R1 from the immutable original; never expose rollback as final."""
 
     selected_policy = policy or RepairBudgetPolicy.default()
     maximum = _strategy(max_strategy)
-    if maximum not in {
+    start = _strategy(start_strategy)
+    supported = (
         RepairStrategy.R0_PRECISE_GLYPH,
         RepairStrategy.R1_EXPANDED_SUPPORT,
-    }:
-        raise ValueError("Task 11 ladder supports max_strategy R0 or R1")
+        RepairStrategy.R2_TEXT_REGION_REBUILD,
+    )
+    if start not in supported or maximum not in supported or supported.index(start) > supported.index(maximum):
+        raise ValueError("repair ladder strategy range is invalid")
     controller = RepairController(policy=selected_policy)
     initial = _request_for(
         case,
         failed_stage="pre_execution",
         reason="initial_atomic_replacement",
         evidence_ids=("source-support",),
-        next_strategy="R0",
+        next_strategy=start.value,
     )
     requests = [initial]
     attempts: list[RepairAttempt] = []
     request = initial
     previous: RepairAttempt | None = None
-    strategies = [RepairStrategy.R0_PRECISE_GLYPH]
-    if maximum is RepairStrategy.R1_EXPANDED_SUPPORT:
-        strategies.append(RepairStrategy.R1_EXPANDED_SUPPORT)
+    strategies = list(supported[supported.index(start) : supported.index(maximum) + 1])
     transient_count = 0
     for selected in strategies:
         while True:
@@ -448,6 +500,8 @@ def run_repair_ladder(
                     repair_budget_policy_sha256=selected_policy.policy_sha256,
                     final_page=feedback.final_page,
                     next_strategy=None,
+                    translation=case.translation,
+                    commit=_single_body_commit(case.translation),
                 )
             if feedback.status != "visual_residual":
                 raise ValueError("repair feedback status is unsupported")
@@ -455,7 +509,11 @@ def run_repair_ladder(
                 runtime, outcome="visual_residual", evidence_ids=feedback.evidence_ids
             )
             attempts.append(previous)
-            next_strategy = "R1" if selected is RepairStrategy.R0_PRECISE_GLYPH else "R2"
+            next_strategy = {
+                RepairStrategy.R0_PRECISE_GLYPH: "R1",
+                RepairStrategy.R1_EXPANDED_SUPPORT: "R2",
+                RepairStrategy.R2_TEXT_REGION_REBUILD: "R3",
+            }[selected]
             request = _request_for(
                 case,
                 failed_stage="residual",
@@ -471,7 +529,12 @@ def run_repair_ladder(
         attempts=tuple(attempts),
         repair_budget_policy_sha256=selected_policy.policy_sha256,
         final_page=None,
-        next_strategy=("R1" if maximum is RepairStrategy.R0_PRECISE_GLYPH else "R2"),
+        next_strategy={
+            RepairStrategy.R0_PRECISE_GLYPH: "R1",
+            RepairStrategy.R1_EXPANDED_SUPPORT: "R2",
+            RepairStrategy.R2_TEXT_REGION_REBUILD: "R3",
+        }[maximum],
+        translation=case.translation,
     )
 
 
@@ -485,7 +548,9 @@ __all__ = [
     "RepairInfrastructureExhausted",
     "RepairLadderResult",
     "RepairPolicyIdentityError",
+    "RepairRenderCommit",
     "RepairStrategy",
     "build_repair_attempt",
     "run_repair_ladder",
+    "rebuild_r2_text_region",
 ]

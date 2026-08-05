@@ -535,8 +535,8 @@ def build_repair_cleanup_mask(
     protected = normalized(protected_art_mask)
     residual = normalized(positive_residual_mask)
     normalized_strategy = str(getattr(strategy, "value", strategy)).upper()
-    if normalized_strategy not in {"R0", "R1"}:
-        raise UnsafeOwnerMaskError("repair mask strategy is not R0 or R1")
+    if normalized_strategy not in {"R0", "R1", "R2"}:
+        raise UnsafeOwnerMaskError("repair mask strategy is not R0, R1 or R2")
 
     count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
         (positive > 0).astype(np.uint8), connectivity=8
@@ -551,7 +551,7 @@ def build_repair_cleanup_mask(
             cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1)
         )
         expanded = cv2.dilate(positive, kernel, iterations=1)
-    else:
+    elif normalized_strategy == "R1":
         seed = np.maximum(positive, residual)
         horizontal_radius = max(
             2,
@@ -568,6 +568,48 @@ def build_repair_cleanup_mask(
             cv2.MORPH_CLOSE,
             cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
         )
+    else:
+        seed = np.maximum(positive, residual)
+        component_count, _component_labels, component_stats, _ = (
+            cv2.connectedComponentsWithStats((seed > 0).astype(np.uint8), connectivity=8)
+        )
+        components = [
+            (
+                int(component_stats[index, cv2.CC_STAT_LEFT]),
+                int(component_stats[index, cv2.CC_STAT_TOP]),
+                int(component_stats[index, cv2.CC_STAT_WIDTH]),
+                int(component_stats[index, cv2.CC_STAT_HEIGHT]),
+            )
+            for index in range(1, component_count)
+            if int(component_stats[index, cv2.CC_STAT_AREA]) > 0
+        ]
+        line_tolerance = max(2, int(round(median_height * 0.8)))
+        line_groups: list[list[tuple[int, int, int, int]]] = []
+        for component in sorted(components, key=lambda item: (item[1], item[0])):
+            center_y = component[1] + component[3] / 2.0
+            target = next(
+                (
+                    group for group in line_groups
+                    if abs(
+                        center_y
+                        - float(np.median([item[1] + item[3] / 2.0 for item in group]))
+                    ) <= line_tolerance
+                ),
+                None,
+            )
+            if target is None:
+                line_groups.append([component])
+            else:
+                target.append(component)
+        expanded = np.zeros(shape, dtype=np.uint8)
+        halo_x = max(2, min(10, int(round(median_height * 0.45))))
+        halo_y = max(1, min(6, int(round(median_height * 0.30))))
+        for group in line_groups:
+            x1 = max(0, min(item[0] for item in group) - halo_x)
+            y1 = max(0, min(item[1] for item in group) - halo_y)
+            x2 = min(shape[1], max(item[0] + item[2] for item in group) + halo_x)
+            y2 = min(shape[0], max(item[1] + item[3] for item in group) + halo_y)
+            expanded[y1:y2, x1:x2] = 255
     allowed = (
         (expanded > 0)
         & (interior > 0)

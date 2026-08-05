@@ -17,12 +17,14 @@ from ownership.repair import (
     RepairPolicyIdentityError,
     RepairStrategy,
     build_repair_attempt,
+    rebuild_r2_text_region,
     run_repair_ladder,
 )
 from test_owner_source_replacement_enforce import _binding
 from test_page_owner_pipeline import _request as _page_request, _services
 from strip.page_pipeline import PageExecutionResult, run_page_owner_pipeline
 from qa.inpaint_residual import detect_residual_text
+from typesetter.renderer import build_owner_body_render_payload
 
 
 def _masks():
@@ -240,3 +242,91 @@ def test_page_result_rejects_repair_policy_hash_swap():
     )
     with pytest.raises(RepairPolicyIdentityError):
         PageExecutionResult.build_from(result, repair_budget_policy_sha256="f" * 64)
+
+
+def test_r2_rebuilds_each_source_line_as_one_region_not_glyph_fragments():
+    binding = _binding()
+    original = np.full((70, 130, 3), 245, dtype=np.uint8)
+    support = np.zeros(original.shape[:2], dtype=np.uint8)
+    support[20:25, 20:31] = 255
+    support[20:25, 40:53] = 255
+    support[20:25, 63:78] = 255
+    support[39:44, 28:43] = 255
+    support[39:44, 54:70] = 255
+    original[support > 0] = 20
+    interior = np.zeros_like(support)
+    interior[8:62, 8:122] = 255
+    border = np.zeros_like(support)
+    border[8:10, 8:122] = 255
+    protected = np.zeros_like(support)
+    protected[16:50, 92:108] = 255
+    case = OwnerRepairCase.build(
+        original_rgb=original,
+        translation=binding,
+        execution_id="execution-repair",
+        source_support_mask=support,
+        container_interior_mask=interior,
+        container_border_mask=border,
+        protected_art_mask=protected,
+        positive_residual_mask=np.zeros_like(support),
+    )
+    request = _request(case, request_id="request-r2")
+
+    attempt = build_repair_attempt(
+        case,
+        request=request,
+        policy=RepairBudgetPolicy.default(),
+        strategy="R2",
+    )
+
+    assert np.all(attempt.cleanup_mask[21:24, 31:63] > 0)
+    assert np.all(attempt.cleanup_mask[40:43, 43:54] > 0)
+    assert not np.any((attempt.cleanup_mask > 0) & ((border > 0) | (protected > 0)))
+
+
+def test_r2_commits_one_unsplit_ptbr_body_from_one_binding():
+    def executor(*, original_rgb, cleanup_mask, **_kwargs):
+        final = np.array(original_rgb, copy=True)
+        final[cleanup_mask > 0] = 245
+        return RepairExecutionFeedback.committed(final)
+
+    case = _case(executor)
+    result = run_repair_ladder(
+        case,
+        start_strategy="R2",
+        max_strategy="R2",
+        scheduler=lambda _seconds: None,
+    )
+    payload = build_owner_body_render_payload(
+        result.translation,
+        (8, 5, 73, 43),
+        style_copy_mode="shadow",
+        style_confident=True,
+        has_complex_source_style=True,
+    )
+
+    assert result.status == "committed"
+    assert result.commit.owner_id == result.translation.owner_id
+    assert result.commit.text_layer_count == 1
+    assert result.commit.target_text == result.translation.target_text
+    assert payload.text_layer_count == 1
+    assert payload.target_text == " ".join(result.translation.target_text.split())
+    assert payload.style_source == "configured_base_font"
+
+
+def test_r2_background_rebuild_changes_only_the_authorized_text_region():
+    case = _case()
+    attempt = build_repair_attempt(
+        case,
+        request=_request(case, request_id="request-r2-rebuild"),
+        policy=RepairBudgetPolicy.default(),
+        strategy="R2",
+    )
+    before = np.array(case.original_rgb, copy=True)
+    after = rebuild_r2_text_region(before, attempt.cleanup_mask)
+    outside = attempt.cleanup_mask == 0
+
+    assert np.array_equal(before[outside], after[outside])
+    assert np.mean(after[case.source_support_mask > 0]) > np.mean(
+        before[case.source_support_mask > 0]
+    )

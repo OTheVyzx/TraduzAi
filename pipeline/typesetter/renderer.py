@@ -108,6 +108,66 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class OwnerBodyRenderPayload:
+    """One semantic PT-BR body passed to the renderer as one text layer."""
+
+    owner_id: str
+    target_text: str
+    translation_binding_sha256: str
+    target_payload_sha256: str
+    safe_bbox: tuple[int, int, int, int]
+    text_layer_count: int
+    style_source: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "owner_id": self.owner_id,
+            "translated": self.target_text,
+            "translation_binding_sha256": self.translation_binding_sha256,
+            "target_payload_sha256": self.target_payload_sha256,
+            "safe_bbox": list(self.safe_bbox),
+            "text_layer_count": self.text_layer_count,
+            "style_source": self.style_source,
+        }
+
+
+def build_owner_body_render_payload(
+    binding: Any,
+    safe_bbox: Iterable[int],
+    *,
+    style_copy_mode: str = "off",
+    style_confident: bool = False,
+    has_complex_source_style: bool = False,
+) -> OwnerBodyRenderPayload:
+    """Seal a full translation binding into exactly one vector render body."""
+
+    bbox = tuple(int(value) for value in safe_bbox)
+    if len(bbox) != 4 or bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+        raise ValueError("owner body render safe bbox is invalid")
+    target = " ".join(str(getattr(binding, "target_text", "")).split())
+    if not target:
+        raise ValueError("owner body render target is empty")
+    style_source = (
+        "verified_source_style"
+        if str(style_copy_mode).lower() == "render"
+        and style_confident
+        and has_complex_source_style
+        else "configured_base_font"
+    )
+    return OwnerBodyRenderPayload(
+        owner_id=str(getattr(binding, "owner_id", "")),
+        target_text=target,
+        translation_binding_sha256=str(
+            getattr(binding, "translation_binding_sha256", "")
+        ),
+        target_payload_sha256=str(getattr(binding, "target_payload_sha256", "")),
+        safe_bbox=bbox,
+        text_layer_count=1,
+        style_source=style_source,
+    )
+
+
 def _canonical_runtime_sha256(value: Any) -> str:
     return sha256(
         json.dumps(
