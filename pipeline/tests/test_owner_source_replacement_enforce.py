@@ -59,6 +59,18 @@ def _transaction():
     )
 
 
+def test_rendered_owner_record_binding_fields_preserve_translation_identity():
+    from strip.process_bands import _owner_translation_binding_fields
+
+    binding = _binding()
+
+    assert _owner_translation_binding_fields(binding) == {
+        "translation_binding_sha256": binding.translation_binding_sha256,
+        "source_payload_sha256": binding.source_payload_sha256,
+        "target_payload_sha256": binding.target_payload_sha256,
+    }
+
+
 def test_cleanup_and_pt_br_render_commit_as_one_hash_chain():
     original, mutation, tx = _transaction()
     glyph_patch = _glyph_patch(

@@ -468,7 +468,7 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertEqual(observed["end"], gradient["end"])
         self.assertEqual(observed["coordinate_space"], "glyph_bbox_normalized")
 
-    def test_v2_owner_fallback_without_approved_attributes_uses_normal_text_path(self):
+    def test_v2_owner_fallback_without_approved_attributes_produces_normal_glyph_evidence(self):
         canvas = np.zeros((120, 240, 3), dtype=np.uint8)
         font = SafeTextPathFont(find_font("ComicNeue-Regular.ttf"), 28)
         block = {
@@ -493,7 +493,9 @@ class TypesettingRendererTests(unittest.TestCase):
             canvas, block, plan, ["TESTE"], font, [(40, 35)]
         )
 
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "applied")
+        self.assertGreater(np.count_nonzero(result.glyph_core_mask), 0)
         self.assertNotIn("_sealed_materialization_plan_v1", block)
 
     def test_v2_owner_effects_use_container_paint_safe_not_layout_chord(self):

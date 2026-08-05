@@ -1640,6 +1640,20 @@ def finalize_and_persist_page_result(
     return reopened, evidence_ref
 
 
+def _owner_graph_after_execution(
+    translated_graph: OwnerGraph,
+    execution_output: Any,
+) -> OwnerGraph:
+    """Select the executor-owned graph so terminal owner states reach QA."""
+
+    executed_graph = getattr(execution_output, "graph", None)
+    if executed_graph is None:
+        return translated_graph
+    if not isinstance(executed_graph, OwnerGraph):
+        raise TypeError("page execution graph must be an OwnerGraph")
+    return executed_graph
+
+
 def run_page_owner_pipeline(
     request: PagePipelineRequest,
     services: PagePipelineServices,
@@ -1750,10 +1764,11 @@ def run_page_owner_pipeline(
         )
     else:
         commits = tuple(execution_output)
+    result_graph = _owner_graph_after_execution(translated_graph, execution_output)
     return PageExecutionResult.build(
         request=request,
         coverage=coverage,
-        owner_graph=translated_graph,
+        owner_graph=result_graph,
         translation_attempts=(translation_result.attempts if translation_result else ()),
         translations=(translation_result.bindings if translation_result else ()),
         page_commits=commits,

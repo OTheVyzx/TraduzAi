@@ -10859,6 +10859,18 @@ def _owner_preserve_original_record(
     return record
 
 
+def _owner_translation_binding_fields(
+    binding: TranslationBinding,
+) -> dict[str, str]:
+    """Return the immutable source/target identity required by final text layers."""
+
+    return {
+        "translation_binding_sha256": binding.translation_binding_sha256,
+        "source_payload_sha256": binding.source_payload_sha256,
+        "target_payload_sha256": binding.target_payload_sha256,
+    }
+
+
 def _owner_execution_review_seed(
     record: dict[str, Any],
     reason: str,
@@ -11878,6 +11890,11 @@ def execute_owner_page_graph(
             )
             rendered_record.update(
                 {
+                    **(
+                        _owner_translation_binding_fields(binding)
+                        if binding is not None
+                        else {}
+                    ),
                     "state": "rendered",
                     "owner_mask_coverage": copy.deepcopy(
                         record["owner_mask_coverage"]

@@ -1720,12 +1720,12 @@ def _render_v2_owner_text_layer(
     if isinstance(decision, Mapping):
         decision_status = str(decision.get("status") or "").strip().lower()
         decision_applied = decision.get("applied_attributes")
-        if (
-            decision_status != "applied"
-            or not isinstance(decision_applied, Mapping)
-            or not decision_applied
-        ):
-            return None
+        if decision_status != "applied" or not isinstance(decision_applied, Mapping):
+            decision_applied = {}
+        if not decision_applied:
+            text_data["_style_v2_base_raster_only_reason"] = (
+                f"style_decision_{decision_status or 'missing'}"
+            )
     _seal_owner_materialization_plan(text_data, plan, font, lines, positions)
     applied_style = profile.get("applied_style")
     applied_style = applied_style if isinstance(applied_style, dict) else {}

@@ -24,6 +24,15 @@ def test_new_automatic_run_defaults_to_owner_enforce():
     assert main._automatic_owner_graph_mode({"owner_graph_mode": "shadow"}) == "shadow"
 
 
+def test_owner_artifacts_use_private_execution_namespace(tmp_path):
+    import main
+
+    root = main._owner_private_execution_root(tmp_path, "execution-123")
+
+    assert root == (tmp_path / ".owner-private" / "execution-123").resolve()
+    assert root != tmp_path.resolve()
+
+
 def test_missing_container_is_deferred_to_evidence_reconciliation():
     from ownership.model import SourceTextComponent
     from strip.run import _semantic_regions_for_components

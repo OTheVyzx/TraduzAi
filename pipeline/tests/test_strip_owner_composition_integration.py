@@ -443,6 +443,32 @@ def test_run_chapter_uses_owner_compositor_as_only_final_pixel_authority(monkeyp
     assert np.all(result.output_pages[0].image[61, 70] == (180, 40, 30))
 
 
+def test_owner_composition_accepts_page_space_commits_without_band_transport():
+    import strip.run as run
+
+    original, strip, bands = _chapter_fixture()
+    commits = tuple(
+        commit
+        for band in bands
+        for commit in band.owner_execution_commits
+    )
+    for band in bands:
+        band.owner_execution_commits = []
+
+    result = run._compose_owner_output_pages(
+        original_strip_image=original,
+        strip=strip,
+        bands=bands,
+        balloons=[],
+        target_count=1,
+        owner_execution_commits=commits,
+    )
+
+    assert result.compositions["page_001"].committed is True
+    assert np.all(result.output_pages[0].image[20, 20] == (20, 80, 160))
+    assert np.all(result.output_pages[0].image[61, 70] == (180, 40, 30))
+
+
 def test_owner_reassembly_preserves_source_pages_and_frames_pixel_maps():
     from compositor.owner_compositor import _array_sha256
     from strip.run import _compose_owner_output_pages

@@ -79,6 +79,12 @@ def _automatic_owner_graph_mode(config: dict) -> str:
     return requested
 
 
+def _owner_private_execution_root(work_dir: Path, execution_id: str) -> Path:
+    """Keep canonical owner evidence outside mutable public output namespaces."""
+
+    return (Path(work_dir) / ".owner-private" / str(execution_id)).resolve()
+
+
 def _apply_owner_mode_project_repairs(project_data: dict) -> dict:
     status = str(project_data.get("owner_graph_status") or "legacy_unverified")
     if status == "verified":
@@ -9575,7 +9581,10 @@ def _run_pipeline(config_path: str):
                 != verified_owner_source_manifest.source_tree_sha256
             ):
                 raise ValueError("style replay source tree differs from verified content run")
-            verified_owner_private_root = work_dir
+            verified_owner_private_root = _owner_private_execution_root(
+                work_dir,
+                owner_execution_id,
+            )
         with pipeline_timing.measure("strip_run_chapter"):
             output_pages = run_chapter(
                 image_files=image_files,

@@ -481,9 +481,11 @@ class OwnerChapterComposition:
 
 def _owner_artifacts_from_bands(
     bands: list[Band],
+    owner_execution_commits: tuple[OwnerExecutionCommit, ...] = (),
 ) -> tuple[list[OwnerMutation], list[OwnerGlyphPatch]]:
     mutations: list[OwnerMutation] = []
     glyph_patches: list[OwnerGlyphPatch] = []
+    commits = list(owner_execution_commits)
     for band in bands:
         if list(getattr(band, "owner_mutations", None) or []) or list(
             getattr(band, "owner_glyph_patches", None) or []
@@ -491,24 +493,25 @@ def _owner_artifacts_from_bands(
             raise OwnerCompositionError(
                 "owner artifacts must arrive through an atomic execution commit"
             )
-        for commit in list(getattr(band, "owner_execution_commits", None) or []):
-            if not isinstance(commit, OwnerExecutionCommit):
-                raise OwnerCompositionError(
-                    "owner execution artifact is not an atomic execution commit"
-                )
-            if getattr(commit, "committed", False) is not True:
-                continue
-            mutation = getattr(commit, "mutation", None)
-            glyph_patch = getattr(commit, "glyph_patch", None)
-            if not isinstance(mutation, OwnerMutation) or not isinstance(
-                glyph_patch,
-                OwnerGlyphPatch,
-            ):
-                raise OwnerCompositionError(
-                    "committed owner execution is missing its complete atomic chain"
-                )
-            mutations.append(mutation)
-            glyph_patches.append(glyph_patch)
+        commits.extend(list(getattr(band, "owner_execution_commits", None) or []))
+    for commit in commits:
+        if not isinstance(commit, OwnerExecutionCommit):
+            raise OwnerCompositionError(
+                "owner execution artifact is not an atomic execution commit"
+            )
+        if getattr(commit, "committed", False) is not True:
+            continue
+        mutation = getattr(commit, "mutation", None)
+        glyph_patch = getattr(commit, "glyph_patch", None)
+        if not isinstance(mutation, OwnerMutation) or not isinstance(
+            glyph_patch,
+            OwnerGlyphPatch,
+        ):
+            raise OwnerCompositionError(
+                "committed owner execution is missing its complete atomic chain"
+            )
+        mutations.append(mutation)
+        glyph_patches.append(glyph_patch)
     return mutations, glyph_patches
 
 
@@ -551,6 +554,7 @@ def _compose_owner_output_pages(
     balloons: list,
     target_count: int,
     protected_art_masks_by_page: dict[str, np.ndarray] | None = None,
+    owner_execution_commits: tuple[OwnerExecutionCommit, ...] = (),
 ) -> OwnerChapterComposition:
     """Compose source pages once from owner artifacts, then apply framing only."""
 
@@ -562,7 +566,10 @@ def _compose_owner_output_pages(
         or tuple(original_strip.shape) != tuple(strip.image.shape)
     ):
         raise OwnerCompositionError("owner composition requires the canonical RGB source strip")
-    mutations, glyph_patches = _owner_artifacts_from_bands(bands)
+    mutations, glyph_patches = _owner_artifacts_from_bands(
+        bands,
+        owner_execution_commits,
+    )
     page_ids = {str(artifact.page_id) for artifact in [*mutations, *glyph_patches]}
     source_page_count = max(0, len(list(strip.source_page_breaks or [])) - 1)
     known_page_ids = {_page_id_for(index + 1) for index in range(source_page_count)}
@@ -2011,6 +2018,7 @@ def _write_owner_debug_artifacts(
     owner_graphs: dict[str, OwnerGraph],
     bands: list[Band],
     compositions: dict[str, PageCompositionResult] | None,
+    owner_execution_commits: tuple[OwnerExecutionCommit, ...] = (),
 ) -> None:
     recorder = _get_debug_recorder()
     if recorder is None or not owner_graphs:
@@ -2018,12 +2026,13 @@ def _write_owner_debug_artifacts(
     try:
         from ownership.artifacts import OwnerArtifactPublisher
 
-        executions = [
+        executions = list(owner_execution_commits)
+        executions.extend(
             commit
             for band in bands
             for commit in list(getattr(band, "owner_execution_commits", None) or [])
             if isinstance(commit, OwnerExecutionCommit) and commit.committed
-        ]
+        )
         OwnerArtifactPublisher(recorder).publish(
             graphs=owner_graphs,
             executions=executions,
@@ -6865,11 +6874,8 @@ def run_chapter(
         owner_execution_records_by_page: dict[str, list[dict]] = {}
         owner_page_executions_by_page = {}
         owner_page_results_by_page: dict[str, PageExecutionResult] = {}
+        page_space_owner_commits: list[OwnerExecutionCommit] = []
         if owner_graph_mode == "enforce":
-            band_by_tile = {
-                evidence.tile_id: evidence.band
-                for evidence in owner_evidence_by_band.values()
-            }
             with _timed(chapter_telemetry, "owner_page_execution"):
                 for page_id, graph in sorted(owner_graphs.items()):
                     page_number = int(page_id.rsplit("_", 1)[-1])
@@ -7007,16 +7013,7 @@ def run_chapter(
                     owner_execution_records_by_page[page_id] = [
                         copy.deepcopy(record) for record in execution.records
                     ]
-                    for commit in execution.commits:
-                        executor_band = band_by_tile.get(commit.execution_tile_id)
-                        if executor_band is None:
-                            raise ValueError(
-                                f"owner commit references unknown executor tile: {commit.execution_tile_id}"
-                            )
-                        prior = list(
-                            getattr(executor_band, "owner_execution_commits", None) or []
-                        )
-                        executor_band.owner_execution_commits = [*prior, commit]
+                    page_space_owner_commits.extend(execution.commits)
         overlap_executor = (
             owner_graph_mode != "enforce"
             and
@@ -7304,6 +7301,7 @@ def run_chapter(
                 bands=bands,
                 balloons=balloons,
                 target_count=target_count,
+                owner_execution_commits=tuple(page_space_owner_commits),
             )
         output_pages = owner_chapter_composition.output_pages
         original_pages = owner_chapter_composition.original_pages
@@ -7715,6 +7713,7 @@ def run_chapter(
             if owner_chapter_composition is not None
             else None
         ),
+        owner_execution_commits=tuple(page_space_owner_commits),
     )
 
     _write_page_cleanup_breakdown_debug(cleanup_breakdown)

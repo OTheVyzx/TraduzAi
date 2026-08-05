@@ -324,6 +324,24 @@ def test_page_execution_result_carries_direct_page_commits():
     assert not hasattr(result, "commits_by_band")
 
 
+def test_page_result_selects_post_execution_owner_graph():
+    from strip.page_pipeline import _owner_graph_after_execution
+
+    request = _request()
+    coverage = _ready_coverage(request)
+    translated_graph = _services().graph_fn(coverage)
+    executed_graph = copy.deepcopy(translated_graph)
+    executed_graph.owners[0].state = "rendered"
+
+    selected = _owner_graph_after_execution(
+        translated_graph,
+        SimpleNamespace(graph=executed_graph),
+    )
+
+    assert selected.owners[0].state == "rendered"
+    assert translated_graph.owners[0].state != "rendered"
+
+
 def test_page_result_rejects_graph_binding_or_commit_from_another_identity():
     result = run_page_owner_pipeline(_request(), _services())
     parts = dict(
