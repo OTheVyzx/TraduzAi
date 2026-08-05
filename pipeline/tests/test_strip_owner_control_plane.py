@@ -879,3 +879,28 @@ def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode(
 
     assert len(pages) == 1
     legacy_process.assert_not_called()
+
+
+def test_enforce_owner_resolution_never_calls_legacy_reconcile() -> None:
+    from strip import run
+
+    coverage = SimpleNamespace(page_id="page_001")
+    expected = MagicMock(spec=OwnerGraph)
+    with patch.object(
+        run,
+        "build_owner_page_graph_from_coverage",
+        return_value=expected,
+    ) as complete_builder, patch.object(
+        run,
+        "_resolve_owner_graph_from_evidence",
+        side_effect=AssertionError("legacy owner reconcile called"),
+    ) as legacy_builder:
+        resolved = run._resolve_owner_graph_from_page_coverage(
+            "page_001",
+            coverage,
+            mode="enforce",
+        )
+
+    assert resolved is expected
+    complete_builder.assert_called_once_with(coverage)
+    legacy_builder.assert_not_called()

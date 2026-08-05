@@ -368,7 +368,7 @@ def _coverage_runner():
 
 def _completed_coverage() -> PageCoverageResult:
     page = _coverage_page()
-    return complete_page_coverage(
+    coverage = complete_page_coverage(
         page,
         run_id=RUN_ID,
         origin_execution_id=EXECUTION_ID,
@@ -378,6 +378,7 @@ def _completed_coverage() -> PageCoverageResult:
         band_evidence=[],
         ocr_runner=_coverage_runner(),
     )
+    return complete_container_coverage(page, coverage)
 
 
 def _coverage_recovery_request(

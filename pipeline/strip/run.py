@@ -40,6 +40,7 @@ from ownership.model import (
     TextObservation,
 )
 from ownership.ocr_adapter import TileProjection
+from ownership.owner_builder import build_owner_page_graph_from_coverage
 from ownership.reconcile import SemanticRegion, build_page_owner_graph
 from strip._diagnostics import dump_strip_debug, is_debug_enabled
 from strip.bands import attach_band_slices, group_balloons_into_bands, visual_card_edge_expansion
@@ -5759,6 +5760,8 @@ def _semantic_regions_for_components(components) -> list[SemanticRegion]:
 
 
 def _resolve_owner_graph_from_evidence(page_id: str, evidence: list) -> OwnerGraph:
+    """Deprecated production resolver retained for shadow and legacy fixtures only."""
+
     components_by_id: dict[str, object] = {}
     observations_by_id: dict[str, TextObservation] = {}
     for item in evidence:
@@ -5787,6 +5790,22 @@ def _resolve_owner_graph_from_evidence(page_id: str, evidence: list) -> OwnerGra
         observations=observations,
         semantic_regions=_semantic_regions_for_components(components),
     )
+
+
+def _resolve_owner_graph_from_page_coverage(
+    page_id: str,
+    coverage: PageCoverageResult,
+    *,
+    mode: str,
+) -> OwnerGraph:
+    """Route enforce to the complete ledger without invoking legacy reconciliation."""
+
+    normalized_mode = _normalise_owner_graph_mode(mode)
+    if coverage.page_id != page_id:
+        raise ValueError(f"page coverage identity mismatch: {page_id}")
+    if normalized_mode == "enforce":
+        return build_owner_page_graph_from_coverage(coverage)
+    return _resolve_owner_graph_from_evidence(page_id, [coverage])
 
 
 def _owner_style_promotions_from_evidence(
@@ -5958,7 +5977,7 @@ def _assign_owner_executor_projections(
             )
             continue
         owner.execution_tile_id = executor[2]
-        owner.state = "execution_planned"
+        owner.state = "owned" if page_space_executor else "execution_planned"
         for _covered, _edge, tile_id, tile in sorted(candidates, key=lambda item: item[2]):
             offset_x, offset_y = (int(value) for value in tile.offset_xy)
             is_executor = tile_id == executor[2]
@@ -6046,7 +6065,7 @@ def _run_owner_control_plane(
                 page_space_executor=mode == "enforce",
             )
             graphs[page_id] = graph
-        violations = graph.validate()
+        violations = graph.validate(mode=mode)
         critical = [item for item in violations if item.severity == "critical"]
         if mode == "shadow":
             critical = [
@@ -6330,7 +6349,11 @@ def run_chapter(
                 coverage = page_coverages_by_page.get(page_id)
                 if coverage is None:
                     raise ValueError(f"page coverage is missing before owner resolution: {page_id}")
-                return _resolve_owner_graph_from_evidence(page_id, [coverage])
+                return _resolve_owner_graph_from_page_coverage(
+                    page_id,
+                    coverage,
+                    mode=owner_graph_mode,
+                )
 
             with _timed(chapter_telemetry, "owner_control_plane"):
                 owner_graphs = _run_owner_control_plane(
@@ -6409,6 +6432,7 @@ def run_chapter(
                             graph,
                             page_evidence,
                         ),
+                        enforce_graph=True,
                     )
                     owner_graphs[page_id] = execution.graph
                     owner_execution_records_by_page[page_id] = [

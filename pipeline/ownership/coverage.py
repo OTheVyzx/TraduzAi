@@ -1417,6 +1417,16 @@ class PageCoverageResult:
             for attempt in invocation.attempts
         }
         observation_ids = {item.observation_id for item in self.observations}
+        component_ids = {item.component_id for item in self.components}
+        for observation in self.observations:
+            if not observation.component_ids:
+                raise CoverageInvariantError(
+                    f"observation remains unassociated: {observation.observation_id}"
+                )
+            if not set(observation.component_ids) <= component_ids:
+                raise CoverageInvariantError(
+                    f"observation references unknown component: {observation.observation_id}"
+                )
         for entry in self.entries:
             if entry.materiality == "material" and not entry.ocr_attempt_ids:
                 raise CoverageInvariantError(f"component lacks OCR attempt: {entry.component_id}")
@@ -1424,6 +1434,24 @@ class PageCoverageResult:
                 raise CoverageInvariantError(f"component has orphan OCR attempt: {entry.component_id}")
             if not set(entry.observation_ids) <= observation_ids:
                 raise CoverageInvariantError(f"component has orphan observation: {entry.component_id}")
+            if entry.state == "explicit_non_dialogue_preserve":
+                if (
+                    not entry.preserve_policy
+                    or not entry.preserve_policy.startswith("policy:")
+                    or bool(entry.semantic_role and "dialogue" in entry.semantic_role)
+                ):
+                    raise CoverageInvariantError(
+                        f"preserved component lacks explicit non-dialogue policy: {entry.component_id}"
+                    )
+                continue
+            if entry.materiality == "material" and not entry.observation_ids:
+                raise CoverageInvariantError(
+                    f"translatable component lacks OCR observation: {entry.component_id}"
+                )
+            if entry.materiality == "material" and not entry.container_id:
+                raise CoverageInvariantError(
+                    f"translatable component lacks container: {entry.component_id}"
+                )
 
     @classmethod
     def from_canonical_json_bytes(cls, encoded: bytes) -> "PageCoverageResult":

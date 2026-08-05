@@ -53,3 +53,34 @@ def select_consensus_observation(
             str(observation.observation_id),
         ),
     )
+
+
+def select_ordered_consensus_body(
+    observation_groups: Sequence[Sequence[TextObservation]],
+) -> tuple[tuple[TextObservation, ...], str]:
+    """Select one reading per component and compose it in canonical page order."""
+
+    selected_by_id = {
+        observation.observation_id: observation
+        for observation in (
+            select_consensus_observation(group) for group in observation_groups
+        )
+    }
+    selected = tuple(
+        sorted(
+            selected_by_id.values(),
+            key=lambda item: (
+                item.bbox_page[1],
+                item.bbox_page[0],
+                item.bbox_page[3],
+                item.bbox_page[2],
+                item.observation_id,
+            ),
+        )
+    )
+    payload = " ".join(
+        " ".join(str(item.text or "").split()) for item in selected
+    ).strip()
+    if not payload:
+        raise ValueError("consensus body requires non-empty selected observations")
+    return selected, payload

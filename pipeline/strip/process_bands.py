@@ -11120,6 +11120,7 @@ def execute_owner_page_graph(
     ollama_model: str = "traduzai-translator",
     translation_context: dict | None = None,
     style_promotions_by_owner: Mapping[str, Mapping[str, Any]] | None = None,
+    enforce_graph: bool = False,
 ) -> OwnerPageExecution:
     """Execute every page owner once against canonical page pixels."""
 
@@ -11131,7 +11132,7 @@ def execute_owner_page_graph(
     from ownership.container_evidence import recover_full_page_visual_container
     from layout.balloon_layout import enrich_page_layout
 
-    graph.require_valid()
+    graph.require_valid(mode="enforce" if enforce_graph else "legacy")
     source = np.ascontiguousarray(page_rgb, dtype=np.uint8)
     captured_glyph_masks = _capture_owner_glyph_masks_before_inpaint(source, graph)
     captured_protected_art_masks = _capture_owner_protected_art_masks_before_inpaint(

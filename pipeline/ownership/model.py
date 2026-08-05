@@ -287,6 +287,10 @@ class ComponentDisposition:
     decision: str
     owner_id: str | None = None
     reason: str | None = None
+    policy_id: str | None = None
+    policy_bbox_page: BBox | None = None
+    policy_evidence_ids: tuple[str, ...] = ()
+    policy_reason: str | None = None
 
 
 @dataclass
@@ -1836,6 +1840,39 @@ class OwnerGraph:
                         disposition.owner_id,
                     )
                 )
+            if mode == "enforce" and disposition.decision == "preserve":
+                if not str(disposition.policy_id or "").strip():
+                    violations.append(
+                        _violation(
+                            "preserve_policy_id_missing",
+                            "Preserved source component requires an audited policy identity.",
+                            disposition.component_id,
+                        )
+                    )
+                if not _is_canonical_page_bbox(disposition.policy_bbox_page):
+                    violations.append(
+                        _violation(
+                            "preserve_policy_bbox_missing",
+                            "Preserved source component requires canonical policy geometry.",
+                            disposition.component_id,
+                        )
+                    )
+                if not disposition.policy_evidence_ids:
+                    violations.append(
+                        _violation(
+                            "preserve_policy_evidence_missing",
+                            "Preserved source component requires policy evidence identities.",
+                            disposition.component_id,
+                        )
+                    )
+                if not str(disposition.policy_reason or "").strip():
+                    violations.append(
+                        _violation(
+                            "preserve_policy_reason_missing",
+                            "Preserved source component requires an audited policy reason.",
+                            disposition.component_id,
+                        )
+                    )
 
         for component_id in sorted(component_ids):
             decisions = dispositions_by_component.get(component_id, [])
@@ -2352,6 +2389,14 @@ class OwnerGraph:
                     "decision": disposition.decision,
                     "owner_id": disposition.owner_id,
                     "reason": disposition.reason,
+                    "policy_id": disposition.policy_id,
+                    "policy_bbox_page": (
+                        list(disposition.policy_bbox_page)
+                        if disposition.policy_bbox_page is not None
+                        else None
+                    ),
+                    "policy_evidence_ids": list(disposition.policy_evidence_ids),
+                    "policy_reason": disposition.policy_reason,
                 }
                 for disposition in sorted(
                     self.component_dispositions,
@@ -2550,6 +2595,25 @@ class OwnerGraph:
                     ),
                     reason=(
                         str(item["reason"]) if item.get("reason") is not None else None
+                    ),
+                    policy_id=(
+                        str(item["policy_id"])
+                        if item.get("policy_id") is not None
+                        else None
+                    ),
+                    policy_bbox_page=(
+                        _bbox(item.get("policy_bbox_page"))
+                        if item.get("policy_bbox_page") is not None
+                        else None
+                    ),
+                    policy_evidence_ids=tuple(
+                        str(value)
+                        for value in item.get("policy_evidence_ids") or ()
+                    ),
+                    policy_reason=(
+                        str(item["policy_reason"])
+                        if item.get("policy_reason") is not None
+                        else None
                     ),
                 )
                 for item in data.get("component_dispositions") or ()
