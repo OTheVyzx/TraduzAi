@@ -227,6 +227,39 @@ def test_page_pipeline_passes_fresh_complete_language_evidence(monkeypatch):
     assert "this" in captured[owner_id].source_only_tokens
 
 
+def test_execution_record_adapter_converts_nested_tuples_but_not_invalid_sets() -> None:
+    from ownership.execution import FrozenJSONSnapshot
+    from strip.page_pipeline import _json_compatible_execution_value
+
+    source = {
+        "texts": [
+            {
+                "owner_style_capture": {
+                    "style_evidence_v2": {
+                        "attribute_provenance": {
+                            "fill": {"masks": ("owner_glyph_core",)},
+                        }
+                    }
+                }
+            }
+        ]
+    }
+
+    converted = _json_compatible_execution_value(source)
+
+    assert converted["texts"][0]["owner_style_capture"]["style_evidence_v2"][
+        "attribute_provenance"
+    ]["fill"]["masks"] == ["owner_glyph_core"]
+    assert source["texts"][0]["owner_style_capture"]["style_evidence_v2"][
+        "attribute_provenance"
+    ]["fill"]["masks"] == ("owner_glyph_core",)
+    assert FrozenJSONSnapshot.build(converted).read() == converted
+    with pytest.raises(TypeError, match="unsupported canonical JSON value"):
+        FrozenJSONSnapshot.build(
+            _json_compatible_execution_value({"texts": [{"invalid": {"set"}}]})
+        )
+
+
 def test_stale_mutable_band_payloads_are_not_imported_or_mutated_in_enforce():
     band = Band(y_top=10, y_bottom=80, tile_id="band-legacy")
     band.ocr_result = {"texts": [{"translated": "STALE"}]}

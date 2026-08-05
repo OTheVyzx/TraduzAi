@@ -61,6 +61,19 @@ CANONICAL_VISUAL_STAGE_NAMES = (
 )
 
 
+def _json_compatible_execution_value(value):
+    """Materialize immutable tuple containers without accepting non-JSON values."""
+
+    if isinstance(value, Mapping):
+        return {
+            key: _json_compatible_execution_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible_execution_value(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class CanonicalVisualStage:
     """Hash-linked authority for one canonical page-space visual stage."""
@@ -1688,7 +1701,9 @@ def run_page_owner_pipeline(
             getattr(execution_output, "target_materializations", ()) or ()
         )
         records = tuple(getattr(execution_output, "records", ()) or ())
-        text_layers_view = FrozenJSONSnapshot.build({"texts": list(records)})
+        text_layers_view = FrozenJSONSnapshot.build(
+            _json_compatible_execution_value({"texts": list(records)})
+        )
         composition = PageCandidateTransaction.from_original(
             request.original_page.mutable_attempt_copy(), commits=commits
         ).compose()
