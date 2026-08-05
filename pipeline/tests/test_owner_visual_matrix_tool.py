@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -36,6 +37,117 @@ def test_matrix_cli_exposes_explicit_producer_run_id():
 
     assert result.returncode == 0, result.stderr
     assert "--run-id RUN_ID" in result.stdout
+
+
+def test_matrix_cli_exposes_external_auditor_contract():
+    result = subprocess.run(
+        [sys.executable, str(PIPELINE / "tools" / "validate_owner_visual_matrix.py"), "--help"],
+        cwd=PIPELINE.parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--audit-dir AUDIT_DIR" in result.stdout
+    assert "--require-external-audit" in result.stdout
+
+
+def test_validate_owner_visual_matrix_cli_forwards_external_audit_flags_and_exit_code(
+    tmp_path, monkeypatch
+):
+    from tools import validate_owner_visual_matrix as matrix
+
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(status="PASS")
+
+    monkeypatch.setattr(matrix, "validate_matrix_cli_request", fake, raising=False)
+    paths = {
+        "manifest": tmp_path / "functional_matrix.json",
+        "output_root": tmp_path / "matrix-out",
+        "report": tmp_path / "matrix.md",
+        "inspection_template": tmp_path / "inspection.json",
+        "audit_dir": tmp_path / "audits",
+    }
+    assert matrix.main([
+        "--manifest", str(paths["manifest"]), "--output-root", str(paths["output_root"]),
+        "--report", str(paths["report"]), "--inspection-template", str(paths["inspection_template"]),
+        "--audit-dir", str(paths["audit_dir"]), "--require-external-audit",
+        "--run-id", "universal-source-replacement-v1",
+    ]) == 0
+    assert calls == [{
+        **{key: value.resolve() for key, value in paths.items()},
+        "validate_only": False,
+        "inspection_manifest": None,
+        "acceptance_bundle": None,
+        "require_external_audit": True,
+        "run_id": "universal-source-replacement-v1",
+    }]
+
+
+def test_validate_owner_visual_matrix_cli_returns_nonzero_when_validation_raises(
+    tmp_path, monkeypatch
+):
+    from tools import validate_owner_visual_matrix as matrix
+
+    monkeypatch.setattr(
+        matrix,
+        "validate_matrix_cli_request",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("external audit missing")),
+        raising=False,
+    )
+    assert matrix.main([
+        "--manifest", str(tmp_path / "functional_matrix.json"),
+        "--output-root", str(tmp_path / "matrix-out"),
+        "--report", str(tmp_path / "matrix.md"),
+        "--inspection-template", str(tmp_path / "inspection.json"),
+        "--audit-dir", str(tmp_path / "audits"), "--require-external-audit",
+        "--run-id", "universal-source-replacement-v1",
+    ]) != 0
+
+
+def test_visual_matrix_launches_auditor_cli_in_distinct_real_process_per_entry(tmp_path):
+    from tools.validate_owner_visual_matrix import _run_external_audits
+
+    script = tmp_path / "fake_auditor.py"
+    log = tmp_path / "processes.jsonl"
+    script.write_text(
+        "import argparse, json, os\n"
+        "p=argparse.ArgumentParser(); p.add_argument('--source'); p.add_argument('--run'); "
+        "p.add_argument('--report'); p.add_argument('--review-dir'); p.add_argument('--source-lang'); "
+        "p.add_argument('--target-lang'); p.add_argument('--require-final-verified', action='store_true'); a=p.parse_args()\n"
+        "entry=os.environ['TRADUZAI_MATRIX_ENTRY_ID']; pid=os.getpid()\n"
+        f"open({str(log)!r}, 'a', encoding='utf-8').write(json.dumps({{'entry_id':entry,'pid':pid}})+'\\n')\n"
+        "audit={'page_id':'page_001','status':'PASS','auditor_invocation_id':'inv:'+entry,"
+        "'auditor_execution_id':'exec:'+entry,'auditor_process_nonce':'nonce:'+entry}\n"
+        "payload={'schema_version':1,'external_audit_gate_status':'PASS',"
+        "'source_manifest_page_ids':['page_001'],'external_page_audits':[audit],"
+        "'external_page_audits_count':1}\n"
+        "open(a.report,'w',encoding='utf-8').write(json.dumps(payload))\n",
+        encoding="utf-8",
+    )
+    entries, runtimes = [], {}
+    for ordinal in (1, 2):
+        entry_id = f"entry_{ordinal}"
+        source, work = tmp_path / f"source_{ordinal}", tmp_path / f"work_{ordinal}"
+        source.mkdir(); work.mkdir()
+        config = tmp_path / f"config_{ordinal}.json"
+        config.write_text(json.dumps({"idioma_origem": "en", "idioma_destino": "pt-BR"}), encoding="utf-8")
+        entries.append({"entry_id": entry_id, "work_dir": str(work)})
+        runtimes[entry_id] = {"source_path": source, "config_path": config}
+
+    records = _run_external_audits(
+        entries, runtimes, tmp_path / "out", tmp_path / "audits",
+        external_auditor_command=(sys.executable, str(script)),
+    )
+
+    invocations = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert set(records) == {"entry_1", "entry_2"}
+    assert {item["entry_id"] for item in invocations} == set(records)
+    assert len({item["pid"] for item in invocations}) == 2
 
 
 def _entry(work_id: str, work_dir: str, categories: list[str]) -> dict:

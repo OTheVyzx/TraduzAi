@@ -154,7 +154,7 @@ def build_effective_style_config(
     effective = copy.deepcopy(shared_config)
     effective.update(
         {
-            "style_copy_mode": "enforce",
+            "style_copy_mode": str(shared_config.get("style_copy_mode") or "enforce"),
             "style_inspection_required": True,
             "style_fidelity_required_categories": sorted(set(required_categories)),
         }

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from ownership.hash_contract import canonical_page_sha256, sha256_text
@@ -14,6 +17,25 @@ from ownership.ocr_contract import (
 )
 from strip.page_pipeline import PageExecutionResult, PagePipelineIdentityError, run_page_owner_pipeline
 from test_page_owner_pipeline import _request, _services
+
+
+def test_systemic_recipe_corpus_covers_visual_and_ownership_dimensions():
+    fixture = Path(__file__).parent / "fixtures" / "english_owner_recovery"
+    manifest = json.loads((fixture / "manifest.json").read_text(encoding="utf-8"))
+    recipes = json.loads((fixture / "recipes.json").read_text(encoding="utf-8"))["recipes"]
+    selected = [recipes[item["recipe_id"]] for item in manifest["cases"]]
+    glyphs = [glyph for recipe in selected for glyph in recipe["glyph_layers"]]
+
+    assert len(manifest["cases"]) == 12
+    assert {recipe["canvas"]["background"] for recipe in selected} >= {"light", "dark", "gradient"}
+    assert {glyph.get("fill") for glyph in glyphs if glyph.get("fill")} >= {"solid", "gradient"}
+    assert {glyph.get("outline") for glyph in glyphs if "outline" in glyph} == {False, True}
+    assert any(glyph.get("anti_alias") is True for glyph in glyphs)
+    assert {glyph.get("line_count") for glyph in glyphs if glyph.get("line_count")} >= {1, 2, 3}
+    assert {recipe.get("band_mode") for recipe in selected if recipe.get("band_mode")} >= {"absent", "cross_band"}
+    assert {recipe["language"].get("input") for recipe in selected if recipe["language"].get("input")} >= {
+        "source", "target", "mixed"
+    }
 
 
 def test_no_band_dialogue_recipe_completes_basic_page_first_lifecycle():

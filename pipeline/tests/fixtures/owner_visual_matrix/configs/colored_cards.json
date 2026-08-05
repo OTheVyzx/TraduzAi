@@ -12,5 +12,7 @@
   "skip_ocr": false,
   "strict": true,
   "export_mode": "strict",
+  "owner_graph_mode": "enforce",
+  "style_copy_mode": "off",
   "inpaint_policy": "pure"
 }

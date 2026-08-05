@@ -20,6 +20,69 @@ except Exception:  # pragma: no cover - defensive CLI boundary
     ImageChops = None  # type: ignore[assignment]
 
 
+def export_source_candidate_review(
+    source_dir: str | Path,
+    candidate_dir: str | Path,
+    review_dir: str | Path,
+) -> dict[str, Any]:
+    """Export native source/final pairs with an intentionally blank human verdict."""
+
+    from ownership.hash_contract import canonical_page_sha256, sha256_file
+
+    if Image is None:
+        raise RuntimeError("Pillow is required for native visual review export")
+    source_root = Path(source_dir).resolve(strict=True)
+    candidate_root = Path(candidate_dir).resolve(strict=True)
+    review_root = Path(review_dir).resolve()
+    project = _load_project(candidate_root / "project.json")
+    pages = _page_map(project)
+    sources = sorted(
+        path for path in source_root.iterdir()
+        if path.is_file() and path.suffix.casefold() in {".png", ".jpg", ".jpeg", ".webp"}
+    )
+    if len(sources) != len(pages):
+        raise ValueError("source/final page cardinality mismatch")
+    items: list[dict[str, Any]] = []
+    for ordinal, source in enumerate(sources, start=1):
+        page = pages.get(ordinal)
+        if page is None:
+            raise ValueError(f"candidate page missing: {ordinal}")
+        final = _final_image_path(candidate_root, page, ordinal)
+        if final is None:
+            raise ValueError(f"candidate final missing: {ordinal}")
+        page_id = str(page.get("page_id") or f"page_{ordinal:03d}")
+        destination = review_root / page_id
+        destination.mkdir(parents=True, exist_ok=True)
+        source_out, final_out = destination / "source.png", destination / "final.png"
+        with Image.open(source) as opened:
+            opened.convert("RGB").save(source_out, format="PNG")
+        with Image.open(final) as opened:
+            final_rgb = opened.convert("RGB")
+            final_rgb.save(final_out, format="PNG")
+            final_pixel_sha256 = canonical_page_sha256(final_rgb)
+        items.append({
+            "page_number": ordinal,
+            "page_id": page_id,
+            "execution_id": page.get("execution_id"),
+            "source_path": str(source_out),
+            "source_file_sha256": sha256_file(source_out),
+            "final_path": str(final_out),
+            "final_file_sha256": sha256_file(final_out),
+            "final_pixel_sha256": final_pixel_sha256,
+            "visual_verdict": None,
+            "reviewer": None,
+            "reviewed_at": None,
+            "reviewed": False,
+        })
+    payload = {"schema_version": 1, "visual_verdict": None, "items": items}
+    review_root.mkdir(parents=True, exist_ok=True)
+    (review_root / "visual-review-evidence.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return payload
+
+
 def export_visual_review_sheet(
     baseline_dir: str | Path,
     candidate_dir: str | Path,

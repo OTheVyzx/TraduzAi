@@ -3,7 +3,30 @@ from pathlib import Path
 
 from PIL import Image
 
-from pipeline.tools.export_visual_review_sheet import export_visual_review_sheet
+from tools.export_visual_review_sheet import (
+    export_source_candidate_review,
+    export_visual_review_sheet,
+)
+
+
+def test_source_candidate_review_never_autofills_visual_go(tmp_path):
+    source = tmp_path / "source"
+    candidate = tmp_path / "candidate"
+    review = tmp_path / "review"
+    (candidate / "translated").mkdir(parents=True)
+    source.mkdir()
+    Image.new("RGB", (12, 9), "white").save(source / "001.png")
+    Image.new("RGB", (12, 9), "black").save(candidate / "translated" / "001.png")
+    (candidate / "project.json").write_text(json.dumps({
+        "paginas": [{"numero": 1, "page_id": "page_001", "arquivo_traduzido": "translated/001.png"}]
+    }), encoding="utf-8")
+
+    result = export_source_candidate_review(source, candidate, review)
+
+    assert result["visual_verdict"] is None
+    assert result["items"][0]["reviewed"] is False
+    assert result["items"][0]["visual_verdict"] is None
+    assert (review / "visual-review-evidence.json").is_file()
 
 
 def _write_output(

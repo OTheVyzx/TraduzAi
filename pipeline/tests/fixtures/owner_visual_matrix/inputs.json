@@ -16,6 +16,11 @@
       "environment_variable": "TRADUZAI_MATRIX_GRAND_FINALE_SOURCE",
       "input_type": "directory",
       "expected_sha256": "fd8ce2fec0e3453f7fae994ac97245ce716bcac2d34ca2e5ce8d1fbf699338af"
+    },
+    "mitch_items_ch39": {
+      "environment_variable": "TRADUZAI_MATRIX_MITCH39_SOURCE",
+      "input_type": "directory",
+      "expected_sha256": "a6788d2a8b1779505835dc0259053d9b9dad08b9d956941d6bf4c6d77a66c786"
     }
   }
 }

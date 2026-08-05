@@ -63,6 +63,16 @@ REQUIRED_FINAL_PIXEL_CONTRACTS = frozenset(
     }
 )
 
+ACCEPTANCE_METRIC_FIELDS = (
+    "english_dialogue_residual_count",
+    "translatable_components_without_owner",
+    "material_components_without_ocr_attempt",
+    "owners_without_valid_pt_br",
+    "owners_without_atomic_cleanup_render",
+    "owners_without_target_materialization",
+    "material_components_without_terminal_lifecycle",
+)
+
 
 class MatrixContractError(ValueError):
     """Raised when the validation corpus itself is not systemic or fresh."""
@@ -92,6 +102,31 @@ def _canonical_entry(entry: Any, index: int) -> dict[str, Any]:
             f"matrix entry {index} is missing fields: {', '.join(missing)}"
         )
     targets = entry.get("targets")
+    generic_categories = entry.get("categories")
+    generic_pages = entry.get("category_pages")
+    generic_entry = (
+        targets is None
+        and isinstance(generic_categories, list)
+        and bool(generic_categories)
+        and isinstance(generic_pages, dict)
+        and all(
+            isinstance(generic_pages.get(str(category)), list)
+            and bool(generic_pages.get(str(category)))
+            for category in generic_categories
+        )
+    )
+    if generic_entry:
+        normalized = dict(entry)
+        normalized["categories"] = sorted({str(value) for value in generic_categories})
+        normalized["category_pages"] = {
+            str(category): sorted({int(page) for page in pages})
+            for category, pages in generic_pages.items()
+        }
+        normalized["targets"] = []
+        normalized["generic_functional_entry"] = True
+        if normalized["split"] not in {"calibration", "holdout"}:
+            raise MatrixContractError(f"matrix entry {index} has invalid split")
+        return normalized
     if not isinstance(targets, list) or not targets:
         raise MatrixContractError(f"matrix entry {index} requires exact owner targets")
     normalized_targets: list[dict[str, Any]] = []
@@ -689,6 +724,83 @@ def validate_runner_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     if expected != actual:
         raise MatrixContractError("runner manifest hash mismatch")
     return dict(evidence)
+
+
+def _validate_external_audit_payload(payload: Any, entry_id: str) -> dict[str, Any]:
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise MatrixContractError(f"external audit schema invalid: {entry_id}")
+    if str(payload.get("external_audit_gate_status") or "") != "PASS":
+        raise MatrixContractError(f"external audit did not pass: {entry_id}")
+    if any(int(payload.get(field) or 0) != 0 for field in ACCEPTANCE_METRIC_FIELDS):
+        raise MatrixContractError(f"external audit acceptance metrics nonzero: {entry_id}")
+    page_ids = [str(value) for value in payload.get("source_manifest_page_ids") or ()]
+    audits = [row for row in payload.get("external_page_audits") or () if isinstance(row, dict)]
+    if [str(row.get("page_id") or "") for row in audits] != page_ids:
+        raise MatrixContractError(f"external page audit cardinality mismatch: {entry_id}")
+    if not audits or not all(
+        row.get("status") == "PASS"
+        and str(row.get("auditor_invocation_id") or "")
+        and str(row.get("auditor_execution_id") or "")
+        and str(row.get("auditor_process_nonce") or "")
+        for row in audits
+    ):
+        raise MatrixContractError(f"external page audit identity incomplete: {entry_id}")
+    expected = str(payload.get("report_sha256") or "")
+    if expected and expected != _canonical_payload_sha256(payload, omit="report_sha256"):
+        raise MatrixContractError(f"external audit report hash mismatch: {entry_id}")
+    return dict(payload)
+
+
+def _run_external_audits(
+    entries: list[dict[str, Any]],
+    runtimes: dict[str, dict[str, Any]],
+    output_root: Path,
+    audit_dir: Path,
+    *,
+    external_auditor_command: Iterable[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    auditor = Path(__file__).resolve().with_name("audit_owner_chapter_output.py")
+    records: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        entry_id = str(entry["entry_id"])
+        runtime = runtimes.get(entry_id)
+        if runtime is None:
+            raise MatrixContractError(f"external audit source runtime missing: {entry_id}")
+        work_dir = Path(entry["work_dir"])
+        if not work_dir.is_absolute():
+            work_dir = output_root / work_dir
+        report_path = audit_dir / f"{entry_id}.json"
+        review_dir = audit_dir / f"{entry_id}-review"
+        config = json.loads(Path(runtime["config_path"]).read_text(encoding="utf-8-sig"))
+        command = [
+            *(tuple(external_auditor_command) if external_auditor_command is not None else (sys.executable, str(auditor))),
+            "--source", str(Path(runtime["source_path"]).resolve()),
+            "--run", str(work_dir.resolve()),
+            "--report", str(report_path.resolve()),
+            "--review-dir", str(review_dir.resolve()),
+            "--source-lang", str(config.get("idioma_origem") or "en"),
+            "--target-lang", str(config.get("idioma_destino") or "pt-BR"),
+            "--require-final-verified",
+        ]
+        child_env = dict(os.environ)
+        child_env["TRADUZAI_MATRIX_ENTRY_ID"] = entry_id
+        completed = subprocess.run(
+            command,
+            cwd=str(auditor.parents[1]),
+            env=child_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0 or not report_path.is_file():
+            detail = completed.stderr.strip() or completed.stdout.strip() or "report missing"
+            raise MatrixContractError(f"external audit process failed: {entry_id}: {detail}")
+        records[entry_id] = _validate_external_audit_payload(
+            json.loads(report_path.read_text(encoding="utf-8-sig")),
+            entry_id,
+        )
+    return records
 
 
 def _run_entry(
@@ -1674,17 +1786,7 @@ def _write_report(
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", required=True, type=Path)
-    parser.add_argument("--output-root", required=True, type=Path)
-    parser.add_argument("--report", required=True, type=Path)
-    parser.add_argument("--validate-only", action="store_true")
-    parser.add_argument("--inspection-template", type=Path)
-    parser.add_argument("--inspection-manifest", type=Path)
-    parser.add_argument("--acceptance-bundle", type=Path)
-    parser.add_argument("--run-id", required=True)
-    args = parser.parse_args(argv)
+def _run_matrix_cli(args: argparse.Namespace) -> int:
     run_id = str(args.run_id or "").strip()
     if not run_id or any(character.isspace() for character in run_id):
         raise MatrixContractError("run_id must be a non-empty token")
@@ -1743,6 +1845,23 @@ def main(argv: list[str] | None = None) -> int:
                     {"entry_id": entry["entry_id"], "returncode": runner_evidence["returncode"], "runner_evidence": runner_evidence}
                 )
     results = [validate_entry_result(entry, output_root) for entry in entries]
+    external_audits: dict[str, dict[str, Any]] = {}
+    if args.require_external_audit:
+        if args.audit_dir is None:
+            raise MatrixContractError("--require-external-audit requires --audit-dir")
+        try:
+            external_audits = _run_external_audits(
+                entries,
+                runtimes,
+                output_root,
+                args.audit_dir.resolve(),
+            )
+        except MatrixContractError as exc:
+            for result in results:
+                result["status"] = "BLOCK"
+                result["functional_status"] = "BLOCK"
+                result.setdefault("contracts", []).append("external_audit_failed")
+                result.setdefault("details", []).append(str(exc))
     sheets = _write_contact_sheets(entries, output_root)
     inspection_template = build_inspection_template(sheets, output_root, entries)
     if args.inspection_template:
@@ -1838,6 +1957,15 @@ def main(argv: list[str] | None = None) -> int:
         ) else "BLOCK",
         "findings": execution_findings,
         "entries": execution_entries,
+        "external_audits": {
+            entry_id: {
+                "report_sha256": payload.get("report_sha256")
+                or _canonical_payload_sha256(payload),
+                "status": payload.get("external_audit_gate_status"),
+                "page_count": payload.get("external_page_audits_count"),
+            }
+            for entry_id, payload in sorted(external_audits.items())
+        },
     }
     (output_root / "matrix_execution_summary.json").write_text(
         json.dumps(execution_summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -1846,7 +1974,73 @@ def main(argv: list[str] | None = None) -> int:
     inspection_go = bool(inspected) and all(
         str(item.get("overall_verdict") or "PENDING").upper() == "GO" for item in inspected
     )
+    if args.require_external_audit:
+        return 0 if functional_go else 2
     return 0 if functional_go and owner_qa_summary["status"] == "PASS" and holdout_summary["status"] == "PASS" and inspection_go else 2
+
+
+def validate_matrix_cli_request(
+    *,
+    manifest: Path,
+    output_root: Path,
+    report: Path,
+    validate_only: bool,
+    inspection_template: Path | None,
+    inspection_manifest: Path | None,
+    acceptance_bundle: Path | None,
+    audit_dir: Path | None,
+    require_external_audit: bool,
+    run_id: str,
+) -> int:
+    """Execute one fully resolved CLI request without reparsing process state."""
+
+    return _run_matrix_cli(argparse.Namespace(
+        manifest=manifest,
+        output_root=output_root,
+        report=report,
+        validate_only=validate_only,
+        inspection_template=inspection_template,
+        inspection_manifest=inspection_manifest,
+        acceptance_bundle=acceptance_bundle,
+        audit_dir=audit_dir,
+        require_external_audit=require_external_audit,
+        run_id=run_id,
+    ))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--output-root", required=True, type=Path)
+    parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--inspection-template", type=Path)
+    parser.add_argument("--inspection-manifest", type=Path)
+    parser.add_argument("--acceptance-bundle", type=Path)
+    parser.add_argument("--audit-dir", type=Path)
+    parser.add_argument("--require-external-audit", action="store_true")
+    parser.add_argument("--run-id", required=True)
+    try:
+        args = parser.parse_args(argv)
+        result = validate_matrix_cli_request(
+            manifest=args.manifest.resolve(),
+            output_root=args.output_root.resolve(),
+            report=args.report.resolve(),
+            validate_only=bool(args.validate_only),
+            inspection_template=(args.inspection_template.resolve() if args.inspection_template else None),
+            inspection_manifest=(args.inspection_manifest.resolve() if args.inspection_manifest else None),
+            acceptance_bundle=(args.acceptance_bundle.resolve() if args.acceptance_bundle else None),
+            audit_dir=(args.audit_dir.resolve() if args.audit_dir else None),
+            require_external_audit=bool(args.require_external_audit),
+            run_id=str(args.run_id),
+        )
+        status = getattr(result, "status", None)
+        return (0 if str(status).upper() == "PASS" else 2) if status is not None else int(result)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"owner visual matrix error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
