@@ -933,8 +933,13 @@ class PageExecutionResult:
             item for item in commits
             if bool(getattr(item, "translation_binding_sha256", ""))
         )
+        execution_bindings = tuple(
+            item for item in bindings if not item.preserves_original_pixels
+        )
         if bound_commits:
-            ordered_bindings = tuple(sorted(bindings, key=lambda item: item.owner_id))
+            ordered_bindings = tuple(
+                sorted(execution_bindings, key=lambda item: item.owner_id)
+            )
             ordered_commits = tuple(sorted(bound_commits, key=lambda item: item.owner_id))
             ordered_materializations = tuple(
                 sorted(materializations, key=lambda item: item.owner_id)
@@ -965,11 +970,13 @@ class PageExecutionResult:
                     raise PagePipelineIdentityError(
                         "binding, commit and target materialization hash chain mismatch"
                     )
-            if text_layers_view is None:
-                raise PagePipelineIdentityError("bound owner result requires text layer snapshot")
+        if bound_commits and text_layers_view is None:
+            raise PagePipelineIdentityError("bound owner result requires text layer snapshot")
+        if bindings and text_layers_view is not None:
             layers_payload = text_layers_view.read()
             layers = layers_payload.get("texts")
-            if not isinstance(layers, list) or len(layers) != len(ordered_bindings):
+            ordered_all_bindings = tuple(sorted(bindings, key=lambda item: item.owner_id))
+            if not isinstance(layers, list) or len(layers) != len(ordered_all_bindings):
                 raise PagePipelineIdentityError("text layer cardinality differs from bindings")
             layer_by_owner = {
                 str(layer.get("owner_id") or ""): layer
@@ -977,7 +984,7 @@ class PageExecutionResult:
             }
             if len(layer_by_owner) != len(layers):
                 raise PagePipelineIdentityError("text layers contain duplicate or invalid owners")
-            for binding in ordered_bindings:
+            for binding in ordered_all_bindings:
                 layer = layer_by_owner.get(binding.owner_id)
                 target = str((layer or {}).get("translated") or "")
                 if (
@@ -988,6 +995,7 @@ class PageExecutionResult:
                     or sha256_text(target) != binding.target_payload_sha256
                 ):
                     raise PagePipelineIdentityError("text layer target binding mismatch")
+        if bound_commits:
             if page_composition is None:
                 raise PagePipelineIdentityError("bound owner result requires page composition")
             if (
@@ -1029,9 +1037,14 @@ class PageExecutionResult:
                 or replacement_verification_policy_sha256
             )
             if strict_terminal_journal:
-                if set(verdict_by_owner) != set(binding_by_owner):
+                replacement_owner_ids = {
+                    owner_id
+                    for owner_id, binding in binding_by_owner.items()
+                    if not binding.preserves_original_pixels
+                }
+                if set(verdict_by_owner) != replacement_owner_ids:
                     raise PagePipelineStateError(
-                        "final result requires exactly one replacement verdict per binding"
+                        "final result requires exactly one verdict per visual replacement binding"
                     )
                 if not probes:
                     raise PagePipelineStateError("final result requires a fresh final QA probe")
@@ -1518,9 +1531,14 @@ def finalize_and_persist_page_result(
                 replacement_verification_policy_sha256=replacement_policy_sha,
             )
         )
-    if set(binding_by_owner) != {item.owner_id for item in verdicts}:
+    replacement_owner_ids = {
+        owner_id
+        for owner_id, binding in binding_by_owner.items()
+        if not binding.preserves_original_pixels
+    }
+    if replacement_owner_ids != {item.owner_id for item in verdicts}:
         raise PagePipelineStateError(
-            "terminal replacement verdict cardinality differs from translations"
+            "terminal replacement verdict cardinality differs from visual replacements"
         )
 
     composition = result.page_composition

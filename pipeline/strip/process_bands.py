@@ -10832,6 +10832,33 @@ def _owner_non_rendering_record(
     return record
 
 
+def _owner_preserve_original_record(
+    graph: OwnerGraph,
+    owner,
+    binding: TranslationBinding,
+    *,
+    seed: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Record a verified target-language owner without scheduling pixel mutation."""
+
+    if binding.owner_id != owner.owner_id or not binding.preserves_original_pixels:
+        raise ValueError("owner preserve-original record requires a matching no-repaint binding")
+    record = _owner_non_rendering_record(graph, owner, seed=seed)
+    record.update(
+        {
+            "state": "target_ready",
+            "render_policy": "preserve_original",
+            "preserve_original": True,
+            "no_repaint_policy_id": binding.language_verdict.policy_id,
+            "translation_binding_sha256": binding.translation_binding_sha256,
+            "source_payload_sha256": binding.source_payload_sha256,
+            "target_payload_sha256": binding.target_payload_sha256,
+            "language_verdict": binding.language_verdict.to_dict(),
+        }
+    )
+    return record
+
+
 def _owner_execution_review_seed(
     record: dict[str, Any],
     reason: str,
@@ -11366,6 +11393,17 @@ def execute_owner_page_graph(
                 _owner_non_rendering_record(
                     executed_graph,
                     owner,
+                    seed=records_by_owner.get(owner.owner_id),
+                )
+            )
+            continue
+        binding = bindings_by_owner.get(owner.owner_id)
+        if binding is not None and binding.preserves_original_pixels:
+            final_records.append(
+                _owner_preserve_original_record(
+                    executed_graph,
+                    owner,
+                    binding,
                     seed=records_by_owner.get(owner.owner_id),
                 )
             )

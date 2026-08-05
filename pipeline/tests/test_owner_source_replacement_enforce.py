@@ -146,6 +146,59 @@ def test_canonical_target_ready_owner_can_build_operational_mask():
     assert np.count_nonzero(plan.action_mask) > 0
 
 
+def test_verified_already_ptbr_owner_preserves_original_pixels_without_visual_stages():
+    from ownership.translation import (
+        OwnerTranslationRequest,
+        apply_owner_translation_result,
+        translate_owner_page,
+    )
+    from strip.process_bands import execute_owner_page_graph
+    from test_final_pixel_qa import _graph
+    from translator.language_policy import build_page_language_evidence
+
+    source = "COMO ESPERADO DE KIM SIHYEOK!"
+    graph = _graph(source=source, translated=None, state="execution_planned")
+    graph.owners[0].route_action = "translate_inpaint_render"
+    request = OwnerTranslationRequest.from_graph(graph, graph.owners[0].owner_id)
+
+    def unchanged(owner_request, _variant):
+        return owner_request.source_text
+
+    unchanged.backend_name = "fixture"
+    translation_result = translate_owner_page(
+        (request,),
+        backends=(unchanged,),
+        page_language_evidence_by_owner={
+            request.owner_id: build_page_language_evidence(
+                texts=(source,),
+                coverage_complete=True,
+            )
+        },
+    )
+    translated_graph = apply_owner_translation_result(graph, translation_result)
+
+    class MustNotRun:
+        def __getattr__(self, name):
+            raise AssertionError(f"visual stage must not run: {name}")
+
+    page = np.full((24, 40, 3), 230, dtype=np.uint8)
+    execution = execute_owner_page_graph(
+        page,
+        translated_graph,
+        translator=object(),
+        inpainter=MustNotRun(),
+        typesetter=MustNotRun(),
+        translation_result_override=translation_result,
+    )
+
+    assert execution.commits == ()
+    assert execution.target_materializations == ()
+    assert execution.graph.owners[0].state == "target_ready"
+    assert execution.records[0]["render_policy"] == "preserve_original"
+    assert execution.records[0]["preserve_original"] is True
+    assert execution.records[0]["no_repaint_policy_id"] == "already_target_language"
+
+
 def test_replacing_owner_commit_recomposes_from_original_pixels():
     original, mutation, tx = _transaction()
     glyph_patch = _glyph_patch(mutation, OwnerGlyphPatch, render_completed=True, fit_status="ok")
@@ -257,3 +310,66 @@ def test_candidate_requires_exact_binding_commit_materialization_composition_cha
                 }
             ),
         )
+
+
+def test_candidate_excludes_verified_no_repaint_binding_from_commit_cardinality():
+    from ownership.hash_contract import canonical_json_sha256, sha256_text
+    from ownership.translation import TranslationBinding
+    from translator.language_policy import (
+        build_page_language_evidence,
+        validate_target_language,
+    )
+
+    result = _candidate_result_with_one_bound_owner()
+    rendered_binding = result.translations[0]
+    source = "COMO ESPERADO DE KIM SIHYEOK!"
+    verdict = validate_target_language(
+        source=source,
+        target=source,
+        role="dialogue_body",
+        page_language_evidence=build_page_language_evidence(
+            texts=(source,), coverage_complete=True
+        ),
+    )
+    provisional = TranslationBinding(
+        run_id=rendered_binding.run_id,
+        origin_execution_id=rendered_binding.origin_execution_id,
+        page_id=rendered_binding.page_id,
+        page_source_sha256=rendered_binding.page_source_sha256,
+        owner_id="owner-preserved-ptbr",
+        component_ids=("component-preserved-ptbr",),
+        source_payload_sha256=sha256_text(source),
+        target_payload_sha256=sha256_text(source),
+        source_text=source,
+        target_text=source,
+        target_locale="pt-BR",
+        language_verdict=verdict,
+        attempt_ids=(),
+        translation_binding_sha256="",
+    )
+    preserved_binding = replace(
+        provisional,
+        translation_binding_sha256=canonical_json_sha256(
+            provisional.canonical_payload()
+        ),
+    )
+    layers = result.text_layers_view.read()["texts"] + [
+        {
+            "owner_id": preserved_binding.owner_id,
+            "translation_binding_sha256": preserved_binding.translation_binding_sha256,
+            "target_payload_sha256": preserved_binding.target_payload_sha256,
+            "translated": preserved_binding.target_text,
+            "render_policy": "preserve_original",
+            "preserve_original": True,
+        }
+    ]
+
+    mixed = PageExecutionResult.build_from(
+        result,
+        translations=(rendered_binding, preserved_binding),
+        text_layers_view=FrozenJSONSnapshot.build({"texts": layers}),
+    )
+
+    assert len(mixed.translations) == 2
+    assert len(mixed.page_commits) == 1
+    assert mixed.translations[1].preserves_original_pixels

@@ -796,6 +796,9 @@ class TerminalPixelProof:
             raise TerminalVerificationIdentityError("final QA OCR payload hash mismatch")
 
         ordered_bindings = tuple(sorted(bindings, key=lambda item: item.owner_id))
+        ordered_replacement_bindings = tuple(
+            item for item in ordered_bindings if not item.preserves_original_pixels
+        )
         ordered_materializations = tuple(
             sorted(materializations, key=lambda item: item.owner_id)
         )
@@ -805,7 +808,7 @@ class TerminalPixelProof:
         for verdict in ordered_verdicts:
             FinalReplacementVerdict.from_dict(verdict.to_dict())
         if not (
-            len(ordered_bindings)
+            len(ordered_replacement_bindings)
             == len(ordered_materializations)
             == len(ordered_verdicts)
         ):
@@ -813,7 +816,7 @@ class TerminalPixelProof:
                 "terminal binding, materialization and verdict cardinality differs"
             )
         for binding, materialization, verdict in zip(
-            ordered_bindings,
+            ordered_replacement_bindings,
             ordered_materializations,
             ordered_verdicts,
             strict=True,
