@@ -1645,6 +1645,35 @@ def _ocr_empty_component_preserve_policy(
     """
 
     detector_sources = frozenset(component.detector_sources)
+    region_sources = frozenset(
+        ("primary_region_detector", "negative_region_detector")
+    )
+    if (
+        detector_sources & region_sources
+        and detector_sources <= region_sources | frozenset(("glyph_scan",))
+    ):
+        try:
+            from vision_stack.sfx_detector import text_blocks_to_sfx_candidates
+        except ImportError:  # pragma: no cover - package import fallback
+            from ..vision_stack.sfx_detector import text_blocks_to_sfx_candidates
+
+        sfx_candidates = text_blocks_to_sfx_candidates(
+            page_rgb,
+            [
+                {
+                    "bbox": list(component.bbox_page),
+                    "confidence": float(component.confidence or 0.0),
+                }
+            ],
+            source="owner_coverage_region_detector",
+            min_confidence=0.01,
+            min_area_ratio=0.0,
+        )
+        if sfx_candidates:
+            return (
+                "sfx",
+                "policy:explicit_sfx_outside_translatable_container",
+            )
     if detector_sources == frozenset(("dark_balloon_band_scan", "glyph_scan")):
         if component.script_evidence or not component.evidence_ids:
             return None

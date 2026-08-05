@@ -640,6 +640,143 @@ def test_ocr_empty_uncorroborated_glyph_scan_gets_terminal_non_text_disposition(
     coverage.require_ready_for_ownership()
 
 
+def test_ocr_empty_detector_region_with_visual_sfx_support_is_preserved_as_sfx() -> None:
+    import cv2
+    import numpy as np
+
+    page = np.full((180, 320, 3), (25, 30, 42), dtype=np.uint8)
+    cv2.putText(
+        page,
+        "HO",
+        (42, 58),
+        cv2.FONT_HERSHEY_DUPLEX,
+        1.7,
+        (20, 20, 20),
+        7,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        page,
+        "HO",
+        (42, 58),
+        cv2.FONT_HERSHEY_DUPLEX,
+        1.7,
+        (245, 245, 250),
+        3,
+        cv2.LINE_AA,
+    )
+    component = SourceTextComponent(
+        component_id="component-visual-sfx",
+        page_id=PAGE_ID,
+        bbox_page=(35, 0, 145, 70),
+        polygon_page=((35, 0), (145, 0), (145, 70), (35, 70)),
+        detector_sources=("primary_region_detector",),
+        confidence=0.72,
+        evidence_ids=("detector-region-sfx",),
+    )
+
+    class EmptyPaddleModel:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del image, det, rec, cls
+            return [[]]
+
+    engine = OCREngine.__new__(OCREngine)
+    engine._backend = "paddleocr"
+    engine._model = EmptyPaddleModel()
+
+    def runner(page_rgb, *, request, bbox_page, variants):
+        if bbox_page is None:
+            return engine.recognize_page_with_evidence(
+                page_rgb,
+                [],
+                request=request,
+                force_full_page=True,
+            )
+        return engine.recognize_region_with_evidence(
+            page_rgb,
+            bbox_page=bbox_page,
+            request=request,
+            variants=variants,
+        )
+
+    coverage = complete_page_coverage(
+        page,
+        run_id=RUN_ID,
+        origin_execution_id=EXECUTION_ID,
+        page_id=PAGE_ID,
+        page_source_sha256=canonical_page_sha256(page),
+        components=(component,),
+        band_evidence=(),
+        ocr_runner=runner,
+    )
+
+    entry = coverage.entries[0]
+    assert entry.ocr_attempt_ids
+    assert entry.observation_ids == ()
+    assert entry.materiality == "non_text"
+    assert entry.state == "explicit_non_dialogue_preserve"
+    assert entry.semantic_role == "sfx"
+    assert entry.preserve_policy == "policy:explicit_sfx_outside_translatable_container"
+    coverage.require_ready_for_ownership()
+
+
+def test_ocr_empty_plain_detector_region_without_sfx_support_remains_blocking() -> None:
+    import cv2
+    import numpy as np
+
+    page = np.full((180, 320, 3), 235, dtype=np.uint8)
+    cv2.ellipse(page, (160, 90), (105, 55), 0, 0, 360, (35, 35, 35), 2)
+    component = SourceTextComponent(
+        component_id="component-unconfirmed-dialogue-region",
+        page_id=PAGE_ID,
+        bbox_page=(55, 35, 265, 145),
+        polygon_page=((55, 35), (265, 35), (265, 145), (55, 145)),
+        detector_sources=("primary_region_detector",),
+        confidence=0.91,
+        evidence_ids=("detector-region-dialogue",),
+    )
+
+    class EmptyPaddleModel:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del image, det, rec, cls
+            return [[]]
+
+    engine = OCREngine.__new__(OCREngine)
+    engine._backend = "paddleocr"
+    engine._model = EmptyPaddleModel()
+
+    def runner(page_rgb, *, request, bbox_page, variants):
+        if bbox_page is None:
+            return engine.recognize_page_with_evidence(
+                page_rgb,
+                [],
+                request=request,
+                force_full_page=True,
+            )
+        return engine.recognize_region_with_evidence(
+            page_rgb,
+            bbox_page=bbox_page,
+            request=request,
+            variants=variants,
+        )
+
+    coverage = complete_page_coverage(
+        page,
+        run_id=RUN_ID,
+        origin_execution_id=EXECUTION_ID,
+        page_id=PAGE_ID,
+        page_source_sha256=canonical_page_sha256(page),
+        components=(component,),
+        band_evidence=(),
+        ocr_runner=runner,
+    )
+
+    assert coverage.entries[0].materiality == "material"
+    assert coverage.entries[0].preserve_policy is None
+    with pytest.raises(CoverageInvariantError, match="lacks OCR observation"):
+        coverage.require_ready_for_ownership()
+
+
 def test_ocr_empty_unconfirmed_dark_balloon_heuristic_gets_visual_non_text_disposition() -> None:
     import cv2
     import numpy as np
