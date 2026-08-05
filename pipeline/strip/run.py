@@ -5946,6 +5946,7 @@ def _assign_owner_executor_projections(
         owner_bbox = _bbox_union(component.bbox_page for component in owner_components)
         total_area = sum(max(1, _bbox_area(tuple(item.bbox_page))) for item in owner_components)
         candidates: list[tuple[int, int, str, TileProjection]] = []
+        page_tiles: list[tuple[tuple[int, int, int, int], TileProjection]] = []
         for tile in tiles_by_id.values():
             if tile.tile_size is None:
                 continue
@@ -5957,6 +5958,7 @@ def _assign_owner_executor_projections(
                 offset_x + tile_width,
                 offset_y + tile_height,
             )
+            page_tiles.append((tile_bbox, tile))
             covered_area = sum(
                 _bbox_intersection_area(tuple(component.bbox_page), tile_bbox)
                 for component in owner_components
@@ -5982,6 +5984,25 @@ def _assign_owner_executor_projections(
                 candidates,
                 key=lambda item: (-item[0], -item[1], item[2]),
             )[0]
+        if executor is None and page_space_executor and page_tiles:
+            def scheduler_distance(item):
+                tile_bbox, tile = item
+                gap_x = max(
+                    0,
+                    tile_bbox[0] - owner_bbox[2],
+                    owner_bbox[0] - tile_bbox[2],
+                )
+                gap_y = max(
+                    0,
+                    tile_bbox[1] - owner_bbox[3],
+                    owner_bbox[1] - tile_bbox[3],
+                )
+                return (gap_x + gap_y, tile.tile_id)
+
+            tile_bbox, tile = min(page_tiles, key=scheduler_distance)
+            gap, _tile_id = scheduler_distance((tile_bbox, tile))
+            executor = (0, -int(gap), tile.tile_id, tile)
+            candidates.append(executor)
         if executor is None:
             violations.append(
                 OwnerViolation(

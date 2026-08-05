@@ -679,6 +679,44 @@ def test_partial_only_tiles_use_page_space_executor_in_enforce_mode() -> None:
     executor.assert_called_once()
 
 
+def test_non_overlapping_owner_uses_nearest_page_tile_as_enforce_scheduler_carrier() -> None:
+    from strip.run import _assign_owner_executor_projections
+
+    graph = _graph()
+    non_overlapping = TileProjection(
+        page_id="page_001",
+        tile_id="tile_nearest",
+        offset_xy=(0, 0),
+        page_size=(100, 100),
+        tile_size=(20, 20),
+    )
+
+    shadow = _assign_owner_executor_projections(
+        graph,
+        [non_overlapping],
+        page_space_executor=False,
+    )
+    assert "owner_executor_full_coverage_missing" in {
+        violation.code for violation in shadow.violations
+    }
+    assert shadow.projections == []
+
+    enforce = _assign_owner_executor_projections(
+        graph,
+        [non_overlapping],
+        page_space_executor=True,
+    )
+    assert "owner_executor_full_coverage_missing" not in {
+        violation.code for violation in enforce.violations
+    }
+    assert enforce.owners[0].execution_tile_id == "tile_nearest"
+    projection = enforce.projections[0]
+    assert projection.role == "executor"
+    assert projection.bbox_page == (30, 30, 70, 70)
+    assert projection.bbox_tile == projection.bbox_page
+    assert projection.offset_xy == (0, 0)
+
+
 def test_executor_tie_uses_lexicographically_stable_tile_id() -> None:
     from strip.run import _assign_owner_executor_projections
 
