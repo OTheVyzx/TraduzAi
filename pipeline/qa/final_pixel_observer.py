@@ -11,7 +11,16 @@ from typing import Any, Protocol, Sequence
 import cv2
 import numpy as np
 
+from ownership.hash_contract import canonical_page_sha256
 from strip.page_surface_geometry import PageSurfaceGeometry
+
+
+class TerminalVerificationIdentityError(ValueError):
+    """Raised when final OCR evidence belongs to other candidate pixels."""
+
+
+class TerminalVerificationInfrastructureError(RuntimeError):
+    """Raised when terminal OCR lacks a fresh physical full-page attempt."""
 
 
 @dataclass(frozen=True)
@@ -34,6 +43,8 @@ class FinalPixelObservation:
     observation_space: str = "logical_page"
     page_surface_geometry_sha256: str = ""
     geometry_projection_count: int = 0
+    root_input_pixel_sha256: str = ""
+    request_scoped: bool = False
 
     def __post_init__(self) -> None:
         image = np.ascontiguousarray(self.image_rgb, dtype=np.uint8).copy()
@@ -121,6 +132,7 @@ class DetectorOcrFinalPixelObserver:
             raise ValueError(f"persisted final page is not a decodable RGB image: {path}")
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         persisted_image_rgb = image_rgb.copy()
+        root_input_pixel_sha256 = canonical_page_sha256(persisted_image_rgb)
         geometry = page_surface_geometry
         if isinstance(geometry, dict):
             geometry = PageSurfaceGeometry.from_dict(geometry)
@@ -172,6 +184,8 @@ class DetectorOcrFinalPixelObserver:
             page_number=int(page_number or 0),
             source_language=str(source_language),
             page_surface_geometry=(geometry.to_dict() if geometry is not None else None),
+            request_scoped=True,
+            root_input_pixel_sha256=root_input_pixel_sha256,
         )
 
         def probe_field(name: str, default: Any) -> Any:
@@ -184,6 +198,28 @@ class DetectorOcrFinalPixelObserver:
             raise ValueError("fresh final pixel OCR returned malformed text records")
         attempts = probe_field("ocr_attempts", ())
         failures = probe_field("coverage_failures", ())
+        probe_is_request_scoped = bool(probe_field("request_scoped", False))
+        probe_root_sha256 = str(probe_field("root_input_pixel_sha256", "") or "")
+        if probe_root_sha256 and probe_root_sha256 != root_input_pixel_sha256:
+            raise TerminalVerificationIdentityError(
+                "final OCR probe root does not match persisted candidate pixels"
+            )
+        if probe_is_request_scoped:
+            qualifying_full_page = [
+                attempt
+                for attempt in attempts
+                if str(attempt.get("variant_id") or "") == "full_page"
+                and bool(attempt.get("provider_called"))
+                and not bool(attempt.get("cache_hit"))
+                and str(attempt.get("root_input_pixel_sha256") or "")
+                == root_input_pixel_sha256
+                and str(attempt.get("input_pixel_sha256") or "")
+                == root_input_pixel_sha256
+            ]
+            if not qualifying_full_page:
+                raise TerminalVerificationInfrastructureError(
+                    "terminal OCR requires an uncached physical full-page attempt"
+                )
         observed_blocks = list(detected_blocks)
         if geometry is not None:
             observed_blocks = []
@@ -226,4 +262,6 @@ class DetectorOcrFinalPixelObserver:
             geometry_projection_count=int(
                 probe_field("geometry_projection_count", 1 if geometry is not None else 0) or 0
             ),
+            root_input_pixel_sha256=root_input_pixel_sha256,
+            request_scoped=probe_is_request_scoped,
         )

@@ -28,7 +28,7 @@ from PIL import Image
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 from ownership.hash_contract import canonical_page_sha256
-from ownership.ocr_contract import OCRRequest
+from ownership.ocr_contract import OCRRequest, OCRTransformOperation, OCRTransformSpec
 
 if TYPE_CHECKING:
     # Hints para o IDE - Ignorar avisos de resolução pois o sys.path é dinâmico
@@ -15178,6 +15178,8 @@ class FinalPixelProbeResult:
     observation_space: str = "logical_page"
     page_surface_geometry_sha256: str = ""
     geometry_projection_count: int = 0
+    request_scoped: bool = False
+    root_input_pixel_sha256: str = ""
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -15254,6 +15256,8 @@ def run_final_pixel_ocr_probe(
     page_number: int,
     source_language: str,
     page_surface_geometry: dict[str, Any] | Any | None = None,
+    request_scoped: bool = False,
+    root_input_pixel_sha256: str = "",
 ) -> FinalPixelProbeResult:
     """Run OCR directly on final pixels before semantic routing or skip policy."""
 
@@ -15262,6 +15266,10 @@ def run_final_pixel_ocr_probe(
     if image_rgb.ndim != 3 or image_rgb.shape[2] != 3 or not image_rgb.size:
         raise ValueError("final pixel probe requires a non-empty RGB image")
     height, width = image_rgb.shape[:2]
+    physical_root_sha256 = canonical_page_sha256(image_rgb)
+    declared_root_sha256 = str(root_input_pixel_sha256 or physical_root_sha256)
+    if declared_root_sha256 != physical_root_sha256:
+        raise ValueError("final pixel probe root hash does not match physical pixels")
     geometry = page_surface_geometry
     if isinstance(geometry, dict):
         from strip.page_surface_geometry import PageSurfaceGeometry
@@ -15354,6 +15362,135 @@ def run_final_pixel_ocr_probe(
 
     raw_records: list[dict[str, Any]] = []
     recognition_error = ""
+
+    if request_scoped:
+        ocr = _get_ocr_engine("max", lang=str(source_language or "en"))
+        gray_rgb = cv2.cvtColor(
+            cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY),
+            cv2.COLOR_GRAY2RGB,
+        )
+        variant_specs = (
+            (
+                "full_page",
+                image_rgb.copy(),
+                OCRTransformSpec.build((OCRTransformOperation(kind="identity"),)),
+            ),
+            (
+                "native",
+                image_rgb.copy(),
+                OCRTransformSpec.build((OCRTransformOperation(kind="identity"),)),
+            ),
+            (
+                "gray",
+                gray_rgb,
+                OCRTransformSpec.build(
+                    (
+                        OCRTransformOperation(kind="identity"),
+                        OCRTransformOperation(kind="grayscale_to_rgb"),
+                    )
+                ),
+            ),
+            (
+                "inverted",
+                255 - gray_rgb,
+                OCRTransformSpec.build(
+                    (
+                        OCRTransformOperation(kind="identity"),
+                        OCRTransformOperation(kind="grayscale_to_rgb"),
+                        OCRTransformOperation(kind="invert"),
+                    )
+                ),
+            ),
+            (
+                "scale_2x",
+                cv2.resize(
+                    image_rgb,
+                    (width * 2, height * 2),
+                    interpolation=cv2.INTER_CUBIC,
+                ),
+                OCRTransformSpec.build(
+                    (
+                        OCRTransformOperation(kind="identity"),
+                        OCRTransformOperation(
+                            kind="resize",
+                            output_size=(width * 2, height * 2),
+                            interpolation="cubic",
+                        ),
+                    )
+                ),
+            ),
+        )
+        try:
+            strict_values = ocr.recognize_batch(
+                [variant_pixels.copy() for _, variant_pixels, _ in variant_specs]
+            )
+            if strict_values is None:
+                strict_values = []
+            if not isinstance(strict_values, (list, tuple)):
+                strict_values = [strict_values]
+            for index, (variant_id, variant_pixels, transform_spec) in enumerate(
+                variant_specs
+            ):
+                input_sha256 = canonical_page_sha256(variant_pixels)
+                value = strict_values[index] if index < len(strict_values) else None
+                record = _final_probe_record(
+                    value,
+                    fallback_bbox=[0, 0, width, height],
+                    target_id=f"full-page:{variant_id}",
+                )
+                if record is not None:
+                    used_fallback = bool(record.pop("_bbox_from_fallback", False))
+                    raw_bbox = list(record.get("bbox") or [0, 0, width, height])
+                    if variant_id == "scale_2x" and not used_fallback:
+                        raw_bbox = [int(round(value / 2.0)) for value in raw_bbox]
+                    record["bbox"] = raw_bbox
+                    record["artifact_bbox_frame"] = raw_bbox
+                    record["coordinate_space"] = "page"
+                    record["final_probe_variant"] = variant_id
+                    record["input_pixel_sha256"] = input_sha256
+                    raw_records.append(record)
+                    status = "recognized"
+                    reason = "full_page_raw_ocr_record_captured"
+                else:
+                    status = "no_usable_ocr"
+                    reason = "full_page_ocr_attempt_returned_no_text"
+                attempts.append(
+                    {
+                        "target_id": f"full-page:{variant_id}",
+                        "target_kind": "full_page",
+                        "variant_id": variant_id,
+                        "bbox": [0, 0, width, height],
+                        "status": status,
+                        "reason": reason,
+                        "root_input_pixel_sha256": physical_root_sha256,
+                        "parent_input_pixel_sha256": physical_root_sha256,
+                        "input_pixel_sha256": input_sha256,
+                        "input_width": int(variant_pixels.shape[1]),
+                        "input_height": int(variant_pixels.shape[0]),
+                        "input_mode": "RGB",
+                        "provider_called": True,
+                        "cache_hit": False,
+                        "transform_spec_canonical_json": transform_spec.canonical_json_bytes.decode(
+                            "utf-8"
+                        ),
+                        "transform_spec_sha256": transform_spec.sha256,
+                    }
+                )
+        except Exception as exc:
+            recognition_error = f"{type(exc).__name__}:{exc}"
+            attempts.append(
+                {
+                    "target_id": "full-page",
+                    "target_kind": "full_page",
+                    "variant_id": "full_page",
+                    "status": "ocr_error",
+                    "reason": recognition_error,
+                    "root_input_pixel_sha256": physical_root_sha256,
+                    "input_pixel_sha256": physical_root_sha256,
+                    "provider_called": True,
+                    "cache_hit": False,
+                }
+            )
 
     def project_record(
         record: dict[str, Any] | None,
@@ -15491,7 +15628,7 @@ def run_final_pixel_ocr_probe(
         failures.append("material_components_without_usable_ocr")
     if completed_challenges != expected_challenges:
         failures.append("source_challenge_coverage_incomplete")
-    if not detector_rows and not challenge_rows:
+    if not detector_rows and not challenge_rows and not request_scoped:
         failures = []
 
     return FinalPixelProbeResult(
@@ -15511,6 +15648,8 @@ def run_final_pixel_ocr_probe(
         ),
         geometry_projection_count=(1 if geometry is not None else 0),
         coverage_failures=tuple(failures),
+        request_scoped=bool(request_scoped),
+        root_input_pixel_sha256=physical_root_sha256,
     )
 
 

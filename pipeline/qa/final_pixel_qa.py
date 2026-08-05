@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Mapping, Sequence
 import unicodedata
 
 import cv2
@@ -18,7 +18,14 @@ from ownership.delivery import (
     validate_owner_text_delivery_contract,
 )
 from ownership.model import OwnerGraph, PageCompositionResult
+from ownership.translation import TranslationBinding
 from qa.final_pixel_observer import FinalPixelObservation, FinalPixelObserver
+from qa.language_residual import (
+    ResidualRegion,
+    classify_language_residual,
+    classify_unowned_text,
+    deduplicate_language_issues,
+)
 
 
 _CONTRACT_NAMES = (
@@ -142,6 +149,101 @@ def _record_bbox(record: dict[str, Any]) -> tuple[int, int, int, int] | None:
 def _explicit_preserve_policy(reason: str | None) -> bool:
     normalized = str(reason or "").strip().casefold()
     return normalized.startswith("policy:") and len(normalized) > len("policy:")
+
+
+def classify_final_observation_language(
+    *,
+    observation: FinalPixelObservation,
+    bindings: Sequence[TranslationBinding],
+    regions_by_owner: Mapping[str, ResidualRegion],
+    run_id: str,
+    execution_id: str,
+    page_source_sha256: str,
+    page_output_pixel_sha256: str,
+    containers: Sequence[Mapping[str, Any]] = (),
+):
+    """Classify fresh final OCR by binding and canonical owner/container regions."""
+
+    if not isinstance(observation, FinalPixelObservation):
+        raise TypeError("final language classification requires FinalPixelObservation")
+    binding_by_owner = {binding.owner_id: binding for binding in bindings}
+    issues = []
+    for index, raw_record in enumerate(observation.ocr_records):
+        record = dict(raw_record)
+        text = _record_text(record)
+        bbox = _record_bbox(record)
+        if not text or bbox is None:
+            continue
+        invocation_id = str(
+            record.get("invocation_id")
+            or record.get("final_probe_invocation_id")
+            or f"final-qa:{index}"
+        )
+        candidates = sorted(
+            (
+                (_overlap_ratio(bbox, region.bbox_page), owner_id, region)
+                for owner_id, region in regions_by_owner.items()
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )
+        selected = candidates[0] if candidates and candidates[0][0] >= 0.2 else None
+        if selected is not None:
+            _, owner_id, base_region = selected
+            binding = binding_by_owner.get(owner_id)
+            if binding is not None:
+                region = ResidualRegion(
+                    run_id=base_region.run_id,
+                    execution_id=base_region.execution_id,
+                    page_id=base_region.page_id,
+                    page_source_sha256=base_region.page_source_sha256,
+                    page_output_pixel_sha256=base_region.page_output_pixel_sha256,
+                    bbox_page=base_region.bbox_page,
+                    owner_id=base_region.owner_id,
+                    component_id=base_region.component_id,
+                    container_id=base_region.container_id,
+                    invocation_ids=tuple((*base_region.invocation_ids, invocation_id)),
+                )
+                issues.extend(
+                    classify_language_residual(
+                        observed=text,
+                        binding=binding,
+                        region=region,
+                    )
+                )
+                continue
+
+        matching_container = next(
+            (
+                container
+                for container in containers
+                if (
+                    (container_bbox := _bbox(
+                        container.get("bbox_page") or container.get("bbox")
+                    ))
+                    is not None
+                    and _overlap_ratio(bbox, container_bbox) >= 0.2
+                )
+            ),
+            None,
+        )
+        issues.extend(
+            classify_unowned_text(
+                {
+                    **record,
+                    "text": text,
+                    "bbox": list(bbox),
+                    "glyph_support": bool(record.get("glyph_support", True)),
+                    "invocation_id": invocation_id,
+                    "run_id": run_id,
+                    "execution_id": execution_id,
+                    "page_id": observation.page_id,
+                    "page_source_sha256": page_source_sha256,
+                    "page_output_pixel_sha256": page_output_pixel_sha256,
+                },
+                matching_container,
+            )
+        )
+    return deduplicate_language_issues(issues)
 
 
 def evaluate_final_pixel_observation(
