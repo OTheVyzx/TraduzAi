@@ -1158,6 +1158,39 @@ def test_page_sized_positive_mask_is_rejected_as_overbroad():
     assert owner.state == "review_required"
 
 
+def test_verified_horizontal_ocr_line_may_use_dense_source_support():
+    from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
+
+    image = np.full((100, 320, 3), 220, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[40:57, 45:275] = 255
+    glyph[43:47, 70:90] = 0
+    owner = _single_component_owner(owner_id="owner_dense_verified_line")
+
+    plan = build_owner_mask_plan(
+        image,
+        owner,
+        [
+            OwnerMaskEvidence(
+                evidence_id="dense_verified_line",
+                component_id="cmp_body_top",
+                glyph_mask=glyph,
+                observation_id="obs_body",
+                line_index=0,
+            )
+        ],
+        owner_component_bboxes_page={"cmp_body_top": (45, 40, 275, 57)},
+        expected_line_ids=(("obs_body", 0),),
+        owner_render_geometry_sha256="a" * 64,
+    )
+
+    assert plan.coverage_complete
+    assert plan.component_geometry_verified
+    assert plan.component_action_bboxes_page == (
+        ("cmp_body_top", (45, 40, 275, 57)),
+    )
+
+
 @pytest.mark.parametrize("axis", ("horizontal", "vertical"))
 def test_owner_mask_rejects_opposite_edge_spanning_bands(axis):
     from inpainter.owner_mask import (

@@ -454,6 +454,34 @@ def _positive_mask_is_overbroad(
     return False
 
 
+def _positive_mask_is_verified_text_line(
+    mask: np.ndarray,
+    component_bbox: tuple[int, int, int, int] | None,
+) -> bool:
+    """Allow dense OCR line ink only inside its independently verified bbox."""
+
+    if component_bbox is None or not np.any(mask):
+        return False
+    raw_bbox = _mask_bbox_page(mask)
+    x1, y1, x2, y2 = component_bbox
+    if not (
+        x1 <= raw_bbox[0] < raw_bbox[2] <= x2
+        and y1 <= raw_bbox[1] < raw_bbox[3] <= y2
+    ):
+        return False
+    width = raw_bbox[2] - raw_bbox[0]
+    height = raw_bbox[3] - raw_bbox[1]
+    component_width = x2 - x1
+    component_height = y2 - y1
+    return bool(
+        height > 0
+        and component_height > 0
+        and width / float(height) >= 3.0
+        and component_width / float(component_height) >= 3.0
+        and component_height <= max(64, int(round(mask.shape[0] * 0.25)))
+    )
+
+
 def _stroke_expansion_radii(mask: np.ndarray) -> tuple[int, ...]:
     """Return largest-first halo radii derived from the owned stroke scale."""
 
@@ -1085,7 +1113,12 @@ def build_owner_mask_plan(
                 raise UnsafeOwnerMaskError(
                     "owner mask evidence references an unexpected line identity"
                 )
-            if (
+            component_id = next(iter(component_ids))
+            verified_line = _positive_mask_is_verified_text_line(
+                positive,
+                verified_component_bboxes.get(component_id),
+            )
+            if not verified_line and (
                 glyph_positive is not None
                 and _positive_mask_is_overbroad(
                     glyph_positive,
@@ -1098,7 +1131,6 @@ def build_owner_mask_plan(
                 raise UnsafeOwnerMaskError(
                     "owner positive mask is overbroad for the page"
                 )
-            component_id = next(iter(component_ids))
             component_actions[component_id] = np.maximum(
                 component_actions[component_id],
                 positive,
@@ -1118,9 +1150,15 @@ def build_owner_mask_plan(
         ] = []
         missing_components: list[str] = []
         for component_id, component_mask in sorted(component_actions.items()):
-            if _positive_mask_is_overbroad(
-                component_mask,
-                allow_dense_single_glyph=True,
+            if (
+                _positive_mask_is_overbroad(
+                    component_mask,
+                    allow_dense_single_glyph=True,
+                )
+                and not _positive_mask_is_verified_text_line(
+                    component_mask,
+                    verified_component_bboxes.get(component_id),
+                )
             ):
                 raise UnsafeOwnerMaskError(
                     "owner component mask union is overbroad for the page"
