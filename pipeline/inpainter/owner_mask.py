@@ -905,7 +905,7 @@ def build_owner_mask_plan(
         )
         if (
             owner.disposition != "owned"
-            or owner.state != "translated"
+            or owner.state not in {"translated", "target_ready"}
             or owner.route_action not in INPAINT_ROUTE_ACTIONS
         ):
             raise UnsafeOwnerMaskError(

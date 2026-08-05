@@ -119,6 +119,33 @@ def test_mask_failure_requests_repair_instead_of_finishing_with_source():
     assert result.final_page is None
 
 
+def test_canonical_target_ready_owner_can_build_operational_mask():
+    from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
+    from test_owner_mask import _single_component_owner
+
+    image = np.full((24, 32, 3), 220, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[6:14, 8:18] = 255
+    owner = _single_component_owner(owner_id="owner-target-ready")
+    owner.state = "target_ready"
+
+    plan = build_owner_mask_plan(
+        image,
+        owner,
+        (
+            OwnerMaskEvidence(
+                evidence_id="target-ready-glyph",
+                component_id="cmp_body_top",
+                glyph_mask=glyph,
+            ),
+        ),
+        owner_component_bboxes_page={"cmp_body_top": (7, 5, 20, 16)},
+    )
+
+    assert plan.coverage_complete
+    assert np.count_nonzero(plan.action_mask) > 0
+
+
 def test_replacing_owner_commit_recomposes_from_original_pixels():
     original, mutation, tx = _transaction()
     glyph_patch = _glyph_patch(mutation, OwnerGlyphPatch, render_completed=True, fit_status="ok")
