@@ -409,3 +409,21 @@ def test_style_eligible_owner_remains_in_denominator_after_execution_rollback(tm
     assert report["summary"]["rendered_owner_count"] == 0
     assert report["gate"]["status"] == "BLOCK"
     assert report["owners"][0]["findings"][0]["code"] == "owner_materialization_not_committed"
+
+
+def test_style_copy_off_skips_style_audit_and_keeps_functional_gate(monkeypatch, tmp_path):
+    import main
+
+    audit = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("style audit must be disabled")
+    )
+    monkeypatch.setattr(style_fidelity_mod, "audit_style_fidelity", audit)
+    functional = {"status": "PASS", "allowed": True, "issues": []}
+    project = {"qa": {}}
+
+    gate = main._compose_runtime_export_gate(
+        project, tmp_path, {"style_copy_mode": "off"}, functional
+    )
+
+    assert gate["status"] == "PASS"
+    assert project["qa"]["style_fidelity"]["mode"] == "off"

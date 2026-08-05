@@ -1350,6 +1350,50 @@ class MainEmitTests(unittest.TestCase):
         self.assertTrue(parsed["strict"])
         self.assertEqual(parsed["export_mode"], "clean")
 
+    def test_owner_cli_defaults_preserve_loaded_modes_without_hardcoded_chapter(self) -> None:
+        args = main.parse_cli_args(["--input", "source", "--output", "out"])
+
+        self.assertIsNone(args.chapter)
+        self.assertIsNone(args.owner_graph_mode)
+        self.assertIsNone(args.style_copy_mode)
+        self.assertIsNone(args.replay_owner_artifacts)
+        resolved = main.resolve_runner_config_from_cli(
+            args,
+            loaded_config={
+                "capitulo": 7,
+                "owner_graph_mode": "shadow",
+                "style_copy_mode": "off",
+                "replay_owner_artifacts": "parent-run",
+            },
+        )
+        self.assertEqual(resolved["capitulo"], 7)
+        self.assertEqual(resolved["owner_graph_mode"], "shadow")
+        self.assertEqual(resolved["style_copy_mode"], "off")
+        self.assertEqual(Path(resolved["replay_owner_artifacts"]), Path("parent-run").resolve())
+
+    def test_owner_cli_exact_off_and_render_arguments_reach_runtime_config(self) -> None:
+        base = [
+            "--input", "source", "--work", "Mitch Items", "--chapter", "39",
+            "--source-lang", "en", "--target", "pt-BR", "--mode", "real",
+            "--output", "out", "--debug", "--strict", "--export-mode", "strict",
+            "--owner-graph-mode", "enforce",
+        ]
+        off = main.resolve_runner_config_from_cli(
+            main.parse_cli_args([*base, "--style-copy-mode", "off"]), loaded_config={}
+        )
+        render = main.resolve_runner_config_from_cli(
+            main.parse_cli_args([
+                *base, "--style-copy-mode", "render",
+                "--replay-owner-artifacts", "off-run",
+            ]),
+            loaded_config={},
+        )
+
+        self.assertEqual((off["capitulo"], off["owner_graph_mode"], off["style_copy_mode"]), (39, "enforce", "off"))
+        self.assertIsNone(off["replay_owner_artifacts"])
+        self.assertEqual(render["style_copy_mode"], "render")
+        self.assertEqual(Path(render["replay_owner_artifacts"]), Path("off-run").resolve())
+
     def test_glossary_used_report_shadow_collects_hits_and_blocks(self) -> None:
         report = main.build_glossary_used_report(
             {"obra": "Demo", "idioma_origem": "ko", "idioma_destino": "pt-BR", "glossario": {"A": "B"}},

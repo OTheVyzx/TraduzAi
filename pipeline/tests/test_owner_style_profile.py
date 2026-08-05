@@ -27,6 +27,7 @@ from typesetter import renderer as renderer_mod  # noqa: E402
 from typesetter.owner_style import (  # noqa: E402
     _materialize_style,
     attach_owner_visual_profile,
+    build_base_owner_visual_profiles,
     build_owner_visual_profile,
     build_owner_visual_profiles,
     owner_visual_profile_sha256,
@@ -100,6 +101,22 @@ def _fixture() -> tuple[np.ndarray, OwnerGraph]:
     page = np.full((24, 32, 3), 245, dtype=np.uint8)
     page[8:16, 9:23] = 20
     return page, graph
+
+
+def test_style_copy_off_builds_base_profile_without_bulk_copier(monkeypatch) -> None:
+    from typesetter import owner_style
+
+    page, graph = _fixture()
+    copier = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("style copier must remain disabled")
+    )
+    monkeypatch.setattr(owner_style, "build_owner_visual_profiles", copier)
+
+    profiles = build_base_owner_visual_profiles(graph, page)
+
+    assert set(profiles) == {"owner_a"}
+    assert profiles["owner_a"]["owner_id"] == "owner_a"
+    assert profiles["owner_a"]["style_evidence_v2"]["source"] == "none"
 
 
 def _glyph_mask(page: np.ndarray) -> np.ndarray:

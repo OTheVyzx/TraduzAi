@@ -865,12 +865,57 @@ def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode(
     )
     monkeypatch.setattr(run, "process_band", legacy_process)
     monkeypatch.setattr(run, "_start_inpainter_prewarm", lambda *_args, **_kwargs: None)
+    authoritative = MagicMock(wraps=run.run_page_owner_pipeline)
+    monkeypatch.setattr(run, "run_page_owner_pipeline", authoritative)
+
+    class EmptyDetector:
+        def detect(self, _pixels, conf_threshold=None):
+            del conf_threshold
+            return []
+
+    class RequestScopedRuntime:
+        def run_final_pixel_ocr_probe(
+            self,
+            pixels,
+            *,
+            detected_blocks,
+            source_challenges,
+            page_id,
+            page_number,
+            source_language,
+            page_surface_geometry,
+            request_scoped=False,
+            root_input_pixel_sha256="",
+        ):
+            del detected_blocks, source_challenges, page_id, page_number
+            del source_language, page_surface_geometry
+            from ownership.ocr_contract import OCRTransformOperation, OCRTransformSpec
+
+            transform = OCRTransformSpec.build((OCRTransformOperation(kind="identity"),))
+            return {
+                "raw_ocr_records": [],
+                "ocr_attempts": [{
+                    "variant_id": "full_page",
+                    "root_input_pixel_sha256": root_input_pixel_sha256,
+                    "input_pixel_sha256": root_input_pixel_sha256,
+                    "parent_input_pixel_sha256": root_input_pixel_sha256,
+                    "provider_called": True,
+                    "cache_hit": False,
+                    "input_width": int(pixels.shape[1]),
+                    "input_height": int(pixels.shape[0]),
+                    "transform_spec_canonical_json": transform.canonical_json_bytes.decode("utf-8"),
+                    "transform_spec_sha256": transform.sha256,
+                }],
+                "coverage_failures": [],
+                "request_scoped": bool(request_scoped),
+                "root_input_pixel_sha256": root_input_pixel_sha256,
+            }
 
     pages = run.run_chapter(
         [input_path],
         tmp_path / "output",
-        detector=MagicMock(),
-        runtime=MagicMock(),
+        detector=EmptyDetector(),
+        runtime=RequestScopedRuntime(),
         translator=MagicMock(),
         inpainter=MagicMock(),
         typesetter=MagicMock(),
@@ -883,8 +928,12 @@ def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode(
     assert len(pages) == 1
     legacy_process.assert_not_called()
     assert pages[0].owner_page_result is not None
-    assert pages[0].owner_page_result.status == "candidate_ready"
-    assert pages[0].owner_page_evidence_ref is None
+    assert pages[0].owner_page_result.status == "final_verified"
+    assert pages[0].owner_page_evidence_ref is not None
+    assert pages[0].owner_page_evidence_ref.read_verified(
+        pages[0].owner_private_execution_root
+    ).status == "final_verified"
+    authoritative.assert_called_once()
 
 
 def test_enforce_owner_resolution_never_calls_legacy_reconcile() -> None:

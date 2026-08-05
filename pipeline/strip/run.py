@@ -58,9 +58,12 @@ from strip.reassemble import assemble_output_pages
 from strip.page_surface_geometry import PageSurfaceGeometry
 from strip.types import Band, BandEvidenceResult, OutputPage, VerticalStrip
 from strip.page_pipeline import (
+    finalize_and_persist_page_result,
     OriginalPageSnapshot,
     PageExecutionResult,
     PagePipelineRequest,
+    PagePipelineServices,
+    run_page_owner_pipeline,
 )
 
 
@@ -5619,6 +5622,13 @@ def _normalise_owner_graph_mode(value: str | None) -> str:
     return mode
 
 
+def _normalise_style_copy_mode(value: str | None) -> str:
+    mode = str(value or "shadow").strip().lower()
+    if mode not in {"off", "shadow", "render", "enforce"}:
+        raise ValueError("style_copy_mode must be off, shadow, render, or enforce")
+    return mode
+
+
 def _bbox_area(bbox: tuple[int, int, int, int]) -> int:
     return max(0, bbox[2] - bbox[0]) * max(0, bbox[3] - bbox[1])
 
@@ -6135,6 +6145,265 @@ def _owner_tile_projection_for_band(
     )
 
 
+def _run_owner_style_replay_chapter(
+    replay,
+    *,
+    output_dir: Path,
+    artifact_root: Path,
+    run_id: str,
+    execution_id: str,
+    replay_of_execution_id: str | None,
+    source_manifest,
+    detector,
+    runtime,
+    typesetter,
+    idioma_origem: str,
+    style_copy_mode: str,
+    chapter_telemetry: dict | None,
+) -> list[OutputPage]:
+    """Rerender only glyph/style from a fully verified content publication."""
+
+    from types import SimpleNamespace
+
+    from ownership.execution import FrozenJSONSnapshot, PageCompositionSnapshot
+    from ownership.hash_contract import canonical_json_sha256
+    from ownership.model import OwnerTargetMaterialization
+    from qa.final_pixel_observer import DetectorOcrFinalPixelObserver
+    from strip.page_pipeline import adapt_page_execution_result_to_output_page
+    from typesetter.owner_style import (
+        attach_owner_visual_profile,
+        build_owner_visual_profiles,
+        resolve_contextual_style_groups,
+    )
+
+    if replay.execution_id != replay_of_execution_id or replay.run_id != run_id:
+        raise ValueError("style replay lineage differs from requested execution")
+    if source_manifest is None or source_manifest.source_page_count != len(replay.pages):
+        raise ValueError("style replay page cardinality differs from current source manifest")
+    published_pages = tuple(replay.verified_inputs.pages)
+    if len(published_pages) != len(replay.pages):
+        raise ValueError("style replay publication page evidence is not bijective")
+
+    outputs: list[OutputPage] = []
+    observer = DetectorOcrFinalPixelObserver(detector=detector, runtime=runtime)
+    for ordinal, (parent, published, source_entry) in enumerate(
+        zip(replay.pages, published_pages, source_manifest.pages, strict=True), 1
+    ):
+        if (
+            parent.status != "final_verified"
+            or parent.page_id != source_entry.page_id
+            or parent.request.page_source_sha256 != source_entry.page_source_sha256
+            or published.page_result_sha256 != parent.result_sha256
+        ):
+            raise ValueError("style replay page identity differs from current source")
+        stage_by_name = {item.name: item for item in parent.visual_stage_artifacts}
+        if set(stage_by_name) != {
+            "original", "inpaint", "typeset", "page_composition", "persisted_final"
+        }:
+            raise ValueError("style replay page lacks canonical content stages")
+        original_rgb = stage_by_name["original"].artifact_ref.load_verified(
+            replay.publication_root
+        )
+        cleanup_rgb = stage_by_name["inpaint"].artifact_ref.load_verified(
+            replay.publication_root
+        )
+        graph = parent.owner_graph.read()
+        records_payload = (
+            parent.text_layers_view.read()
+            if parent.text_layers_view is not None
+            else {"texts": []}
+        )
+        records = [copy.deepcopy(item) for item in records_payload.get("texts") or []]
+        candidates = {
+            str(item.get("owner_id") or ""): item
+            for item in records
+            if isinstance(item, dict) and item.get("owner_id")
+        }
+        profiles = resolve_contextual_style_groups(
+            build_owner_visual_profiles(
+                graph,
+                original_rgb,
+                candidates_by_owner=candidates,
+            )
+        )
+        styled_records = [
+            attach_owner_visual_profile(item, profiles[item["owner_id"]])
+            if item.get("owner_id") in profiles
+            else item
+            for item in records
+        ]
+        rendered_rgb = typesetter.render_band_image(
+            cleanup_rgb.copy(),
+            _render_payload_without_legacy_decision_fields(
+                styled_records,
+                coordinate_space=f"owner_style_replay_{style_copy_mode}",
+            ),
+        )
+        rendered_rgb = np.ascontiguousarray(rendered_rgb, dtype=np.uint8)
+        cleanup_delta = np.any(original_rgb != cleanup_rgb, axis=2).astype(np.uint8) * 255
+        glyph_delta = np.any(cleanup_rgb != rendered_rgb, axis=2).astype(np.uint8) * 255
+        parent_materializations = {
+            item.owner_id: item for item in parent.owner_target_materializations
+        }
+        bindings = tuple(sorted(parent.translations, key=lambda item: item.owner_id))
+        commits = []
+        materializations = []
+        for binding in bindings:
+            bbox = _owner_bbox_for_page(graph, binding.owner_id)
+            if bbox is None:
+                raise ValueError("style replay owner lacks canonical component geometry")
+            x1, y1, x2, y2 = bbox
+            owner_cleanup = np.zeros_like(cleanup_delta)
+            owner_cleanup[y1:y2, x1:x2] = cleanup_delta[y1:y2, x1:x2]
+            owner_glyph = np.zeros_like(glyph_delta)
+            owner_glyph[y1:y2, x1:x2] = glyph_delta[y1:y2, x1:x2]
+            parent_materialization = parent_materializations.get(binding.owner_id)
+            if parent_materialization is None:
+                raise ValueError("style replay owner lacks verified target materialization")
+            materialization_payload = parent_materialization.to_dict()
+            materialization_payload.pop("materialization_sha256", None)
+            materialization_payload.update(
+                {
+                    "materialization_id": canonical_json_sha256(
+                        {
+                            "execution_id": execution_id,
+                            "owner_id": binding.owner_id,
+                            "style_copy_mode": style_copy_mode,
+                        }
+                    ),
+                    "execution_id": execution_id,
+                    "base_pixel_sha256": canonical_page_sha256(cleanup_rgb),
+                    "result_pixel_sha256": canonical_page_sha256(rendered_rgb),
+                }
+            )
+            materialization = OwnerTargetMaterialization.build(**materialization_payload)
+            materializations.append(materialization)
+            commit_id = canonical_json_sha256(
+                {
+                    "run_id": run_id,
+                    "execution_id": execution_id,
+                    "page_id": parent.page_id,
+                    "owner_id": binding.owner_id,
+                    "translation_binding_sha256": binding.translation_binding_sha256,
+                    "target_glyph_patch_sha256": materialization.target_glyph_patch_sha256,
+                }
+            )
+            commits.append(
+                SimpleNamespace(
+                    commit_id=commit_id,
+                    run_id=run_id,
+                    execution_id=execution_id,
+                    page_id=parent.page_id,
+                    page_source_sha256=parent.request.page_source_sha256,
+                    owner_id=binding.owner_id,
+                    before_sha256=canonical_page_sha256(original_rgb),
+                    after_sha256=canonical_page_sha256(rendered_rgb),
+                    translation_binding_sha256=binding.translation_binding_sha256,
+                    source_payload_sha256=binding.source_payload_sha256,
+                    target_payload_sha256=binding.target_payload_sha256,
+                    target_glyph_patch_sha256=materialization.target_glyph_patch_sha256,
+                    committed=True,
+                    mutation=SimpleNamespace(
+                        action_mask=owner_cleanup,
+                        result_rgb=cleanup_rgb,
+                    ),
+                    glyph_patch=SimpleNamespace(
+                        paint_mask=owner_glyph,
+                        glyph_mask=owner_glyph,
+                        result_rgb=rendered_rgb,
+                    ),
+                )
+            )
+        composition = PageCompositionSnapshot.build(
+            run_id=run_id,
+            execution_id=execution_id,
+            page_id=parent.page_id,
+            page_source_sha256=parent.request.page_source_sha256,
+            base_pixel_sha256=canonical_page_sha256(original_rgb),
+            final_pixel_sha256=canonical_page_sha256(rendered_rgb),
+            commits=commits,
+            materializations=materializations,
+        )
+        original = OriginalPageSnapshot.from_pixels(
+            original_rgb,
+            source_file_sha256=source_entry.source_file_sha256,
+        )
+        request = PagePipelineRequest(
+            run_id=run_id,
+            execution_id=execution_id,
+            replay_of_execution_id=replay_of_execution_id,
+            page_id=parent.page_id,
+            page_source_sha256=parent.request.page_source_sha256,
+            original_page=original,
+            band_projections=parent.request.band_projections,
+        )
+        candidate = PageExecutionResult.build(
+            request=request,
+            coverage=parent.coverage,
+            owner_graph=parent.owner_graph,
+            translation_attempts=parent.translation_attempts,
+            translations=parent.translations,
+            page_commits=tuple(commits),
+            repair_requests=(),
+            repair_history=(),
+            owner_target_materializations=tuple(materializations),
+            text_layers_view=FrozenJSONSnapshot.build({"texts": styled_records}),
+            page_composition=composition,
+            status="candidate_ready",
+            replay_source_page_evidence_sha256=published.page_execution_evidence.sha256,
+        )
+        finalized, evidence_ref = finalize_and_persist_page_result(
+            candidate,
+            candidate_pixels=rendered_rgb,
+            cleanup_pixels=cleanup_rgb,
+            generation_root=artifact_root,
+            observer=observer,
+            source_language=idioma_origem,
+            page_number=ordinal,
+        )
+        output = adapt_page_execution_result_to_output_page(
+            finalized,
+            evidence_ref=evidence_ref,
+        )
+        output.original_image = original_rgb.copy()
+        output.inpainted_image = cleanup_rgb.copy()
+        output.owner_private_execution_root = artifact_root
+        outputs.append(output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_output_pages_lossless(outputs, output_dir)
+    if chapter_telemetry is not None:
+        chapter_telemetry["owner_content_replay"] = True
+        chapter_telemetry["output_page_count"] = len(outputs)
+        chapter_telemetry["replay_skipped_stages"] = [
+            "component_discovery",
+            "coverage_source_ocr",
+            "association_recovery",
+            "container_recovery",
+            "owner_graph_build",
+            "translation",
+            "inpaint",
+        ]
+    return outputs
+
+
+def _owner_bbox_for_page(graph: OwnerGraph, owner_id: str):
+    components = {item.component_id: item for item in graph.components}
+    owner = next((item for item in graph.owners if item.owner_id == owner_id), None)
+    selected = [
+        components[item]
+        for item in getattr(owner, "component_ids", ())
+        if item in components
+    ]
+    if not selected:
+        return None
+    return (
+        min(item.bbox_page[0] for item in selected),
+        min(item.bbox_page[1] for item in selected),
+        max(item.bbox_page[2] for item in selected),
+        max(item.bbox_page[3] for item in selected),
+    )
+
+
 def run_chapter(
     image_files: list[Path],
     output_dir: Path,
@@ -6159,11 +6428,14 @@ def run_chapter(
     chapter_telemetry: dict | None = None,
     skip_page_cleanup_rerender: bool = False,
     owner_graph_mode: str = "shadow",
+    style_copy_mode: str = "shadow",
     legacy_project_status: str | None = None,
     run_id: str | None = None,
     execution_id: str | None = None,
     replay_of_execution_id: str | None = None,
     source_manifest=None,
+    artifact_root: str | Path | None = None,
+    owner_content_replay=None,
 
     progress_callback=None,
 ) -> list[OutputPage]:
@@ -6184,8 +6456,54 @@ def run_chapter(
         ):
             raise ValueError("source manifest identity or cardinality differs from run_chapter")
     owner_graph_mode = _normalise_owner_graph_mode(owner_graph_mode)
+    style_copy_mode = _normalise_style_copy_mode(style_copy_mode)
+    private_execution_root = None
+    if owner_graph_mode == "enforce":
+        import uuid
+
+        from ownership.execution import ArtifactGenerationMarker
+
+        private_execution_root = Path(
+            artifact_root
+            or (Path(output_dir).parent / ".owner-private" / execution_id)
+        ).resolve()
+        marker_path = private_execution_root / "artifact_generation.json"
+        if marker_path.is_file():
+            marker = ArtifactGenerationMarker.read_verified(private_execution_root)
+            if (
+                marker.run_id,
+                marker.execution_id,
+                marker.replay_of_execution_id,
+            ) != (run_id, execution_id, replay_of_execution_id):
+                raise ValueError("existing owner artifact root belongs to another execution")
+        else:
+            ArtifactGenerationMarker.create(
+                artifact_store_id=f"owner-store-{uuid.uuid4().hex}",
+                generation_id=f"owner-generation-{uuid.uuid4().hex}",
+                run_id=run_id,
+                execution_id=execution_id,
+                replay_of_execution_id=replay_of_execution_id,
+            ).write(private_execution_root)
     if owner_graph_mode == "legacy" and legacy_project_status != "legacy_unverified":
         raise ValueError("legacy owner mode requires legacy_project_status='legacy_unverified'")
+    if owner_content_replay is not None:
+        if owner_graph_mode != "enforce" or style_copy_mode not in {"render", "enforce"}:
+            raise ValueError("owner content replay requires enforce mode with active style rendering")
+        return _run_owner_style_replay_chapter(
+            owner_content_replay,
+            output_dir=Path(output_dir),
+            artifact_root=private_execution_root,
+            run_id=run_id,
+            execution_id=execution_id,
+            replay_of_execution_id=replay_of_execution_id,
+            source_manifest=source_manifest,
+            detector=detector,
+            runtime=runtime,
+            typesetter=typesetter,
+            idioma_origem=idioma_origem,
+            style_copy_mode=style_copy_mode,
+            chapter_telemetry=chapter_telemetry,
+        )
     run_started = time.perf_counter()
     if chapter_telemetry is not None:
         chapter_telemetry.setdefault("durations_sec", {})
@@ -6422,6 +6740,7 @@ def run_chapter(
         running_history: list[dict] = []
         owner_execution_records_by_page: dict[str, list[dict]] = {}
         owner_page_executions_by_page = {}
+        owner_page_results_by_page: dict[str, PageExecutionResult] = {}
         if owner_graph_mode == "enforce":
             band_by_tile = {
                 evidence.tile_id: evidence.band
@@ -6430,44 +6749,140 @@ def run_chapter(
             with _timed(chapter_telemetry, "owner_page_execution"):
                 for page_id, graph in sorted(owner_graphs.items()):
                     page_number = int(page_id.rsplit("_", 1)[-1])
+                    page_evidence = [
+                        item for item in owner_evidence_by_band.values()
+                        if item.page_id == page_id
+                    ]
                     x1, y1, x2, y2 = _source_page_geometry(
                         strip,
                         page_number - 1,
                     )
-                    execution = execute_owner_page_graph(
-                        original_strip_image[y1:y2, x1:x2].copy(),
-                        graph,
-                        translator=translator,
-                        inpainter=inpainter,
-                        typesetter=typesetter,
-                        context=context,
-                        glossario=running_glossary,
-                        idioma_origem=idioma_origem,
-                        idioma_destino=idioma_destino,
-                        obra=obra,
-                        models_dir=models_dir,
-                        ollama_host=ollama_host,
-                        ollama_model=ollama_model,
-                        translation_context=translation_context,
-                        style_promotions_by_owner=_owner_style_promotions_from_evidence(
-                            graph,
-                            page_evidence,
-                        ),
-                        enforce_graph=True,
+                    original_pixels = original_strip_image[y1:y2, x1:x2].copy()
+                    source_file_sha256 = (
+                        source_manifest.pages[page_number - 1].source_file_sha256
+                        if source_manifest is not None
+                        else sha256_file(page_paths[page_number - 1])
                     )
                     coverage = page_coverages_by_page[page_id]
-                    bound_commits = tuple(
-                        bind_owner_execution_commit_identity(
-                            commit,
-                            run_id=run_id,
-                            execution_id=execution_id,
-                            page_source_sha256=coverage.page_source_sha256,
-                        )
-                        for commit in execution.commits
+                    original_snapshot = OriginalPageSnapshot.from_pixels(
+                        original_pixels,
+                        source_file_sha256=source_file_sha256,
                     )
-                    execution = replace(execution, commits=bound_commits)
+                    page_bands = tuple(
+                        band for band in bands
+                        if _source_page_number_for_band(strip, band) == page_number
+                    )
+                    page_request = PagePipelineRequest.from_legacy_bands(
+                        original_snapshot,
+                        page_bands,
+                        run_id=run_id,
+                        execution_id=execution_id,
+                        replay_of_execution_id=replay_of_execution_id,
+                        page_id=page_id,
+                    )
+                    holder: dict[str, object] = {}
+
+                    def _execute_page(request, translated_graph, translation_result):
+                        execution = execute_owner_page_graph(
+                            request.original_page.mutable_attempt_copy(),
+                            translated_graph,
+                            translator=translator,
+                            inpainter=inpainter,
+                            typesetter=typesetter,
+                            context=context,
+                            glossario=running_glossary,
+                            idioma_origem=idioma_origem,
+                            idioma_destino=idioma_destino,
+                            obra=obra,
+                            models_dir=models_dir,
+                            ollama_host=ollama_host,
+                            ollama_model=ollama_model,
+                            translation_context=translation_context,
+                            style_promotions_by_owner=_owner_style_promotions_from_evidence(
+                                translated_graph, page_evidence
+                            ),
+                            enforce_graph=True,
+                            translation_result_override=translation_result,
+                            style_copy_mode=style_copy_mode,
+                        )
+                        bound_commits = tuple(
+                            bind_owner_execution_commit_identity(
+                                commit,
+                                run_id=run_id,
+                                execution_id=execution_id,
+                                page_source_sha256=coverage.page_source_sha256,
+                            )
+                            for commit in execution.commits
+                        )
+                        execution = replace(execution, commits=bound_commits)
+                        holder["execution"] = execution
+                        return execution
+
+                    owner_control_type = getattr(translator, "TranslationAttemptControl", None)
+                    owner_attempt_fn = getattr(translator, "translate_one_owner_attempt", None)
+                    controls = ()
+                    backends = ()
+                    attempt_kwargs = None
+                    if isinstance(owner_control_type, type) and callable(owner_attempt_fn):
+                        controls = (
+                            owner_control_type(backend="google", variant="owner_primary", disable_cache=False),
+                            owner_control_type(
+                                backend="ollama", variant="owner_fallback", disable_cache=True,
+                                provider_model=ollama_model,
+                            ),
+                        )
+                        attempt_kwargs = {
+                            "obra": obra, "context": context or {},
+                            "glossario": running_glossary,
+                            "idioma_destino": idioma_destino,
+                            "idioma_origem": idioma_origem, "qualidade": "max",
+                            "ollama_host": ollama_host, "ollama_model": ollama_model,
+                            "models_dir": models_dir,
+                            "translation_context": translation_context,
+                        }
+                    else:
+                        def _compatibility_backend(owner_request, _variant):
+                            translated = translator.translate_pages(
+                                [{"page_id": owner_request.page_id, "texts": [{
+                                    "id": owner_request.owner_id,
+                                    "owner_id": owner_request.owner_id,
+                                    "original": owner_request.source_text,
+                                    "text": owner_request.source_text,
+                                }]}],
+                                obra=obra, context=context or {}, glossario=running_glossary,
+                                idioma_origem=idioma_origem, idioma_destino=idioma_destino,
+                                models_dir=models_dir, ollama_host=ollama_host,
+                                ollama_model=ollama_model,
+                                translation_context=translation_context,
+                            )
+                            rows = translated[0].get("texts", []) if translated else []
+                            matches = [
+                                item for item in rows if str(item.get("owner_id") or item.get("id") or "")
+                                == owner_request.owner_id
+                            ]
+                            if len(matches) != 1:
+                                raise ValueError("compatibility translator changed owner cardinality")
+                            return str(matches[0].get("translated") or "")
+                        backends = (_compatibility_backend,)
+
+                    page_result = run_page_owner_pipeline(
+                        page_request,
+                        PagePipelineServices(
+                            coverage_fn=lambda _request, value=coverage: value,
+                            graph_fn=lambda _coverage, value=graph: value,
+                            translation_backends=backends,
+                            translation_attempt_fn=(owner_attempt_fn if controls else None),
+                            translation_attempt_controls=controls,
+                            translation_attempt_kwargs=attempt_kwargs,
+                            execution_fn=_execute_page,
+                        ),
+                    )
+                    execution = holder.get("execution")
+                    if execution is None:
+                        raise ValueError("page owner pipeline did not produce execution authority")
+                    owner_page_results_by_page[page_id] = page_result
                     owner_page_executions_by_page[page_id] = execution
-                    owner_graphs[page_id] = execution.graph
+                    owner_graphs[page_id] = page_result.owner_graph.read()
                     owner_execution_records_by_page[page_id] = [
                         copy.deepcopy(record) for record in execution.records
                     ]
@@ -6884,44 +7299,7 @@ def run_chapter(
                     "_owner_graph_snapshot": owner_graphs[page_id].to_dict(),
                 }
             )
-            coverage = page_coverages_by_page[page_id]
-            execution = owner_page_executions_by_page[page_id]
-            x1, source_y1, x2, source_y2 = _source_page_geometry(strip, page_index - 1)
-            original_pixels = original_strip_image[source_y1:source_y2, x1:x2].copy()
-            source_file_sha256 = (
-                source_manifest.pages[page_index - 1].source_file_sha256
-                if source_manifest is not None
-                else sha256_file(page_paths[page_index - 1])
-            )
-            original_snapshot = OriginalPageSnapshot.from_pixels(
-                original_pixels,
-                source_file_sha256=source_file_sha256,
-            )
-            if original_snapshot.page_source_sha256 != coverage.page_source_sha256:
-                raise ValueError("page request pixels differ from completed coverage identity")
-            page_bands = tuple(
-                band
-                for band in bands
-                if _source_page_number_for_band(strip, band) == page_index
-            )
-            request = PagePipelineRequest.from_legacy_bands(
-                original_snapshot,
-                page_bands,
-                run_id=run_id,
-                execution_id=execution_id,
-                replay_of_execution_id=replay_of_execution_id,
-                page_id=page_id,
-            )
-            translation_result = execution.translation_result
-            page.owner_page_result = PageExecutionResult.build(
-                request=request,
-                coverage=coverage,
-                owner_graph=execution.graph,
-                translation_attempts=(translation_result.attempts if translation_result else ()),
-                translations=(translation_result.bindings if translation_result else ()),
-                page_commits=execution.commits,
-                status="candidate_ready",
-            )
+            page.owner_page_result = owner_page_results_by_page[page_id]
 
     for band_index, band in enumerate(bands, start=1):
         if not isinstance(getattr(band, "ocr_result", None), dict):
@@ -7062,6 +7440,26 @@ def run_chapter(
     for page_index, (page, original_page, clean_page) in enumerate(zip(output_pages, original_pages, clean_pages)):
         if owner_composition_active:
             _bind_owner_final_page_images(page, original_page, clean_page)
+            if private_execution_root is None:
+                raise ValueError("enforce page execution lacks its private artifact root")
+            from qa.final_pixel_observer import DetectorOcrFinalPixelObserver
+
+            finalized, evidence_ref = finalize_and_persist_page_result(
+                owner_page_results_by_page[_page_id_for(page_index + 1)],
+                candidate_pixels=page.image,
+                cleanup_pixels=page.inpainted_image,
+                generation_root=private_execution_root,
+                observer=DetectorOcrFinalPixelObserver(
+                    detector=detector,
+                    runtime=runtime,
+                ),
+                source_language=idioma_origem,
+                page_number=page_index + 1,
+            )
+            page.owner_page_result = finalized
+            page.owner_page_evidence_ref = evidence_ref
+            page.owner_private_execution_root = private_execution_root
+            page.image = finalized.final_page.read_only_rgb().copy()
             continue
         page_texts = _page_texts_from_text_layers(page.text_layers)
         stage_page_texts = _texts_without_legacy_decision_fields(page_texts)

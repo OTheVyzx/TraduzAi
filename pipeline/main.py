@@ -557,6 +557,10 @@ def _parse_runner_cli_args(args: list[str]) -> dict:
         "export_mode": "with_warnings",
         "work_dir": str(Path("debug") / "runs" / "pipeline_cli"),
         "mock_critical": False,
+        "chapter": None,
+        "owner_graph_mode": None,
+        "style_copy_mode": None,
+        "replay_owner_artifacts": None,
     }
     index = 0
     while index < len(args):
@@ -580,6 +584,33 @@ def _parse_runner_cli_args(args: list[str]) -> dict:
             continue
         if arg == "--engine-preset" and index + 1 < len(args):
             parsed["engine_preset_id"] = args[index + 1]
+            index += 2
+            continue
+        if arg == "--chapter" and index + 1 < len(args):
+            try:
+                parsed["chapter"] = int(args[index + 1])
+            except ValueError as exc:
+                raise ValueError("--chapter deve ser um inteiro positivo") from exc
+            if parsed["chapter"] <= 0:
+                raise ValueError("--chapter deve ser um inteiro positivo")
+            index += 2
+            continue
+        if arg == "--owner-graph-mode" and index + 1 < len(args):
+            mode = str(args[index + 1]).strip().lower()
+            if mode not in {"legacy", "shadow", "enforce"}:
+                raise ValueError("--owner-graph-mode deve ser legacy, shadow ou enforce")
+            parsed["owner_graph_mode"] = mode
+            index += 2
+            continue
+        if arg == "--style-copy-mode" and index + 1 < len(args):
+            mode = str(args[index + 1]).strip().lower()
+            if mode not in {"off", "shadow", "render", "enforce"}:
+                raise ValueError("--style-copy-mode deve ser off, shadow, render ou enforce")
+            parsed["style_copy_mode"] = mode
+            index += 2
+            continue
+        if arg == "--replay-owner-artifacts" and index + 1 < len(args):
+            parsed["replay_owner_artifacts"] = args[index + 1]
             index += 2
             continue
         if arg == "--mode" and index + 1 < len(args):
@@ -624,6 +655,47 @@ def _parse_runner_cli_args(args: list[str]) -> dict:
     return parsed
 
 
+def parse_cli_args(args: list[str]):
+    """Public typed view of runner CLI overrides."""
+
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**_parse_runner_cli_args(args))
+
+
+def resolve_runner_config_from_cli(args, *, loaded_config: dict) -> dict:
+    """Resolve CLI overrides over a loaded runtime config."""
+
+    supplied = vars(args) if hasattr(args, "__dict__") else dict(args)
+    resolved = dict(loaded_config or {})
+    for key, value in supplied.items():
+        if value is not None:
+            resolved[key] = value
+    chapter = supplied.get("chapter")
+    if chapter is not None:
+        resolved["capitulo"] = int(chapter)
+    else:
+        resolved["capitulo"] = int(
+            resolved.get("capitulo", resolved.get("chapter", 1)) or 1
+        )
+    resolved.pop("chapter", None)
+    resolved["owner_graph_mode"] = str(
+        supplied.get("owner_graph_mode")
+        or resolved.get("owner_graph_mode")
+        or "enforce"
+    ).strip().lower()
+    resolved["style_copy_mode"] = str(
+        supplied.get("style_copy_mode")
+        or resolved.get("style_copy_mode")
+        or "shadow"
+    ).strip().lower()
+    replay = supplied.get("replay_owner_artifacts")
+    if replay is None:
+        replay = resolved.get("replay_owner_artifacts")
+    resolved["replay_owner_artifacts"] = (
+        str(Path(replay).resolve()) if replay not in (None, "") else None
+    )
+    return resolved
 def _list_input_images(source_path: Path) -> list[Path]:
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
     if source_path.is_file() and source_path.suffix.lower() in image_exts:
@@ -8691,6 +8763,27 @@ def _compose_runtime_export_gate(
 
     qa = project_data.setdefault("qa", {})
     style_mode = str(config.get("style_copy_mode") or "shadow").strip().lower()
+    if style_mode == "off":
+        style_fidelity = {
+            "schema_version": 2,
+            "mode": "off",
+            "owners": [],
+            "findings": [],
+            "gate": {
+                "status": "PASS",
+                "would_block": False,
+                "blocking_owner_ids": [],
+                "issues": [],
+            },
+        }
+        qa["functional_export_gate"] = copy.deepcopy(functional_gate)
+        qa["style_fidelity"] = style_fidelity
+        qa["export_gate"] = compose_export_gate(
+            functional_gate,
+            style_fidelity["gate"],
+            override=bool(config.get("allow_p0_export_override")),
+        )
+        return qa["export_gate"]
     try:
         style_fidelity = audit_style_fidelity(project_data, work_dir, mode=style_mode)
         if not isinstance(style_fidelity, dict) or not isinstance(style_fidelity.get("gate"), dict):
@@ -8830,7 +8923,7 @@ def _run_mock_pipeline_runner(config: dict) -> int:
 
     project = {
         "obra": config.get("obra", ""),
-        "capitulo": 1,
+        "capitulo": int(config.get("capitulo", 1) or 1),
         "idioma_origem": config.get("idioma_origem", "en"),
         "idioma_destino": config.get("idioma_destino", "pt-BR"),
         "qualidade": "normal",
@@ -8924,6 +9017,9 @@ def _run_pipeline_runner_cli(config: dict) -> int:
         "skip_ocr": config.get("skip_ocr", False),
         "strict": config.get("strict", False),
         "export_mode": config.get("export_mode", "with_warnings"),
+        "owner_graph_mode": config.get("owner_graph_mode", "enforce"),
+        "style_copy_mode": config.get("style_copy_mode", "shadow"),
+        "replay_owner_artifacts": config.get("replay_owner_artifacts"),
     }
     config_path = work_dir / "runner_config.json"
     config_path.write_text(json.dumps(runtime_config, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -8944,7 +9040,11 @@ def main():
         return
 
     if "--input" in sys.argv[1:]:
-        exit_code = _run_pipeline_runner_cli(_parse_runner_cli_args(sys.argv[1:]))
+        exit_code = _run_pipeline_runner_cli(
+            resolve_runner_config_from_cli(
+                parse_cli_args(sys.argv[1:]), loaded_config={}
+            )
+        )
         if exit_code:
             sys.exit(exit_code)
         return
@@ -9319,6 +9419,8 @@ def _run_pipeline(config_path: str):
                 page_number,
                 source_language,
                 page_surface_geometry,
+                request_scoped=False,
+                root_input_pixel_sha256="",
             ):
                 return run_final_pixel_ocr_probe(
                     img,
@@ -9328,6 +9430,8 @@ def _run_pipeline(config_path: str):
                     page_number=page_number,
                     source_language=source_language,
                     page_surface_geometry=page_surface_geometry,
+                    request_scoped=bool(request_scoped),
+                    root_input_pixel_sha256=str(root_input_pixel_sha256 or ""),
                 )
 
             def run_ocr_stage(
@@ -9434,6 +9538,44 @@ def _run_pipeline(config_path: str):
         strip_detector = StripDetector()
         strip_runtime = StripRuntime()
         strip_chapter_telemetry: dict = {}
+        effective_owner_graph_mode = _automatic_owner_graph_mode(config)
+        verified_owner_source_manifest = None
+        verified_owner_private_root = None
+        verified_owner_replay = None
+        owner_run_id = None
+        owner_execution_id = None
+        owner_replay_of_execution_id = None
+        if effective_owner_graph_mode == "enforce":
+            import uuid
+
+            from ownership.chapter_contract import ChapterSourceManifest
+            from strip.page_pipeline import load_owner_content_replay
+
+            replay_root = config.get("replay_owner_artifacts")
+            if replay_root:
+                verified_owner_replay = load_owner_content_replay(replay_root)
+                owner_run_id = verified_owner_replay.run_id
+                owner_replay_of_execution_id = verified_owner_replay.execution_id
+            else:
+                owner_run_id = f"owner-run-{uuid.uuid4().hex}"
+            owner_execution_id = f"owner-execution-{uuid.uuid4().hex}"
+            extraction_root = Path(os.path.commonpath([str(Path(path).resolve()) for path in image_files]))
+            if extraction_root.is_file():
+                extraction_root = extraction_root.parent
+            verified_owner_source_manifest = ChapterSourceManifest.from_extracted_pages(
+                image_files,
+                extraction_root,
+                run_id=owner_run_id,
+                execution_id=owner_execution_id,
+                replay_of_execution_id=owner_replay_of_execution_id,
+            )
+            if (
+                verified_owner_replay is not None
+                and verified_owner_replay.verified_inputs.source_manifest.source_tree_sha256
+                != verified_owner_source_manifest.source_tree_sha256
+            ):
+                raise ValueError("style replay source tree differs from verified content run")
+            verified_owner_private_root = work_dir
         with pipeline_timing.measure("strip_run_chapter"):
             output_pages = run_chapter(
                 image_files=image_files,
@@ -9458,8 +9600,15 @@ def _run_pipeline(config_path: str):
                 translation_context=config.get("translation_context") or None,
                 chapter_telemetry=strip_chapter_telemetry,
                 skip_page_cleanup_rerender=bool(config.get("skip_inpaint")),
-                owner_graph_mode=_automatic_owner_graph_mode(config),
+                owner_graph_mode=effective_owner_graph_mode,
+                style_copy_mode=str(config.get("style_copy_mode") or "shadow"),
                 legacy_project_status=config.get("owner_graph_status"),
+                run_id=owner_run_id,
+                execution_id=owner_execution_id,
+                replay_of_execution_id=owner_replay_of_execution_id,
+                source_manifest=verified_owner_source_manifest,
+                artifact_root=verified_owner_private_root,
+                owner_content_replay=verified_owner_replay,
             )
         strip_chapter_telemetry["internal_unattributed_sec"] = round(
             max(
@@ -9664,7 +9813,11 @@ def _run_pipeline(config_path: str):
                 "render_balloon_bbox_sync_count"
             ] = synced_render_bboxes
     with pipeline_timing.measure("hydrate_project_render_metadata"):
-        render_metadata_hydration = _hydrate_project_render_metadata_from_debug_candidates(project_data)
+        render_metadata_hydration = (
+            {"skipped": True, "reason": "verified_owner_page_authority"}
+            if owner_pages_have_final_pixel_authority
+            else _hydrate_project_render_metadata_from_debug_candidates(project_data)
+        )
         project_data.setdefault("qa", {})["render_metadata_hydration"] = render_metadata_hydration
     with pipeline_timing.measure("ensure_route_action_contract"):
         route_contract_audit = _ensure_project_route_action_contract(project_data)
@@ -9720,7 +9873,11 @@ def _run_pipeline(config_path: str):
         from qa.translation_qa import summarize_flags
 
         with pipeline_timing.measure("normalize_final_project_page_space_layers"):
-            final_page_space_audit = _normalize_final_project_page_space_layers(project_data)
+            final_page_space_audit = (
+                {"skipped": True, "reason": "verified_owner_page_authority"}
+                if owner_pages_have_final_pixel_authority
+                else _normalize_final_project_page_space_layers(project_data)
+            )
             qa_summary = summarize_flags(
                 [
                     layer
@@ -9737,10 +9894,22 @@ def _run_pipeline(config_path: str):
         logger.warning("Falha ao normalizar camadas finais em page-space: %s", exc)
     try:
         with pipeline_timing.measure("hydrate_final_project_render_metadata"):
-            final_render_metadata_hydration = _hydrate_project_render_metadata_from_debug_candidates(project_data)
+            final_render_metadata_hydration = (
+                {"skipped": True, "reason": "verified_owner_page_authority"}
+                if owner_pages_have_final_pixel_authority
+                else _hydrate_project_render_metadata_from_debug_candidates(project_data)
+            )
             debug_mask_bbox_repair = _repair_project_bubble_bboxes_from_debug_masks(project_data)
             real_bubble_safe_area_repair = _repair_project_real_bubble_body_safe_areas(project_data)
-            owner_mode_repairs = _apply_owner_mode_project_repairs(project_data)
+            owner_mode_repairs = (
+                {
+                    "owner_mode": "verified", "legacy_helpers_called": [],
+                    "same_balloon_fragments_merged": 0,
+                    "cross_page_band_layers_rehomed": 0,
+                }
+                if owner_pages_have_final_pixel_authority
+                else _apply_owner_mode_project_repairs(project_data)
+            )
             same_balloon_fragments_merged = owner_mode_repairs[
                 "same_balloon_fragments_merged"
             ]
@@ -9753,10 +9922,26 @@ def _run_pipeline(config_path: str):
                 "cross_page_band_layers_rehomed"
             ]
             broad_fallback_layers_suppressed = _suppress_broad_fallback_merge_layers(project_data)
-            final_page_space_after_hydration = _normalize_final_project_page_space_layers(project_data)
-            post_page_space_render_metadata_hydration = _hydrate_project_render_metadata_from_debug_candidates(project_data)
+            final_page_space_after_hydration = (
+                {"skipped": True, "reason": "verified_owner_page_authority"}
+                if owner_pages_have_final_pixel_authority
+                else _normalize_final_project_page_space_layers(project_data)
+            )
+            post_page_space_render_metadata_hydration = (
+                {"skipped": True, "reason": "verified_owner_page_authority"}
+                if owner_pages_have_final_pixel_authority
+                else _hydrate_project_render_metadata_from_debug_candidates(project_data)
+            )
             post_page_space_real_bubble_safe_area_repair = _repair_project_real_bubble_body_safe_areas(project_data)
-            post_owner_mode_repairs = _apply_owner_mode_project_repairs(project_data)
+            post_owner_mode_repairs = (
+                {
+                    "owner_mode": "verified", "legacy_helpers_called": [],
+                    "same_balloon_fragments_merged": 0,
+                    "cross_page_band_layers_rehomed": 0,
+                }
+                if owner_pages_have_final_pixel_authority
+                else _apply_owner_mode_project_repairs(project_data)
+            )
             post_page_space_same_balloon_fragments_merged = post_owner_mode_repairs[
                 "same_balloon_fragments_merged"
             ]
@@ -10138,13 +10323,28 @@ def _run_pipeline(config_path: str):
                 extra={"exit_code": 2, "export_gate_status": export_gate.get("status")},
             )
         sys.exit(2)
-    emit_progress("typeset", 100, 100, message="Concluido!")
-    emit("complete", output_path=str(work_dir))
     _finalize_debug_recorder(
         debug_recorder,
         config_snapshot=config,
         extra={"exit_code": 0, "export_gate_status": export_gate.get("status")},
     )
+    if locals().get("verified_owner_source_manifest") is not None:
+        from ownership.publication import PublicationTransaction
+
+        verified_inputs = _project_inputs_from_output_pages(
+            verified_owner_source_manifest,
+            output_pages,
+            private_execution_root=verified_owner_private_root,
+        )
+        bundle = _wrap_up_verified_owner_pages(
+            verified_inputs,
+            source_private_execution_root=verified_owner_private_root,
+        )
+        publication = PublicationTransaction.for_bundle(work_dir, bundle)
+        publication.stage(bundle)
+        publication.commit(bundle)
+    emit_progress("typeset", 100, 100, message="Concluido!")
+    emit("complete", output_path=str(work_dir))
 
 
 def _default_text_style() -> dict:
@@ -15973,14 +16173,36 @@ def _wrap_up_verified_owner_pages(
     (evidence_root / "verified_project_inputs.json").write_bytes(
         inputs.canonical_json_bytes
     )
-    project_payload = {
-        "schema_version": 1,
-        "owner_graph_status": "verified",
-        "run_id": inputs.run_id,
-        "execution_id": inputs.execution_id,
-        "source_manifest_sha256": inputs.source_manifest_sha256,
-        "verified_inputs_sha256": inputs.sha256,
-        "paginas": [
+    existing_project = {}
+    existing_project_path = staging_root / "project.json"
+    if existing_project_path.is_file():
+        try:
+            loaded_project = json.loads(existing_project_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_project, dict):
+                existing_project = loaded_project
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            existing_project = {}
+    project_payload = dict(existing_project)
+    project_payload.update(
+        {
+            "schema_version": 1,
+            "owner_graph_status": "verified",
+            "run_id": inputs.run_id,
+            "execution_id": inputs.execution_id,
+            "replay_of_execution_id": inputs.replay_of_execution_id,
+            "source_manifest_sha256": inputs.source_manifest_sha256,
+            "verified_inputs_sha256": inputs.sha256,
+        }
+    )
+    existing_pages = list(project_payload.get("paginas") or [])
+    verified_project_pages = []
+    for ordinal, page in enumerate(inputs.pages, 1):
+        payload = (
+            dict(existing_pages[ordinal - 1])
+            if ordinal <= len(existing_pages) and isinstance(existing_pages[ordinal - 1], dict)
+            else {}
+        )
+        payload.update(
             {
                 "numero": ordinal,
                 "page_id": page.page_id,
@@ -15993,9 +16215,9 @@ def _wrap_up_verified_owner_pages(
                 "owner_graph_sha256": page.owner_graph.sha256,
                 "terminal_proof_sha256": page.terminal_proof_sha256,
             }
-            for ordinal, page in enumerate(inputs.pages, 1)
-        ],
-    }
+        )
+        verified_project_pages.append(payload)
+    project_payload["paginas"] = verified_project_pages
     project_path = staging_root / "project.json"
     project_path.write_bytes(
         json.dumps(project_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -16003,6 +16225,22 @@ def _wrap_up_verified_owner_pages(
     reopened_inputs = VerifiedProjectInputs.read_verified(staging_root)
     if reopened_inputs.sha256 != inputs.sha256:
         raise ValueError("staged verified inputs changed during wrap-up")
+    for page in reopened_inputs.pages:
+        reopened_page = page.page_execution_evidence.read_verified(
+            page.page_execution_evidence.canonical_json_bytes,
+            staging_root,
+            expected={
+                "run_id": inputs.run_id,
+                "execution_id": inputs.execution_id,
+                "page_id": page.page_id,
+                "page_result_sha256": page.page_result_sha256,
+            },
+        )
+        if reopened_page.visual_stage_artifacts:
+            _write_page_artifacts(
+                page.page_execution_evidence,
+                generation_root=staging_root,
+            )
     asset_manifest = ChapterAssetManifest.build(
         staging_root,
         run_id=inputs.run_id,

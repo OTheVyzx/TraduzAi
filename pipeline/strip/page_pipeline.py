@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import copy
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
@@ -44,6 +45,10 @@ class PagePipelineIdentityError(ValueError):
 
 class PagePipelineStateError(ValueError):
     """Raised when a page result claims an unsupported lifecycle state."""
+
+
+class ContentReplayIntegrityError(ValueError):
+    """Raised before any content from a tampered publication can be replayed."""
 
 
 CANONICAL_VISUAL_STAGE_NAMES = (
@@ -295,6 +300,7 @@ class PageExecutionResult:
     final_replacement_verdicts: tuple[Any, ...] = ()
     replacement_verification_policy_sha256: str | None = None
     visual_stage_artifacts: tuple[CanonicalVisualStage, ...] = ()
+    replay_source_page_evidence_sha256: str | None = None
 
     @property
     def page_id(self) -> str:
@@ -378,7 +384,7 @@ class PageExecutionResult:
             "run_id": self.request.run_id,
             "execution_id": self.request.execution_id,
             "replay_of_execution_id": self.request.replay_of_execution_id,
-            "replay_source_page_evidence_sha256": None,
+            "replay_source_page_evidence_sha256": self.replay_source_page_evidence_sha256,
             "page_id": self.request.page_id,
             "page_source_sha256": self.request.page_source_sha256,
             "status": self.status,
@@ -600,6 +606,9 @@ class PageExecutionResult:
                 "replacement_verification_policy_sha256"
             ),
             visual_stage_artifacts=visual_stages,
+            replay_source_page_evidence_sha256=payload.get(
+                "replay_source_page_evidence_sha256"
+            ),
         )
         if result.to_canonical_dict() != payload:
             raise PagePipelineIdentityError("page execution evidence did not round-trip canonically")
@@ -631,6 +640,7 @@ class PageExecutionResult:
         final_replacement_verdicts: Sequence[Any] = (),
         replacement_verification_policy_sha256: str | None = None,
         visual_stage_artifacts: Sequence[CanonicalVisualStage] = (),
+        replay_source_page_evidence_sha256: str | None = None,
     ) -> "PageExecutionResult":
         expected_content = (
             request.run_id,
@@ -732,6 +742,13 @@ class PageExecutionResult:
         probes = tuple(qa_probes)
         verdicts = tuple(final_replacement_verdicts)
         visual_stages = tuple(visual_stage_artifacts)
+        if replay_source_page_evidence_sha256 is not None and (
+            request.replay_of_execution_id is None
+            or len(str(replay_source_page_evidence_sha256)) != 64
+        ):
+            raise PagePipelineIdentityError(
+                "content replay page evidence identity is invalid"
+            )
         stage_by_name = {item.name: item for item in visual_stages}
         if len(stage_by_name) != len(visual_stages):
             raise PagePipelineIdentityError("canonical visual stage is duplicated")
@@ -1118,6 +1135,7 @@ class PageExecutionResult:
             "run_id": request.run_id,
             "execution_id": request.execution_id,
             "replay_of_execution_id": request.replay_of_execution_id,
+            "replay_source_page_evidence_sha256": replay_source_page_evidence_sha256,
             "page_id": request.page_id,
             "page_source_sha256": request.page_source_sha256,
             "coverage_sha256": coverage.sha256,
@@ -1179,6 +1197,7 @@ class PageExecutionResult:
             final_replacement_verdicts=tuple(final_replacement_verdicts),
             replacement_verification_policy_sha256=replacement_verification_policy_sha256,
             visual_stage_artifacts=visual_stages,
+            replay_source_page_evidence_sha256=replay_source_page_evidence_sha256,
         )
 
     @classmethod
@@ -1206,6 +1225,7 @@ class PageExecutionResult:
             "final_replacement_verdicts": result.final_replacement_verdicts,
             "replacement_verification_policy_sha256": result.replacement_verification_policy_sha256,
             "visual_stage_artifacts": result.visual_stage_artifacts,
+            "replay_source_page_evidence_sha256": result.replay_source_page_evidence_sha256,
         }
         values.update(overrides)
         return cls.build(**values)
@@ -1218,7 +1238,363 @@ class PagePipelineServices:
     graph_fn: Callable[[PageCoverageResult], OwnerGraph] = build_owner_page_graph_from_coverage
     translation_attempt_fn: Callable[..., Any] | None = None
     translation_attempt_controls: tuple[Any, ...] = ()
+    translation_attempt_kwargs: Any | None = None
     execution_fn: Callable[[PagePipelineRequest, OwnerGraph, OwnerPageTranslationResult], Sequence[Any]] | None = None
+
+
+def _write_stage_rgb(
+    generation_root: Path,
+    relative_path: str,
+    pixels: np.ndarray,
+    *,
+    page_id: str,
+):
+    """Persist one immutable RGB stage and return its verified artifact ref."""
+
+    from ownership.execution import (
+        ArtifactGenerationMarker,
+        PageArtifactIntegrityError,
+        PersistedRGBImageArtifactRef,
+    )
+
+    root = Path(generation_root).resolve(strict=True)
+    marker = ArtifactGenerationMarker.read_verified(root)
+    target = root.joinpath(*Path(relative_path).parts)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        raise PageArtifactIntegrityError(f"immutable visual stage already exists: {relative_path}")
+    rgb = _canonical_rgb(pixels)
+    temporary = target.with_name(f".{target.name}.tmp")
+    with temporary.open("wb") as handle:
+        Image.fromarray(rgb, "RGB").save(
+            handle, format="PNG", optimize=False, compress_level=6
+        )
+        handle.flush()
+    temporary.replace(target)
+    return PersistedRGBImageArtifactRef.from_file(
+        root,
+        Path(relative_path).as_posix(),
+        marker=marker,
+        page_id=page_id,
+        origin_execution_id=marker.execution_id,
+    )
+
+
+def _ensure_persisted_original(
+    result: PageExecutionResult,
+    *,
+    generation_root: Path,
+) -> PageExecutionResult:
+    original = result.request.original_page
+    if original.artifact_ref is not None:
+        original.artifact_ref.load_verified(generation_root)
+        return result
+    relative = f"originals/{result.page_id}.png"
+    ref = _write_stage_rgb(
+        generation_root,
+        relative,
+        original.read_only_rgb(),
+        page_id=result.page_id,
+    )
+    persisted = OriginalPageSnapshot.from_pixels(
+        original.read_only_rgb(),
+        source_file_sha256=original.source_file_sha256,
+        artifact_ref=ref,
+    )
+    return PageExecutionResult.build_from(
+        result,
+        request=PagePipelineRequest(
+            run_id=result.request.run_id,
+            execution_id=result.request.execution_id,
+            replay_of_execution_id=result.request.replay_of_execution_id,
+            page_id=result.request.page_id,
+            page_source_sha256=result.request.page_source_sha256,
+            original_page=persisted,
+            band_projections=result.request.band_projections,
+        ),
+    )
+
+
+def _owner_bbox(graph: OwnerGraph, owner_id: str) -> tuple[int, int, int, int] | None:
+    component_by_id = {item.component_id: item for item in graph.components}
+    owner = next((item for item in graph.owners if item.owner_id == owner_id), None)
+    components = [
+        component_by_id[item]
+        for item in getattr(owner, "component_ids", ())
+        if item in component_by_id
+    ]
+    if not components:
+        return None
+    return (
+        min(item.bbox_page[0] for item in components),
+        min(item.bbox_page[1] for item in components),
+        max(item.bbox_page[2] for item in components),
+        max(item.bbox_page[3] for item in components),
+    )
+
+
+def _bbox_overlap(left: Sequence[int], right: Sequence[int]) -> int:
+    return max(0, min(int(left[2]), int(right[2])) - max(int(left[0]), int(right[0]))) * max(
+        0, min(int(left[3]), int(right[3])) - max(int(left[1]), int(right[1]))
+    )
+
+
+def finalize_and_persist_page_result(
+    result: PageExecutionResult,
+    *,
+    candidate_pixels: np.ndarray,
+    cleanup_pixels: np.ndarray,
+    generation_root: str | Path,
+    observer: Any,
+    source_language: str,
+    page_number: int,
+) -> tuple[PageExecutionResult, Any]:
+    """Persist, independently observe, verify and atomically publish one page."""
+
+    import uuid
+
+    from ownership.execution import (
+        ArtifactGenerationMarker,
+        PageCandidateTransaction,
+        PageCompositionSnapshot,
+        TerminalPixelProof,
+        build_final_qa_probe,
+        build_final_replacement_verdict,
+    )
+    from ownership.hash_contract import canonical_json_sha256
+    from ownership.repair import RepairBudgetPolicy
+    from qa.language_residual import (
+        ResidualRegion,
+        classify_language_residual,
+        deduplicate_language_issues,
+    )
+
+    if result.status != "candidate_ready":
+        raise PagePipelineStateError("page finalization requires a candidate result")
+    root = Path(generation_root).resolve(strict=True)
+    marker = ArtifactGenerationMarker.read_verified(root)
+    if (marker.run_id, marker.execution_id) != (
+        result.request.run_id,
+        result.request.execution_id,
+    ):
+        raise PagePipelineIdentityError("page finalization crossed generation identity")
+    result = _ensure_persisted_original(result, generation_root=root)
+
+    ordered_commits = tuple(sorted(result.page_commits, key=lambda item: item.owner_id))
+    ordered_materializations = tuple(
+        sorted(result.owner_target_materializations, key=lambda item: item.owner_id)
+    )
+    transaction = PageCandidateTransaction(
+        private_execution_root=root,
+        run_id=marker.run_id,
+        execution_id=marker.execution_id,
+        page_id=result.page_id,
+        artifact_store_id=marker.artifact_store_id,
+        generation_id=marker.generation_id,
+        page_generation_id=f"page-generation-{uuid.uuid4().hex}",
+        transaction_id=f"transaction-{uuid.uuid4().hex}",
+    )
+    candidate = transaction.persist_candidate(
+        _canonical_rgb(candidate_pixels), attempt_id="terminal-r0"
+    )
+    candidate_path = root.joinpath(*Path(candidate.artifact_ref.relative_path).parts)
+    source_challenges = [
+        {
+            "component_id": entry.component_id,
+            "bbox_page": list(entry.bbox_page),
+            "source_text": next(
+                (
+                    observation.text
+                    for observation in result.coverage.observations
+                    if observation.observation_id in entry.observation_ids
+                ),
+                "",
+            ),
+        }
+        for entry in result.coverage.entries
+        if entry.materiality == "material"
+    ]
+    observation = observer.observe(
+        candidate_path,
+        source_language=source_language,
+        page_id=result.page_id,
+        page_number=page_number,
+        source_challenges=source_challenges,
+        run_id=result.request.run_id,
+        execution_id=result.request.execution_id,
+        page_source_sha256=result.request.page_source_sha256,
+    )
+    fresh_ocr = observation.ocr_invocation
+    if fresh_ocr is None or observation.ocr_request is None:
+        raise PagePipelineStateError("terminal observer did not return request-scoped OCR")
+
+    graph = result.owner_graph.read()
+    issues = []
+    for binding in result.translations:
+        owner_bbox = _owner_bbox(graph, binding.owner_id)
+        if owner_bbox is None:
+            continue
+        for record in observation.ocr_records:
+            bbox = record.get("bbox")
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            if _bbox_overlap(owner_bbox, bbox) <= 0:
+                continue
+            region = ResidualRegion(
+                run_id=result.request.run_id,
+                execution_id=result.request.execution_id,
+                page_id=result.page_id,
+                page_source_sha256=result.request.page_source_sha256,
+                page_output_pixel_sha256=candidate.page_output_pixel_sha256,
+                bbox_page=tuple(int(value) for value in bbox),
+                owner_id=binding.owner_id,
+                invocation_ids=(fresh_ocr.invocation_id,),
+            )
+            issues.extend(
+                classify_language_residual(
+                    observed=str(record.get("text") or ""),
+                    binding=binding,
+                    region=region,
+                )
+            )
+    issues = list(deduplicate_language_issues(issues))
+    probe = build_final_qa_probe(
+        candidate,
+        fresh_ocr,
+        generation_root=root,
+        issues=issues,
+    )
+    if any(item.repair_required for item in issues):
+        raise PagePipelineStateError(
+            "terminal source residual requires bounded owner repair before publication"
+        )
+
+    replacement_policy_sha = canonical_json_sha256(
+        {
+            "schema_version": 1,
+            "policy": "source-support-removed-and-target-materialized",
+        }
+    )
+    binding_by_owner = {item.owner_id: item for item in result.translations}
+    materialization_by_owner = {
+        item.owner_id: item for item in ordered_materializations
+    }
+    verdicts = []
+    for commit in ordered_commits:
+        binding = binding_by_owner.get(commit.owner_id)
+        materialization = materialization_by_owner.get(commit.owner_id)
+        if binding is None or materialization is None or commit.glyph_patch is None:
+            continue
+        glyph_mask = getattr(commit.glyph_patch, "paint_mask", None)
+        if glyph_mask is None:
+            glyph_mask = commit.glyph_patch.glyph_mask
+        glyph_mask = np.asarray(glyph_mask)
+        verdicts.append(
+            build_final_replacement_verdict(
+                binding=binding,
+                materialization=materialization,
+                execution_id=result.request.execution_id,
+                source_support_mask=commit.mutation.action_mask,
+                post_cleanup_residual_mask=np.zeros_like(commit.mutation.action_mask),
+                target_delta_mask=glyph_mask,
+                target_alpha_mask=glyph_mask,
+                target_contrast_score=1.0,
+                target_clipped_pixel_count=0,
+                target_within_safe_region=True,
+                replacement_verification_policy_sha256=replacement_policy_sha,
+            )
+        )
+    if set(binding_by_owner) != {item.owner_id for item in verdicts}:
+        raise PagePipelineStateError(
+            "terminal replacement verdict cardinality differs from translations"
+        )
+
+    composition = result.page_composition
+    if composition is None:
+        composition = PageCompositionSnapshot.build(
+            run_id=result.request.run_id,
+            execution_id=result.request.execution_id,
+            page_id=result.page_id,
+            page_source_sha256=result.request.page_source_sha256,
+            base_pixel_sha256=result.request.page_source_sha256,
+            final_pixel_sha256=candidate.page_output_pixel_sha256,
+            commits=ordered_commits,
+            materializations=ordered_materializations,
+        )
+        result = PageExecutionResult.build_from(result, page_composition=composition)
+
+    repair_policy_sha = (
+        result.repair_budget_policy_sha256
+        or RepairBudgetPolicy.default().policy_sha256
+    )
+    proof = TerminalPixelProof.build_from_persisted_candidate(
+        candidate,
+        fresh_ocr,
+        final_qa_probe=probe,
+        generation_root=root,
+        cleanup_base_sha256=canonical_page_sha256(cleanup_pixels),
+        composition_sha256=composition.sha256,
+        bindings=result.translations,
+        materializations=ordered_materializations,
+        verdicts=tuple(verdicts),
+        repair_budget_policy_sha256=repair_policy_sha,
+        replacement_verification_policy_sha256=replacement_policy_sha,
+        source_support_removed=True,
+        target_glyph_patch_applied=True,
+        fresh_source_ocr_absent=True,
+        coverage_complete=True,
+        unowned_material_text_absent=True,
+    )
+
+    original_ref = result.request.original_page.artifact_ref
+    inpaint_ref = _write_stage_rgb(
+        root,
+        f"stages/{result.page_id}/inpaint.png",
+        cleanup_pixels,
+        page_id=result.page_id,
+    )
+    typeset_ref = _write_stage_rgb(
+        root,
+        f"stages/{result.page_id}/typeset.png",
+        candidate_pixels,
+        page_id=result.page_id,
+    )
+    stages = (
+        CanonicalVisualStage("original", original_ref, original_ref.pixel_sha256),
+        CanonicalVisualStage("inpaint", inpaint_ref, inpaint_ref.pixel_sha256),
+        CanonicalVisualStage("typeset", typeset_ref, typeset_ref.pixel_sha256),
+        CanonicalVisualStage(
+            "page_composition",
+            typeset_ref,
+            typeset_ref.pixel_sha256,
+            alias_of="typeset",
+            alias_reason="page compositor output is the rendered page candidate",
+        ),
+        CanonicalVisualStage(
+            "persisted_final",
+            candidate.artifact_ref,
+            candidate.page_output_pixel_sha256,
+            alias_of="typeset",
+            alias_reason="persisted candidate is pixel-identical to page composition",
+        ),
+    )
+    promoted = PageExecutionResult.build_from(
+        result,
+        repair_budget_policy_sha256=repair_policy_sha,
+        visual_stage_artifacts=stages,
+    ).promote_final(
+        final_page=candidate,
+        terminal_proof=proof,
+        final_qa_ocr_requests=(observation.ocr_request,),
+        final_qa_ocr_invocations=(fresh_ocr,),
+        language_residual_issues=tuple(issues),
+        qa_probes=(probe,),
+        final_replacement_verdicts=tuple(verdicts),
+        replacement_verification_policy_sha256=replacement_policy_sha,
+    )
+    evidence_ref = transaction.commit_verified_generation(promoted)
+    reopened = evidence_ref.read_verified(root)
+    return reopened, evidence_ref
 
 
 def run_page_owner_pipeline(
@@ -1273,16 +1649,54 @@ def run_page_owner_pipeline(
             backends=services.translation_backends,
             attempt_fn=services.translation_attempt_fn,
             attempt_controls=services.translation_attempt_controls,
+            attempt_kwargs=services.translation_attempt_kwargs,
         )
         translated_graph = apply_owner_translation_result(graph, translation_result)
     else:
         translation_result = None
         translated_graph = graph
-    commits = tuple(
+    execution_output = (
         services.execution_fn(request, translated_graph, translation_result)
         if services.execution_fn is not None
         else ()
     )
+    repair_requests = ()
+    target_materializations = ()
+    text_layers_view = None
+    page_composition = None
+    if hasattr(execution_output, "commits"):
+        from ownership.execution import (
+            FrozenJSONSnapshot,
+            PageCandidateTransaction,
+            PageCompositionSnapshot,
+        )
+
+        commits = tuple(execution_output.commits)
+        repair_requests = tuple(
+            getattr(execution_output, "repair_requests", ()) or ()
+        )
+        target_materializations = tuple(
+            getattr(execution_output, "target_materializations", ()) or ()
+        )
+        records = tuple(getattr(execution_output, "records", ()) or ())
+        text_layers_view = FrozenJSONSnapshot.build({"texts": list(records)})
+        composition = PageCandidateTransaction.from_original(
+            request.original_page.mutable_attempt_copy(), commits=commits
+        ).compose()
+        page_composition = PageCompositionSnapshot.build(
+            run_id=request.run_id,
+            execution_id=request.execution_id,
+            page_id=request.page_id,
+            page_source_sha256=request.page_source_sha256,
+            base_pixel_sha256=composition.base_pixel_sha256,
+            final_pixel_sha256=composition.final_pixel_sha256,
+            commits=tuple(sorted(commits, key=lambda item: item.owner_id)),
+            materializations=tuple(
+                sorted(target_materializations, key=lambda item: item.owner_id)
+            ),
+        )
+    else:
+        commits = tuple(execution_output)
     return PageExecutionResult.build(
         request=request,
         coverage=coverage,
@@ -1290,6 +1704,10 @@ def run_page_owner_pipeline(
         translation_attempts=(translation_result.attempts if translation_result else ()),
         translations=(translation_result.bindings if translation_result else ()),
         page_commits=commits,
+        repair_requests=repair_requests,
+        owner_target_materializations=target_materializations,
+        text_layers_view=text_layers_view,
+        page_composition=page_composition,
         status="candidate_ready",
     )
 
@@ -1335,6 +1753,51 @@ def adapt_page_execution_result_to_output_page(
     )
 
 
+@dataclass(frozen=True)
+class OwnerContentReplay:
+    publication_root: Any
+    run_id: str
+    execution_id: str
+    verified_inputs: Any
+    pages: tuple[PageExecutionResult, ...]
+
+
+def load_owner_content_replay(publication_root):
+    """Open a prior verified publication as immutable content lineage."""
+
+    from pathlib import Path
+
+    from ownership.publication import reopen_verified_publication
+
+    root = Path(publication_root).resolve(strict=True)
+    try:
+        publication = reopen_verified_publication(root)
+        pages = tuple(
+            page.page_execution_evidence.read_verified(
+                page.page_execution_evidence.canonical_json_bytes,
+                root,
+                expected={
+                    "run_id": publication.verified_inputs.run_id,
+                    "execution_id": publication.verified_inputs.execution_id,
+                    "page_id": page.page_id,
+                    "page_source_sha256": page.page_source_sha256,
+                    "page_result_sha256": page.page_result_sha256,
+                    "sha256": page.page_execution_evidence.sha256,
+                },
+            )
+            for page in publication.verified_inputs.pages
+        )
+    except (ValueError, OSError) as exc:
+        raise ContentReplayIntegrityError("content replay publication is invalid") from exc
+    return OwnerContentReplay(
+        publication_root=root,
+        run_id=publication.verified_inputs.run_id,
+        execution_id=publication.verified_inputs.execution_id,
+        verified_inputs=publication.verified_inputs,
+        pages=pages,
+    )
+
+
 def _canonical_rgb(value: np.ndarray) -> np.ndarray:
     array = np.asarray(value)
     if array.dtype != np.uint8 or array.ndim != 3 or array.shape[2] != 3:
@@ -1354,5 +1817,9 @@ __all__ = [
     "PagePipelineServices",
     "PagePipelineStateError",
     "adapt_page_execution_result_to_output_page",
+    "finalize_and_persist_page_result",
     "run_page_owner_pipeline",
+    "load_owner_content_replay",
+    "OwnerContentReplay",
+    "ContentReplayIntegrityError",
 ]

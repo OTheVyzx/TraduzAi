@@ -62,6 +62,7 @@ from ownership.render_geometry import (
 )
 from typesetter.owner_style import (
     attach_owner_visual_profile,
+    build_base_owner_visual_profiles,
     build_owner_visual_profiles,
 )
 from typesetter.style_capture import build_owner_style_captures
@@ -11239,6 +11240,8 @@ def execute_owner_page_graph(
     translation_context: dict | None = None,
     style_promotions_by_owner: Mapping[str, Mapping[str, Any]] | None = None,
     enforce_graph: bool = False,
+    translation_result_override: OwnerPageTranslationResult | None = None,
+    style_copy_mode: str = "shadow",
 ) -> OwnerPageExecution:
     """Execute every page owner once against canonical page pixels."""
 
@@ -11265,34 +11268,43 @@ def execute_owner_page_graph(
         glyph_masks_by_owner=captured_glyph_masks,
         protected_art_masks_by_owner=captured_protected_art_masks,
     )
-    translated_stage = _run_translate_stage(
-        {"page_id": graph.page_id, "texts": []},
-        translator=translator,
-        owner_graph=graph,
-        context=context,
-        glossario=glossario,
-        idioma_origem=idioma_origem,
-        idioma_destino=idioma_destino,
-        obra=obra,
-        models_dir=models_dir,
-        ollama_host=ollama_host,
-        ollama_model=ollama_model,
-        translation_context=translation_context,
-    )
-    translated_page = translated_stage.to_page_dict()
-    translation_result = None
-    if translated_page.get("_owner_translation_attempts") is not None:
-        translation_result = OwnerPageTranslationResult.build(
-            tuple(
-                TranslationAttempt.from_dict(item)
-                for item in translated_page.get("_owner_translation_attempts") or ()
-            ),
-            tuple(
-                TranslationBinding.from_dict(item)
-                for item in translated_page.get("_owner_translation_bindings") or ()
-            ),
+    if translation_result_override is None:
+        translated_stage = _run_translate_stage(
+            {"page_id": graph.page_id, "texts": []},
+            translator=translator,
+            owner_graph=graph,
+            context=context,
+            glossario=glossario,
+            idioma_origem=idioma_origem,
+            idioma_destino=idioma_destino,
+            obra=obra,
+            models_dir=models_dir,
+            ollama_host=ollama_host,
+            ollama_model=ollama_model,
+            translation_context=translation_context,
         )
-    executed_graph = OwnerGraph.from_dict(translated_page["_owner_graph_snapshot"])
+        translated_page = translated_stage.to_page_dict()
+        translation_result = None
+        if translated_page.get("_owner_translation_attempts") is not None:
+            translation_result = OwnerPageTranslationResult.build(
+                tuple(
+                    TranslationAttempt.from_dict(item)
+                    for item in translated_page.get("_owner_translation_attempts") or ()
+                ),
+                tuple(
+                    TranslationBinding.from_dict(item)
+                    for item in translated_page.get("_owner_translation_bindings") or ()
+                ),
+            )
+        executed_graph = OwnerGraph.from_dict(translated_page["_owner_graph_snapshot"])
+    else:
+        translation_result = translation_result_override
+        executed_graph = copy.deepcopy(graph)
+        executed_graph.require_valid(mode="enforce")
+        translated_page = {
+            "page_id": graph.page_id,
+            "texts": [_owner_translation_record(owner) for owner in executed_graph.owners],
+        }
     records_by_owner = {
         str(record.get("owner_id") or ""): copy.deepcopy(record)
         for record in translated_page.get("texts") or []
@@ -11308,8 +11320,17 @@ def execute_owner_page_graph(
         observation.observation_id: observation
         for observation in executed_graph.observations
     }
-    owner_visual_profiles = resolve_contextual_style_groups(
-        build_owner_visual_profiles(
+    normalized_style_mode = str(style_copy_mode or "shadow").strip().lower()
+    if normalized_style_mode not in {"off", "shadow", "render", "enforce"}:
+        raise ValueError("style_copy_mode must be off, shadow, render, or enforce")
+    raw_visual_profiles = (
+        build_base_owner_visual_profiles(
+            executed_graph,
+            source,
+            glyph_masks_by_owner=captured_glyph_masks,
+        )
+        if normalized_style_mode == "off"
+        else build_owner_visual_profiles(
             executed_graph,
             source,
             glyph_masks_by_owner=captured_glyph_masks,
@@ -11329,6 +11350,7 @@ def execute_owner_page_graph(
             },
         )
     )
+    owner_visual_profiles = resolve_contextual_style_groups(raw_visual_profiles)
     commits: list[OwnerExecutionCommit] = []
     target_materializations: list[Any] = []
     repair_requests: list[Any] = []

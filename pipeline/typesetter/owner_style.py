@@ -406,6 +406,45 @@ def build_owner_visual_profiles(
     return result
 
 
+def build_base_owner_visual_profiles(
+    graph: object,
+    source_rgb: np.ndarray,
+    *,
+    glyph_masks_by_owner: Mapping[str, np.ndarray] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Build renderer-safe defaults without consulting source-style candidates."""
+
+    components = list(_field(graph, "components", []) or [])
+    observations = list(_field(graph, "observations", []) or [])
+    disabled_evidence = style_evidence_v2_from_v1({"source": "none"}).to_dict()
+    result: dict[str, dict[str, Any]] = {}
+    for owner in sorted(
+        list(_field(graph, "owners", []) or []),
+        key=lambda item: str(_field(item, "owner_id") or ""),
+    ):
+        if str(_field(owner, "disposition") or "") != "owned":
+            continue
+        if str(_field(owner, "state") or "") == "review_required":
+            continue
+        if str(_field(owner, "route_action") or "") not in {
+            "translate_inpaint_render", "translate_sfx_inpaint_render"
+        }:
+            continue
+        owner_id = str(_field(owner, "owner_id") or "")
+        result[owner_id] = build_owner_visual_profile(
+            owner,
+            source_rgb,
+            components=components,
+            observations=observations,
+            glyph_mask=(glyph_masks_by_owner or {}).get(owner_id),
+            candidate={
+                "semantic_role": _field(owner, "semantic_role"),
+                "style_evidence_v2": disabled_evidence,
+            },
+        )
+    return result
+
+
 def attach_owner_visual_profile(
     record: Mapping[str, Any],
     profile: Mapping[str, Any],
