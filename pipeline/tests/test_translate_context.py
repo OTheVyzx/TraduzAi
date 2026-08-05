@@ -2049,8 +2049,12 @@ def test_source_preparation_repairs_only_digit_led_numeric_ocr_zero_confusions()
         ("IS ABOUT 20O MILLION WON", "Is about 200 million won"),
         ("THE REWARD IS 1O0 GOLD", "The reward is 100 gold"),
         ("THE SCORE IS 2OO", "The score is 200"),
+        ("WAS175,O0O POINTS,WHICH", "Was 175,000 points,which"),
+        ("HAS1O PLAYERS", "Has 10 players"),
         ("O2 LEVEL IS SAFE", "O2 level is safe"),
         ("B2B MATCH", "B2b match"),
+        ("ROOM20O CODE", "Room20o code"),
+        ("B52 BOMBER", "B52 bomber"),
         ("ROOM FOR TWO", "Room for two"),
     )
     for source, prepared in cases:
@@ -2088,6 +2092,45 @@ def test_google_owner_attempt_accepts_repaired_numeric_ocr_magnitude(monkeypatch
     assert translated["original"] == source
     assert translated["source_text_sent_to_translator"] == "Is about 200 million won"
     assert translated["translated"] == "É CERCA DE 200 MILHÕES DE WON"
+    assert translated["locale_validation"]["status"] == "ok"
+    from translator.language_policy import validate_target_language
+
+    verdict = validate_target_language(
+        source=source,
+        target=translated["translated"],
+        role="dialogue_body",
+    )
+    assert verdict.accepted
+    assert verdict.numbers_equivalent
+
+
+def test_google_owner_attempt_accepts_glued_quantity_with_ocr_zero_confusion(monkeypatch) -> None:
+    source = "WAS175,O0O POINTS,WHICH"
+    page = _owned_legacy_page()
+    page["texts"][0]["text"] = source
+    page["texts"][0]["original"] = source
+
+    class Google:
+        _cache = {}
+        _persistent_cache = None
+
+        def translate_batch(self, texts):
+            assert texts == ["Was 175,000 points,which"]
+            return ["Foram 175.000 pontos, o que"]
+
+    monkeypatch.setattr(translate_module, "_google", Google())
+    result = translate_module.translate_one_owner_attempt(
+        page, "obra", {}, {},
+        idioma_destino="pt-BR", idioma_origem="en", qualidade="normal",
+        ollama_host="http://localhost:11434", ollama_model="traduzai-translator",
+        models_dir="", translation_context=None,
+        control=translate_module.TranslationAttemptControl("google", "owner_primary", True),
+    )
+
+    translated = result.translated_items[0].read()["texts"][0]
+    assert translated["original"] == source
+    assert translated["source_text_sent_to_translator"] == "Was 175,000 points,which"
+    assert translated["translated"] == "FORAM 175.000 PONTOS, O QUE"
     assert translated["locale_validation"]["status"] == "ok"
     from translator.language_policy import validate_target_language
 

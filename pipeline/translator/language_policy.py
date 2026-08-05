@@ -19,7 +19,16 @@ from .locale_policy import validate_target_locale
 _TOKEN_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:'[A-Za-z]+)?", re.UNICODE)
 _PLACEHOLDER_RE = re.compile(r"\{[^{}]+\}")
 _DIGIT_LED_NUMERIC_OCR_ZERO_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?P<token>[0-9][0-9Oo]*[Oo][0-9Oo]*)(?![A-Za-z0-9])"
+    r"(?<![A-Za-z0-9])(?P<token>[0-9][0-9Oo.,]*[Oo][0-9Oo.,]*)(?![A-Za-z0-9])"
+)
+_GLUED_QUANTITY_OCR_RE = re.compile(
+    r"\b(?P<prefix>is|was|were|are|has|have|had|about|around|over|under|nearly|"
+    r"almost|approximately|at|from|to|worth|costs?|scores?|scored|ranks?|ranked|"
+    r"levels?|lv)"
+    r"(?P<number>[0-9][0-9Oo]*(?:[.,][0-9Oo]+)*)"
+    r"(?=\s*(?:%|points?|won|gold|coins?|credits?|dollars?|usd|kills?|players?|"
+    r"years?|days?|hours?|minutes?|seconds?|percent|thousand|million|billion|trillion)\b)",
+    re.IGNORECASE,
 )
 _ENGLISH_WORDS = frozenset(
     """
@@ -264,9 +273,17 @@ def _entities_equivalent(
 def repair_source_numeric_ocr_confusions(text: str) -> str:
     """Repair O/0 confusion only inside digit-led numeric OCR tokens."""
 
+    source = str(text or "")
+    source = _GLUED_QUANTITY_OCR_RE.sub(
+        lambda match: (
+            f'{match.group("prefix")} '
+            f'{match.group("number").replace("O", "0").replace("o", "0")}'
+        ),
+        source,
+    )
     return _DIGIT_LED_NUMERIC_OCR_ZERO_RE.sub(
         lambda match: match.group("token").replace("O", "0").replace("o", "0"),
-        str(text or ""),
+        source,
     )
 
 
