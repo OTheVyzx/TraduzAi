@@ -452,17 +452,20 @@ def test_runner_uses_full_deterministic_owner_translation_retry_budget() -> None
         "google",
         "ollama",
         "ollama",
+        "ocr_recovery",
     ]
     assert [control.variant for control in controls] == [
         "owner_primary",
         "owner_contextual",
         "owner_configured",
         "owner_contextual",
+        "owner_ocr_recovery",
     ]
-    assert [control.disable_cache for control in controls] == [False, True, False, True]
+    assert [control.disable_cache for control in controls] == [False, True, False, True, True]
     assert [control.provider_model for control in controls] == [
         None,
         None,
+        "qwen2.5:7b",
         "qwen2.5:7b",
         "qwen2.5:7b",
     ]

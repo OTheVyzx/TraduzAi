@@ -6513,6 +6513,12 @@ def _build_owner_translation_attempt_controls(control_type, *, ollama_model: str
             disable_cache=True,
             provider_model=ollama_model,
         ),
+        control_type(
+            backend="ocr_recovery",
+            variant="owner_ocr_recovery",
+            disable_cache=True,
+            provider_model=ollama_model,
+        ),
     )
 
 
