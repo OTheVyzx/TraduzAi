@@ -82,6 +82,12 @@ def compute_page_acceptance_metrics(result) -> PageAcceptanceMetrics:
         or not bindings[owner_id].target_text.strip()
         or bindings[owner_id].target_locale.casefold() not in {"pt-br", "pt_br"}
     )
+    no_repaint_owners = {
+        owner_id
+        for owner_id, binding in bindings.items()
+        if owner_id in required_owners and binding.preserves_original_pixels
+    }
+    required_execution_owners = required_owners - no_repaint_owners
     committed = {
         str(getattr(item, "owner_id", ""))
         for item in result.page_commits
@@ -89,12 +95,13 @@ def compute_page_acceptance_metrics(result) -> PageAcceptanceMetrics:
         and bool(getattr(item, "translation_binding_sha256", ""))
     }
     materialized = {item.owner_id for item in result.owner_target_materializations}
-    missing_commit = len(required_owners - committed)
-    missing_materialization = len(required_owners - materialized)
+    missing_commit = len(required_execution_owners - committed)
+    missing_materialization = len(required_execution_owners - materialized)
     terminal_components = {
         component_id
         for owner in graph.owners
-        if owner.owner_id in committed and owner.owner_id in materialized
+        if owner.owner_id in no_repaint_owners
+        or (owner.owner_id in committed and owner.owner_id in materialized)
         for component_id in owner.component_ids
     }
     missing_terminal = sum(

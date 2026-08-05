@@ -42,3 +42,45 @@ def test_audit_cli_returns_nonzero_on_controlled_failure(tmp_path, monkeypatch):
         "--report", str(tmp_path / "audit.json"), "--review-dir", str(tmp_path / "review"),
         "--require-final-verified",
     ]) == 1
+
+
+def test_metrics_treat_verified_no_repaint_owner_as_terminal_without_fake_commit():
+    owner = SimpleNamespace(
+        owner_id="owner-already-ptbr",
+        disposition="owned",
+        route_action="translate_inpaint_render",
+        component_ids=("component-already-ptbr",),
+    )
+    graph = SimpleNamespace(owners=(owner,))
+    result = SimpleNamespace(
+        owner_graph=SimpleNamespace(read=lambda: graph),
+        terminal_proof=None,
+        qa_probes=(),
+        language_residual_issues=(),
+        coverage=SimpleNamespace(
+            entries=(
+                SimpleNamespace(
+                    component_id="component-already-ptbr",
+                    materiality="material",
+                    ocr_attempt_ids=("attempt-1",),
+                ),
+            )
+        ),
+        translations=(
+            SimpleNamespace(
+                owner_id="owner-already-ptbr",
+                target_text="COMO ESPERADO DE KIM SIHYEOK!",
+                target_locale="pt-BR",
+                preserves_original_pixels=True,
+            ),
+        ),
+        page_commits=(),
+        owner_target_materializations=(),
+    )
+
+    metrics = auditor.compute_page_acceptance_metrics(result)
+
+    assert metrics.owners_without_valid_pt_br == 0
+    assert metrics.owners_without_atomic_cleanup_render == 0
+    assert metrics.owners_without_target_materialization == 0
+    assert metrics.material_components_without_terminal_lifecycle == 0
