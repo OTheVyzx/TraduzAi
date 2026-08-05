@@ -5,6 +5,7 @@ Batching para máxima performance na GPU
 """
 
 import copy
+from dataclasses import replace
 import logging
 import math
 import os
@@ -234,6 +235,38 @@ def execute_hash_bound_provider_attempt(
             )
         )
     return attempt, _ProviderRecordBatch(records, raw_result)
+
+
+def _records_in_page_space(
+    records: tuple[OCRObservationRecord, ...],
+    *,
+    bbox_page: tuple[int, int, int, int],
+    input_width: int,
+    input_height: int,
+) -> tuple[OCRObservationRecord, ...]:
+    """Project provider-local geometry back into the authoritative page."""
+
+    x1, y1, x2, y2 = bbox_page
+    scale_x = (x2 - x1) / float(max(1, input_width))
+    scale_y = (y2 - y1) / float(max(1, input_height))
+
+    def point(value: tuple[int, int]) -> tuple[int, int]:
+        return (
+            int(round(x1 + value[0] * scale_x)),
+            int(round(y1 + value[1] * scale_y)),
+        )
+
+    projected: list[OCRObservationRecord] = []
+    for record in records:
+        polygon = tuple(point(value) for value in record.polygon_page)
+        if polygon:
+            xs = [value[0] for value in polygon]
+            ys = [value[1] for value in polygon]
+            bbox = (min(xs), min(ys), max(xs), max(ys))
+        else:
+            bbox = bbox_page
+        projected.append(replace(record, bbox_page=bbox, polygon_page=polygon))
+    return tuple(projected)
 
 
 class OcrBackendUnavailable(RuntimeError):
@@ -991,7 +1024,7 @@ class OCREngine:
         blocks: list,
         *,
         request: OCRRequest,
-        **_options,
+        **options,
     ) -> OCRInvocationResult:
         """Recognize one page and return all evidence in one immutable value."""
 
@@ -1004,19 +1037,39 @@ class OCREngine:
         provider = getattr(model, "ocr", None)
         if not callable(provider):
             raise OcrBackendUnavailable("PaddleOCR provider is unavailable")
-        transform_spec = OCRTransformSpec.build((OCRTransformOperation(kind="identity"),))
+        operations = [OCRTransformOperation(kind="identity")]
+        if bool(options.get("force_downscale")):
+            operations.append(
+                OCRTransformOperation(
+                    kind="resize",
+                    output_size=(
+                        max(1, root_rgb.shape[1] // 2),
+                        max(1, root_rgb.shape[0] // 2),
+                    ),
+                    interpolation="area",
+                )
+            )
+        transform_spec = OCRTransformSpec.build(tuple(operations))
+        provider_rgb = transform_spec.replay(root_rgb)
         attempt, full_page_lines = execute_hash_bound_provider_attempt(
             request=request,
             root_input_rgb=root_rgb,
-            actual_input_rgb=root_rgb,
+            actual_input_rgb=provider_rgb,
             transform_spec=transform_spec,
             variant_id="full_page",
             provider=provider,
-            expected_input_pixel_sha256=request.root_input_pixel_sha256,
+            expected_input_pixel_sha256=canonical_page_sha256(provider_rgb),
             input_kind="full_page",
             provider_kwargs={"det": True, "rec": True, "cls": False},
             source="paddle_full_page",
         )
+        if provider_rgb.shape[:2] != root_rgb.shape[:2]:
+            full_page_lines = _records_in_page_space(
+                full_page_lines,
+                bbox_page=(0, 0, root_rgb.shape[1], root_rgb.shape[0]),
+                input_width=provider_rgb.shape[1],
+                input_height=provider_rgb.shape[0],
+            )
 
         output_blocks: list[OCRBlock] = []
         if blocks:
@@ -1067,6 +1120,98 @@ class OCREngine:
             full_page_lines=full_page_lines,
             attempts=(attempt,),
             diagnostics=diagnostics,
+        )
+
+    def recognize_region_with_evidence(
+        self,
+        page_rgb: np.ndarray,
+        *,
+        bbox_page: tuple[int, int, int, int],
+        request: OCRRequest,
+        variants: tuple[str, ...] = ("anchored_crop",),
+        stop_on_first_text: bool = False,
+    ) -> OCRInvocationResult:
+        """Run hash-bound OCR variants for one component-anchored page crop."""
+
+        root_rgb = _normalize_ocr_rgb(page_rgb)
+        if request.root_input_pixel_sha256 != canonical_page_sha256(root_rgb):
+            raise OCRInputPixelIdentityError("OCR request is not bound to the supplied page")
+        x1, y1, x2, y2 = tuple(int(value) for value in bbox_page)
+        if x1 < 0 or y1 < 0 or x2 > root_rgb.shape[1] or y2 > root_rgb.shape[0] or x2 <= x1 or y2 <= y1:
+            raise ValueError("anchored OCR bbox is outside the supplied page")
+        if getattr(self, "_backend", "") != "paddleocr":
+            raise OcrBackendUnavailable("atomic anchored OCR currently requires PaddleOCR")
+        provider = getattr(getattr(self, "_model", None), "ocr", None)
+        if not callable(provider):
+            raise OcrBackendUnavailable("PaddleOCR provider is unavailable")
+
+        attempts: list[OCRAttempt] = []
+        observations: list[OCRObservationRecord] = []
+        for ordinal, variant in enumerate(tuple(variants), 1):
+            operations: list[OCRTransformOperation] = [
+                OCRTransformOperation(kind="crop", bbox_page=(x1, y1, x2, y2))
+            ]
+            if variant == "gray":
+                operations.append(OCRTransformOperation(kind="grayscale_to_rgb"))
+            elif variant == "inverted":
+                operations.append(OCRTransformOperation(kind="invert"))
+            elif variant == "scale_2x":
+                operations.append(
+                    OCRTransformOperation(
+                        kind="resize",
+                        output_size=((x2 - x1) * 2, (y2 - y1) * 2),
+                        interpolation="cubic",
+                    )
+                )
+            elif variant not in {"native", "anchored_crop"}:
+                raise ValueError(f"unsupported anchored OCR variant: {variant}")
+            transform_spec = OCRTransformSpec.build(tuple(operations))
+            provider_rgb = transform_spec.replay(root_rgb)
+            attempt, records = execute_hash_bound_provider_attempt(
+                request=request,
+                root_input_rgb=root_rgb,
+                actual_input_rgb=provider_rgb,
+                transform_spec=transform_spec,
+                variant_id=variant,
+                provider=provider,
+                expected_input_pixel_sha256=canonical_page_sha256(provider_rgb),
+                input_bbox_page=(x1, y1, x2, y2),
+                input_kind="anchored_crop",
+                provider_kwargs={"det": True, "rec": True, "cls": False},
+                attempt_ordinal=ordinal,
+                source=f"paddle_anchored_{variant}",
+            )
+            attempts.append(attempt)
+            observations.extend(
+                _records_in_page_space(
+                    records,
+                    bbox_page=(x1, y1, x2, y2),
+                    input_width=provider_rgb.shape[1],
+                    input_height=provider_rgb.shape[0],
+                )
+            )
+            if stop_on_first_text and records:
+                break
+
+        blocks = tuple(
+            OCRBlock(
+                f"anchored_block_{index:04d}",
+                record.text,
+                record.confidence,
+                record.bbox_page,
+                record.polygon_page,
+            )
+            for index, record in enumerate(observations, 1)
+        )
+        return OCRInvocationResult.build(
+            request=request,
+            blocks=blocks,
+            observations=tuple(observations),
+            attempts=tuple(attempts),
+            diagnostics=OCRDiagnostics(
+                request.provider_family,
+                {"bbox_page": list(bbox_page), "variants": list(variants)},
+            ),
         )
 
     def recognize_batch(self, crops: list[np.ndarray]) -> list[str]:

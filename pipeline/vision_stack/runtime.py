@@ -3799,7 +3799,22 @@ def _atomic_ocr_record_to_runtime_dict(record) -> dict:
         "accepted": bool(str(getattr(record, "text", "") or "").strip()),
         "rejection_reason": None,
         "request_identity": list(getattr(record, "request_identity", ()) or ()),
+        "run_id": str(getattr(record, "run_id", "") or ""),
+        "origin_execution_id": str(
+            getattr(record, "origin_execution_id", "") or ""
+        ),
+        "page_id": str(getattr(record, "page_id", "") or ""),
+        "page_source_sha256": str(
+            getattr(record, "page_source_sha256", "") or ""
+        ),
+        "root_input_pixel_sha256": str(
+            getattr(record, "root_input_pixel_sha256", "") or ""
+        ),
         "input_pixel_sha256": str(getattr(record, "input_pixel_sha256", "") or ""),
+        "invocation_id": str(getattr(record, "invocation_id", "") or ""),
+        "provider_family": str(getattr(record, "provider_family", "") or ""),
+        "variant_id": str(getattr(record, "variant_id", "") or ""),
+        "payload_sha256": str(getattr(record, "payload_sha256", "") or ""),
     }
 
 
@@ -3848,6 +3863,38 @@ def _supports_atomic_ocr_evidence(engine: object) -> bool:
     """
 
     return callable(getattr(type(engine), "recognize_page_with_evidence", None))
+
+
+def run_page_coverage_ocr(
+    page_rgb: np.ndarray,
+    *,
+    request: OCRRequest,
+    bbox_page: tuple[int, int, int, int] | None,
+    variants: tuple[str, ...],
+    source_language: str = "en",
+):
+    """Run the immutable OCR boundary used by page-global coverage."""
+
+    engine = _get_ocr_engine("max", lang=source_language)
+    if not _supports_atomic_ocr_evidence(engine):
+        raise RuntimeError("page coverage requires atomic OCR evidence support")
+    if bbox_page is None:
+        return engine.recognize_page_with_evidence(
+            page_rgb,
+            [],
+            request=request,
+            force_full_page=True,
+        )
+    recognize_region = getattr(type(engine), "recognize_region_with_evidence", None)
+    if not callable(recognize_region):
+        raise RuntimeError("page coverage requires anchored OCR evidence support")
+    return engine.recognize_region_with_evidence(
+        page_rgb,
+        bbox_page=bbox_page,
+        request=request,
+        variants=variants,
+        stop_on_first_text=True,
+    )
 
 
 def _normalize_engine_observation_records_to_tile(records, blocks: list | None = None) -> list[dict]:

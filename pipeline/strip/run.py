@@ -21,6 +21,8 @@ import cv2
 import numpy as np
 
 from compositor.owner_compositor import OwnerCompositionError, _array_sha256, compose_page
+from ownership.coverage import PageCoverageResult, complete_page_coverage
+from ownership.hash_contract import canonical_page_sha256
 from ownership.model import (
     OwnerGlyphPatch,
     OwnerExecutionCommit,
@@ -2711,6 +2713,85 @@ def _discover_source_components_for_strip(strip: VerticalStrip, balloons: list) 
 
     strip.source_components_by_page = result
     return result
+
+
+def _source_page_images_by_id(strip: VerticalStrip) -> dict[str, np.ndarray]:
+    breaks = [int(value) for value in list(strip.source_page_breaks or [])]
+    if not breaks or breaks[0] != 0:
+        breaks.insert(0, 0)
+    if breaks[-1] != int(strip.height):
+        breaks.append(int(strip.height))
+    offsets = [int(value) for value in list(strip.page_x_offsets or [])]
+    widths = [
+        int(value) for value in list(getattr(strip, "source_page_widths", None) or [])
+    ]
+    pages: dict[str, np.ndarray] = {}
+    for index, (page_y0, page_y1) in enumerate(zip(breaks, breaks[1:])):
+        page_x0 = offsets[index] if index < len(offsets) else 0
+        page_x1 = (
+            page_x0 + widths[index]
+            if index < len(widths) and widths[index] > 0
+            else int(strip.width) - page_x0
+        )
+        page_x0 = max(0, min(int(strip.width), page_x0))
+        page_x1 = max(0, min(int(strip.width), page_x1))
+        if page_x1 <= page_x0:
+            page_x0, page_x1 = 0, int(strip.width)
+        pages[f"page_{index + 1:03d}"] = np.ascontiguousarray(
+            strip.image[page_y0:page_y1, page_x0:page_x1, :], dtype=np.uint8
+        )
+    return pages
+
+
+def _complete_page_coverages_for_strip(
+    strip: VerticalStrip,
+    source_components_by_page: dict[str, list],
+    *,
+    runtime,
+    run_id: str,
+    origin_execution_id: str,
+    idioma_origem: str,
+) -> dict[str, PageCoverageResult]:
+    runtime_runner = getattr(type(runtime), "run_page_coverage_ocr", None)
+    if callable(runtime_runner):
+        def ocr_runner(page_rgb, **kwargs):
+            return runtime_runner(runtime, page_rgb, **kwargs)
+    elif callable(getattr(type(runtime), "run_ocr_stage", None)):
+        from vision_stack.runtime import run_page_coverage_ocr
+
+        def ocr_runner(page_rgb, **kwargs):
+            return run_page_coverage_ocr(
+                page_rgb,
+                source_language=idioma_origem,
+                **kwargs,
+            )
+    else:
+        ocr_runner = None
+
+    results: dict[str, PageCoverageResult] = {}
+    for page_id, page_rgb in sorted(_source_page_images_by_id(strip).items()):
+        components = tuple(source_components_by_page.get(page_id) or ())
+        page_sha256 = canonical_page_sha256(page_rgb)
+        if ocr_runner is None:
+            results[page_id] = PageCoverageResult.initialize(
+                run_id=run_id,
+                origin_execution_id=origin_execution_id,
+                page_id=page_id,
+                page_source_sha256=page_sha256,
+                components=components,
+            )
+            continue
+        results[page_id] = complete_page_coverage(
+            page_rgb,
+            run_id=run_id,
+            origin_execution_id=origin_execution_id,
+            page_id=page_id,
+            page_source_sha256=page_sha256,
+            components=components,
+            band_evidence=(),
+            ocr_runner=ocr_runner,
+        )
+    return results
 
 
 def _build_scheduler_executor_report(*, band_count: int, page_count: int) -> dict | None:
@@ -6088,6 +6169,24 @@ def run_chapter(
             )
             chapter_telemetry["source_component_page_count"] = len(source_components_by_page)
 
+        page_coverages_by_page: dict[str, PageCoverageResult] = {}
+        if owner_graph_mode != "legacy":
+            coverage_execution_nonce = time.time_ns()
+            with _timed(chapter_telemetry, "page_ocr_coverage"):
+                page_coverages_by_page = _complete_page_coverages_for_strip(
+                    strip,
+                    source_components_by_page,
+                    runtime=runtime,
+                    run_id=f"strip-run-{coverage_execution_nonce}",
+                    origin_execution_id=f"strip-execution-{coverage_execution_nonce}",
+                    idioma_origem=idioma_origem,
+                )
+            if chapter_telemetry is not None:
+                chapter_telemetry["page_coverage_count"] = len(page_coverages_by_page)
+                chapter_telemetry["page_coverage_observation_count"] = sum(
+                    len(item.observations) for item in page_coverages_by_page.values()
+                )
+
         with _timed(chapter_telemetry, "strip_group_bands"):
             band_margin = _strip_band_margin_px(idioma_origem)
             bands = group_balloons_into_bands(
@@ -6219,13 +6318,11 @@ def run_chapter(
                 return evidence
 
             def _resolve_owner_page(page_id: str, evidence: list) -> OwnerGraph:
-                if evidence:
-                    return _resolve_owner_graph_from_evidence(page_id, evidence)
-                placeholder = SimpleNamespace(
-                    components=list(source_components_by_page.get(page_id) or []),
-                    observations=[],
-                )
-                return _resolve_owner_graph_from_evidence(page_id, [placeholder])
+                del evidence
+                coverage = page_coverages_by_page.get(page_id)
+                if coverage is None:
+                    raise ValueError(f"page coverage is missing before owner resolution: {page_id}")
+                return _resolve_owner_graph_from_evidence(page_id, [coverage])
 
             with _timed(chapter_telemetry, "owner_control_plane"):
                 owner_graphs = _run_owner_control_plane(

@@ -21,7 +21,7 @@ from vision_stack.ocr import (
     normalize_easyocr_languages,
     normalize_paddleocr_language,
 )
-from ownership.hash_contract import canonical_page_sha256, sha256_text
+from ownership.hash_contract import canonical_page_sha256, sha256_bytes, sha256_text
 from ownership.ocr_contract import (
     OCRAttempt,
     OCRBlock,
@@ -698,6 +698,98 @@ class PaddleBlockMappingTests(unittest.TestCase):
         engine.batch_size = 8
         return engine
 
+    def test_full_page_ocr_runs_with_empty_detector_blocks(self):
+        engine = self._engine_with_lines(
+            [([[10, 10], [90, 10], [90, 30], [10, 30]], ("VISIBLE ENGLISH", 0.97))]
+        )
+        result = engine.recognize_page_with_evidence(
+            _contract_page(),
+            [],
+            request=_contract_request(),
+            force_full_page=True,
+        )
+
+        self.assertEqual([line.text for line in result.full_page_lines], ["VISIBLE ENGLISH"])
+
+    def test_full_page_attempt_hashes_exact_array_passed_to_provider(self):
+        received = []
+
+        class CapturingPaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del det, rec, cls
+                received.append(image.copy())
+                return _raw_ocr("DOWNSCALED")
+
+        page = np.arange(64 * 96 * 3, dtype=np.uint8).reshape(64, 96, 3)
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = CapturingPaddleModel()
+        result = engine.recognize_page_with_evidence(
+            page,
+            [],
+            request=_contract_request(root=page),
+            force_downscale=True,
+        )
+        attempt = result.attempts[0]
+
+        self.assertEqual(attempt.root_input_pixel_sha256, canonical_page_sha256(page))
+        self.assertEqual(attempt.input_pixel_sha256, canonical_page_sha256(received[0]))
+        self.assertNotEqual(attempt.input_pixel_sha256, attempt.root_input_pixel_sha256)
+        self.assertEqual((attempt.input_width, attempt.input_height), (48, 32))
+
+    def test_anchored_crop_attempt_hashes_crop_pixels_not_page_pixels(self):
+        page = np.arange(64 * 96 * 3, dtype=np.uint8).reshape(64, 96, 3)
+        engine = self._engine_with_lines(
+            [([[1, 1], [30, 1], [30, 12], [1, 12]], ("CROP", 0.95))]
+        )
+        result = engine.recognize_region_with_evidence(
+            page,
+            bbox_page=(7, 11, 83, 41),
+            request=_contract_request(root=page, invocation_id="anchored-crop"),
+            variants=("anchored_crop",),
+        )
+        attempt = result.attempts[0]
+        expected_crop = page[11:41, 7:83]
+
+        self.assertEqual(attempt.root_input_pixel_sha256, canonical_page_sha256(page))
+        self.assertEqual(attempt.input_pixel_sha256, canonical_page_sha256(expected_crop))
+        self.assertNotEqual(attempt.input_pixel_sha256, attempt.root_input_pixel_sha256)
+        self.assertEqual(attempt.input_bbox_page, (7, 11, 83, 41))
+
+    def test_each_retry_variant_hashes_exact_provider_pixels(self):
+        received = []
+
+        class CapturingPaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                del det, rec, cls
+                received.append(image.copy())
+                return _raw_ocr("VARIANT")
+
+        page = np.arange(64 * 96 * 3, dtype=np.uint8).reshape(64, 96, 3)
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = CapturingPaddleModel()
+        result = engine.recognize_region_with_evidence(
+            page,
+            bbox_page=(7, 11, 83, 41),
+            request=_contract_request(root=page, invocation_id="retry-variants"),
+            variants=("native", "gray", "inverted", "scale_2x"),
+        )
+
+        self.assertEqual(len(result.attempts), 4)
+        for attempt, provider_rgb in zip(result.attempts, received):
+            with self.subTest(variant=attempt.variant_id):
+                self.assertEqual(attempt.input_pixel_sha256, canonical_page_sha256(provider_rgb))
+                self.assertEqual(
+                    (attempt.input_width, attempt.input_height),
+                    (provider_rgb.shape[1], provider_rgb.shape[0]),
+                )
+                self.assertEqual(
+                    attempt.transform_spec.sha256,
+                    sha256_bytes(attempt.transform_spec.canonical_json_bytes),
+                )
+                self.assertTrue(np.array_equal(attempt.transform_spec.replay(page), provider_rgb))
+
     def test_full_page_line_records_are_request_scoped_across_parallel_pages(self):
         barrier = __import__("threading").Barrier(2)
 
@@ -746,6 +838,29 @@ class PaddleBlockMappingTests(unittest.TestCase):
             self.assertEqual(record.attempt_identity, attempt.identity)
             self.assertEqual(record.root_input_pixel_sha256, request.root_input_pixel_sha256)
             self.assertEqual(record.input_pixel_sha256, attempt.input_pixel_sha256)
+
+    def test_runtime_record_preserves_complete_atomic_identity(self):
+        from vision_stack.runtime import _atomic_ocr_record_to_runtime_dict
+
+        request = _contract_request("page_010", run_id="run-a", origin_execution_id="exec-a")
+        _attempt, record = _attempt_and_record(request, text="CURRENT PAGE")
+
+        payload = _atomic_ocr_record_to_runtime_dict(record)
+
+        for field_name in (
+            "run_id",
+            "origin_execution_id",
+            "page_id",
+            "page_source_sha256",
+            "root_input_pixel_sha256",
+            "input_pixel_sha256",
+            "invocation_id",
+            "attempt_id",
+            "provider_family",
+            "variant_id",
+            "payload_sha256",
+        ):
+            self.assertEqual(payload[field_name], getattr(record, field_name))
 
     def test_ocr_result_rejects_record_with_mismatched_request_identity(self):
         request = _contract_request("page_010", run_id="run-a")

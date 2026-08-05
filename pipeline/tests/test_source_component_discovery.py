@@ -22,6 +22,8 @@ from ownership.discovery import (  # noqa: E402
     discover_source_text_components,
 )
 from ownership.reconcile import build_page_owner_graph  # noqa: E402
+from ownership.coverage import PageCoverageResult  # noqa: E402
+from ownership.hash_contract import canonical_page_sha256  # noqa: E402
 
 
 def _overlap_ratio(left, right) -> float:
@@ -66,6 +68,29 @@ def test_discovers_textlike_component_omitted_by_primary_ocr(surface: str) -> No
     assert components
     assert any(_overlap_ratio(component.bbox_page, expected_text_bbox) >= 0.45 for component in components)
     assert any("glyph_scan" in component.detector_sources for component in components)
+
+
+def test_source_discovery_keeps_material_glyph_component_outside_all_bands() -> None:
+    image, expected_text_bbox = _synthetic_text_surface("dark_panel")
+
+    components = discover_source_text_components(
+        image,
+        page_id="page_001",
+        detector_regions=[],
+    )
+    coverage = PageCoverageResult.initialize(
+        run_id="run-a",
+        origin_execution_id="exec-a",
+        page_id="page_001",
+        page_source_sha256=canonical_page_sha256(image),
+        components=tuple(components),
+    )
+
+    assert any(
+        _overlap_ratio(component.bbox_page, expected_text_bbox) >= 0.45
+        for component in coverage.components
+    )
+    assert all(entry.materiality == "material" for entry in coverage.entries)
 
 
 def test_discovery_does_not_depend_on_accepted_text_layers() -> None:
@@ -869,7 +894,7 @@ def test_unresolved_textlike_component_blocks_instead_of_disappearing() -> None:
         semantic_regions=[],
     )
 
-    assert graph.validate() == []
+    assert not graph.validate()
     assert graph.owners
     assert all(owner.state == "review_required" for owner in graph.owners)
     assert all(owner.route_action == "review_required" for owner in graph.owners)

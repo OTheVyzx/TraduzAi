@@ -2,8 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Literal, Sequence
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, fields, replace
+import json
+from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
+
+from .ocr_contract import (
+    OCRAttempt,
+    OCRBlock,
+    OCRDiagnostics,
+    OCRInvocationResult,
+    OCRObservationRecord,
+    OCRRequest,
+    OCRTransformOperation,
+    OCRTransformSpec,
+    normalize_ocr_payload_text,
+)
+
+if TYPE_CHECKING:
+    import numpy as np
+    from .model import SourceTextComponent, TextObservation
 
 from .hash_contract import canonical_json_bytes, canonical_json_sha256, sha256_bytes
 
@@ -39,6 +57,10 @@ class CoverageRecoveryExhausted(CoverageInvariantError):
     """Raised when a recovery chain reaches an exhausted decision."""
 
 
+class CoverageIdentityError(CoverageInvariantError):
+    """Raised when evidence crosses a page/run/execution identity boundary."""
+
+
 def _jsonable(value: object) -> object:
     """Convert immutable contract values to canonical-JSON containers."""
 
@@ -46,7 +68,7 @@ def _jsonable(value: object) -> object:
         return [_jsonable(item) for item in value]
     if isinstance(value, list):
         return [_jsonable(item) for item in value]
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
     return value
 
@@ -147,6 +169,10 @@ class CoverageRecoveryRequest:
     next_strategy: str | None
     request_sha256: str
 
+    @classmethod
+    def build(cls, **values: object) -> "CoverageRecoveryRequest":
+        return build_recovery_request(**values)  # type: ignore[arg-type]
+
     def __post_init__(self) -> None:
         _require_identity(
             self.request_id,
@@ -222,6 +248,10 @@ class CoverageRecoveryDecision:
     evidence_ids: tuple[str, ...]
     next_strategy: str | None
     decision_sha256: str
+
+    @classmethod
+    def build(cls, **values: object) -> "CoverageRecoveryDecision":
+        return build_recovery_decision(**values)  # type: ignore[arg-type]
 
     def __post_init__(self) -> None:
         _require_identity(
@@ -360,6 +390,20 @@ class PageCoverageLedger:
     @property
     def expected_component_ids(self) -> tuple[str, ...]:
         return tuple(item.component_id for item in self.component_inventory)
+
+    def entry(self, component_id: str) -> CoverageEntry:
+        matches = tuple(item for item in self.entries if item.component_id == component_id)
+        if len(matches) != 1:
+            raise CoverageInvariantError(
+                f"coverage entry identity is not unique: {component_id}"
+            )
+        return matches[0]
+
+    def entry_for_bbox(self, bbox: BBox) -> CoverageEntry:
+        matches = tuple(item for item in self.entries if item.bbox_page == tuple(bbox))
+        if len(matches) != 1:
+            raise CoverageInvariantError(f"coverage bbox identity is not unique: {bbox}")
+        return matches[0]
 
     def require_complete(self) -> None:
         _validate_inventory_snapshot(self)
@@ -910,3 +954,801 @@ def validate_recovery_chain(
             raise CoverageRecoveryExhausted(
                 f"coverage recovery exhausted: {decision.decision_id}"
             )
+
+
+def _component_payload(component: "SourceTextComponent") -> dict[str, object]:
+    return _jsonable(asdict(component))  # type: ignore[return-value]
+
+
+def _observation_payload(observation: "TextObservation") -> dict[str, object]:
+    return _jsonable(asdict(observation))  # type: ignore[return-value]
+
+
+def _request_json(request: OCRRequest) -> dict[str, object]:
+    return _jsonable(asdict(request))  # type: ignore[return-value]
+
+
+def _record_json(record: OCRObservationRecord) -> dict[str, object]:
+    return _jsonable(asdict(record))  # type: ignore[return-value]
+
+
+def _invocation_json(invocation: OCRInvocationResult) -> dict[str, object]:
+    return {
+        "request": _request_json(invocation.request),
+        "blocks": [
+            {
+                "block_id": item.block_id,
+                "text": item.text,
+                "confidence": item.confidence,
+                "bbox_page": list(item.bbox_page),
+                "polygon_page": [list(point) for point in item.polygon_page],
+                "extras": _jsonable(item.extras),
+            }
+            for item in invocation.blocks
+        ],
+        "observations": [_record_json(item) for item in invocation.observations],
+        "full_page_lines": [_record_json(item) for item in invocation.full_page_lines],
+        "attempts": [item.to_json() for item in invocation.attempts],
+        "attempt_chain_sha256": invocation.attempt_chain_sha256,
+        "diagnostics": {
+            "provider": invocation.diagnostics.provider,
+            "extras": _jsonable(invocation.diagnostics.extras),
+        },
+    }
+
+
+def _ledger_json(ledger: PageCoverageLedger) -> dict[str, object]:
+    return {
+        "payload": json.loads(ledger.canonical_json_bytes.decode("utf-8")),
+        "sha256": ledger.sha256,
+    }
+
+
+def _coverage_result_payload(values: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "run_id": values["run_id"],
+        "origin_execution_id": values["origin_execution_id"],
+        "page_id": values["page_id"],
+        "page_source_sha256": values["page_source_sha256"],
+        "ledger_history": [_ledger_json(item) for item in values["ledger_history"]],
+        "components": [_component_payload(item) for item in values["components"]],
+        "observations": [_observation_payload(item) for item in values["observations"]],
+        "ocr_requests": [_request_json(item) for item in values["ocr_requests"]],
+        "ocr_invocations": [_invocation_json(item) for item in values["ocr_invocations"]],
+        "recovery_requests": [
+            _jsonable(asdict(item)) for item in values["recovery_requests"]
+        ],
+        "recovery_decisions": [
+            _jsonable(asdict(item)) for item in values["recovery_decisions"]
+        ],
+        "pending_request_ids": list(values["pending_request_ids"]),
+    }
+
+
+def _require_append_only(previous: Sequence[object], current: Sequence[object], label: str) -> None:
+    if len(current) < len(previous) or tuple(current[: len(previous)]) != tuple(previous):
+        raise CoverageInvariantError(f"{label} history is not append-only")
+
+
+def _pending_recovery_request_ids(
+    requests: Sequence[CoverageRecoveryRequest],
+    decisions: Sequence[CoverageRecoveryDecision],
+) -> tuple[str, ...]:
+    terminal_by_request: dict[str, CoverageRecoveryDecision] = {}
+    scheduled_by_request: set[str] = set()
+    request_ids = {request.request_id for request in requests}
+    for decision in decisions:
+        if decision.request_id not in request_ids:
+            raise CoverageInvariantError(f"orphan recovery decision: {decision.decision_id}")
+        if decision.status == "scheduled":
+            if decision.request_id in scheduled_by_request or decision.request_id in terminal_by_request:
+                raise CoverageInvariantError("recovery scheduled decision is duplicated or late")
+            scheduled_by_request.add(decision.request_id)
+            continue
+        if decision.request_id in terminal_by_request:
+            raise CoverageInvariantError("recovery request has multiple terminal decisions")
+        terminal_by_request[decision.request_id] = decision
+    return tuple(
+        request.request_id
+        for request in requests
+        if request.request_id not in terminal_by_request
+    )
+
+
+def _identity_from_values(values: Mapping[str, object]) -> tuple[str, str, str, str]:
+    return (
+        str(values["run_id"]),
+        str(values["origin_execution_id"]),
+        str(values["page_id"]),
+        str(values["page_source_sha256"]),
+    )
+
+
+@dataclass(frozen=True)
+class PageCoverageResult:
+    """Immutable page-global coverage snapshot with append-only evidence."""
+
+    run_id: str
+    origin_execution_id: str
+    page_id: str
+    page_source_sha256: str
+    ledger_history: tuple[PageCoverageLedger, ...]
+    components: tuple["SourceTextComponent", ...]
+    observations: tuple["TextObservation", ...]
+    ocr_requests: tuple[OCRRequest, ...]
+    ocr_invocations: tuple[OCRInvocationResult, ...]
+    recovery_requests: tuple[CoverageRecoveryRequest, ...]
+    recovery_decisions: tuple[CoverageRecoveryDecision, ...]
+    pending_request_ids: tuple[str, ...]
+    canonical_json_bytes: bytes
+    sha256: str
+
+    def __post_init__(self) -> None:
+        values = self._values()
+        encoded = canonical_json_bytes(_coverage_result_payload(values))
+        if encoded != self.canonical_json_bytes:
+            raise CoverageInvariantError("coverage result canonical bytes mismatch")
+        if sha256_bytes(encoded) != self.sha256:
+            raise CoverageInvariantError("coverage result hash mismatch")
+        self._validate_snapshot()
+
+    def _values(self) -> dict[str, object]:
+        return {
+            field.name: getattr(self, field.name)
+            for field in fields(self)
+            if field.name not in {"canonical_json_bytes", "sha256"}
+        }
+
+    @classmethod
+    def _build(cls, **values: object) -> "PageCoverageResult":
+        normalized = dict(values)
+        normalized["ledger_history"] = tuple(normalized.get("ledger_history") or ())
+        normalized["components"] = tuple(normalized.get("components") or ())
+        normalized["observations"] = tuple(normalized.get("observations") or ())
+        normalized["ocr_requests"] = tuple(normalized.get("ocr_requests") or ())
+        normalized["ocr_invocations"] = tuple(normalized.get("ocr_invocations") or ())
+        normalized["recovery_requests"] = tuple(normalized.get("recovery_requests") or ())
+        normalized["recovery_decisions"] = tuple(normalized.get("recovery_decisions") or ())
+        derived_pending = _pending_recovery_request_ids(
+            normalized["recovery_requests"],
+            normalized["recovery_decisions"],
+        )
+        supplied_pending = normalized.get("pending_request_ids")
+        if supplied_pending is not None and tuple(supplied_pending) != derived_pending:
+            raise CoverageInvariantError("pending recovery request view is inconsistent")
+        normalized["pending_request_ids"] = derived_pending
+        encoded = canonical_json_bytes(_coverage_result_payload(normalized))
+        return cls(
+            **normalized,
+            canonical_json_bytes=encoded,
+            sha256=sha256_bytes(encoded),
+        )
+
+    @classmethod
+    def initialize(
+        cls,
+        *,
+        run_id: str,
+        origin_execution_id: str,
+        page_id: str,
+        page_source_sha256: str,
+        components: tuple["SourceTextComponent", ...],
+    ) -> "PageCoverageResult":
+        inventory = tuple(
+            build_component_inventory_entry(
+                component_id=component.component_id,
+                origin="discovery",
+                introduced_by_decision_id=None,
+                anchor_polygon_page=component.polygon_page,
+                ordinal=index,
+            )
+            for index, component in enumerate(components)
+        )
+        entries = tuple(
+            CoverageEntry(
+                component_id=component.component_id,
+                run_id=run_id,
+                origin_execution_id=origin_execution_id,
+                page_id=page_id,
+                page_source_sha256=page_source_sha256,
+                bbox_page=component.bbox_page,
+                polygon_page=component.polygon_page,
+                materiality="material",
+            )
+            for component in components
+        )
+        ledger = build_page_coverage_ledger(
+            run_id=run_id,
+            origin_execution_id=origin_execution_id,
+            page_id=page_id,
+            page_source_sha256=page_source_sha256,
+            inventory_version=1,
+            parent_ledger_sha256=None,
+            component_inventory=inventory,
+            expected_observation_ids=(),
+            entries=entries,
+        )
+        return cls._build(
+            run_id=run_id,
+            origin_execution_id=origin_execution_id,
+            page_id=page_id,
+            page_source_sha256=page_source_sha256,
+            ledger_history=(ledger,),
+            components=components,
+            observations=(),
+            ocr_requests=(),
+            ocr_invocations=(),
+            recovery_requests=(),
+            recovery_decisions=(),
+        )
+
+    @classmethod
+    def build_from(cls, previous: "PageCoverageResult", **changes: object) -> "PageCoverageResult":
+        values = previous._values()
+        values.update(changes)
+        if "pending_request_ids" not in changes:
+            values["pending_request_ids"] = None
+        if _identity_from_values(values) != (
+            previous.run_id,
+            previous.origin_execution_id,
+            previous.page_id,
+            previous.page_source_sha256,
+        ):
+            raise CoverageIdentityError("coverage successor changed page identity")
+        if "ledger_history" not in changes and any(
+            name in changes
+            for name in ("observations", "recovery_requests", "recovery_decisions")
+        ):
+            observations = tuple(values["observations"])
+            observation_by_component: dict[str, list[object]] = {}
+            for observation in observations:
+                for component_id in observation.component_ids:
+                    observation_by_component.setdefault(component_id, []).append(observation)
+            entries = tuple(
+                replace(
+                    entry,
+                    ocr_attempt_ids=tuple(
+                        dict.fromkeys(
+                            (
+                                *entry.ocr_attempt_ids,
+                                *(
+                                    item.attempt_id
+                                    for item in observation_by_component.get(
+                                        entry.component_id, ()
+                                    )
+                                ),
+                            )
+                        )
+                    ),
+                    observation_ids=tuple(
+                        item.observation_id
+                        for item in observation_by_component.get(entry.component_id, ())
+                    ),
+                    state=(
+                        "observed"
+                        if observation_by_component.get(entry.component_id)
+                        and entry.state in {"discovered", "challenged", "observed"}
+                        else entry.state
+                    ),
+                )
+                for entry in previous.ledger.entries
+            )
+            successor = build_page_coverage_ledger(
+                run_id=previous.run_id,
+                origin_execution_id=previous.origin_execution_id,
+                page_id=previous.page_id,
+                page_source_sha256=previous.page_source_sha256,
+                inventory_version=previous.ledger.inventory_version + 1,
+                parent_ledger_sha256=previous.ledger.sha256,
+                component_inventory=previous.ledger.component_inventory,
+                expected_observation_ids=tuple(
+                    item.observation_id for item in observations
+                ),
+                entries=entries,
+                observation_dispositions=previous.ledger.observation_dispositions,
+                recovery_requests=tuple(values["recovery_requests"]),
+                recovery_decisions=tuple(values["recovery_decisions"]),
+            )
+            values["ledger_history"] = (*previous.ledger_history, successor)
+        for name in (
+            "ledger_history",
+            "components",
+            "observations",
+            "ocr_requests",
+            "ocr_invocations",
+            "recovery_requests",
+            "recovery_decisions",
+        ):
+            _require_append_only(getattr(previous, name), tuple(values[name]), name)
+        if len(tuple(values["ledger_history"])) > len(previous.ledger_history) + 1:
+            raise CoverageInvariantError("coverage successor appended multiple ledger versions")
+        return cls._build(**values)
+
+    @property
+    def ledger(self) -> PageCoverageLedger:
+        if not self.ledger_history:
+            raise CoverageInvariantError("coverage result has no ledger")
+        return self.ledger_history[-1]
+
+    @property
+    def entries(self) -> tuple[CoverageEntry, ...]:
+        return self.ledger.entries
+
+    @property
+    def pending_requests(self) -> tuple[CoverageRecoveryRequest, ...]:
+        pending = set(self.pending_request_ids)
+        return tuple(item for item in self.recovery_requests if item.request_id in pending)
+
+    def entry(self, component_id: str) -> CoverageEntry:
+        return self.ledger.entry(component_id)
+
+    def entry_for_bbox(self, bbox: BBox) -> CoverageEntry:
+        return self.ledger.entry_for_bbox(bbox)
+
+    def _validate_snapshot(self) -> None:
+        identity = (self.run_id, self.origin_execution_id, self.page_id, self.page_source_sha256)
+        _require_identity(*identity)
+        _require_sha256(self.page_source_sha256, "page_source_sha256")
+        if not self.ledger_history:
+            raise CoverageInvariantError("coverage result requires ledger history")
+        for index, ledger in enumerate(self.ledger_history):
+            if (ledger.run_id, ledger.origin_execution_id, ledger.page_id, ledger.page_source_sha256) != identity:
+                raise CoverageIdentityError("coverage ledger belongs to another page execution")
+            if index == 0:
+                if ledger.parent_ledger_sha256 is not None:
+                    raise CoverageInvariantError("initial coverage ledger has a parent")
+            else:
+                previous = self.ledger_history[index - 1]
+                if ledger.parent_ledger_sha256 != previous.sha256:
+                    raise CoverageInvariantError("coverage parent_ledger_sha256 chain is broken")
+                if ledger.inventory_version != previous.inventory_version + 1:
+                    raise CoverageInvariantError("coverage ledger version chain is not monotonic")
+                if ledger.component_inventory != previous.component_inventory:
+                    validate_inventory_successor(previous, ledger)
+        component_ids = tuple(item.component_id for item in self.components)
+        if component_ids != self.ledger.expected_component_ids or len(component_ids) != len(set(component_ids)):
+            raise CoverageInvariantError("coverage components differ from ledger inventory")
+        outer_observation_ids = tuple(item.observation_id for item in self.observations)
+        if len(outer_observation_ids) != len(set(outer_observation_ids)) or tuple(
+            sorted(outer_observation_ids)
+        ) != tuple(self.ledger.expected_observation_ids):
+            raise CoverageInvariantError("coverage observations differ from ledger inventory")
+        if self.ledger.recovery_requests != self.recovery_requests:
+            raise CoverageInvariantError("coverage recovery requests differ from ledger")
+        if self.ledger.recovery_decisions != self.recovery_decisions:
+            raise CoverageInvariantError("coverage recovery decisions differ from ledger")
+
+        request_identities: set[tuple[str, ...]] = set()
+        for request in self.ocr_requests:
+            if request.identity[:4] != identity:
+                raise CoverageIdentityError("OCR request belongs to another page execution")
+            if request.identity in request_identities:
+                raise CoverageInvariantError("duplicate OCR request identity")
+            request_identities.add(request.identity)
+        invocation_by_id: dict[str, OCRInvocationResult] = {}
+        attempts_by_id: dict[str, OCRAttempt] = {}
+        for invocation in self.ocr_invocations:
+            if invocation.request.identity not in request_identities:
+                raise CoverageIdentityError("OCR invocation has no preserved request")
+            if invocation.invocation_id in invocation_by_id:
+                raise CoverageInvariantError("duplicate OCR invocation identity")
+            invocation_by_id[invocation.invocation_id] = invocation
+            for attempt in invocation.attempts:
+                if attempt.attempt_id in attempts_by_id:
+                    raise CoverageInvariantError("duplicate OCR attempt identity")
+                attempts_by_id[attempt.attempt_id] = attempt
+        observation_ids: set[str] = set()
+        for observation in self.observations:
+            if (
+                observation.run_id,
+                observation.origin_execution_id,
+                observation.page_id,
+                observation.page_source_sha256,
+            ) != identity:
+                raise CoverageIdentityError("OCR observation belongs to another page execution")
+            if observation.observation_id in observation_ids:
+                raise CoverageInvariantError("duplicate coverage observation identity")
+            observation_ids.add(observation.observation_id)
+            attempt = attempts_by_id.get(observation.attempt_id)
+            if attempt is None or attempt.invocation_id != observation.invocation_id:
+                raise CoverageInvariantError("coverage observation has orphan OCR attempt")
+            if observation.payload_sha256 != sha256_bytes(
+                normalize_ocr_payload_text(observation.text).encode("utf-8")
+            ):
+                raise CoverageInvariantError("coverage observation payload hash mismatch")
+        if tuple(item.request_id for item in self.recovery_requests) != tuple(
+            dict.fromkeys(item.request_id for item in self.recovery_requests)
+        ):
+            raise CoverageInvariantError("duplicate recovery request identity")
+        fingerprints = [item.attempt_fingerprint for item in self.recovery_requests]
+        if len(fingerprints) != len(set(fingerprints)):
+            raise CoverageInvariantError("duplicate recovery attempt_fingerprint")
+        for item in (*self.recovery_requests, *self.recovery_decisions):
+            if (item.run_id, item.origin_execution_id, item.page_id, item.page_source_sha256) != identity:
+                raise CoverageIdentityError("recovery evidence belongs to another page execution")
+        request_by_id = {item.request_id: item for item in self.recovery_requests}
+        for decision in self.recovery_decisions:
+            request = request_by_id.get(decision.request_id)
+            if request is None:
+                raise CoverageInvariantError(
+                    f"orphan recovery decision: {decision.decision_id}"
+                )
+            _validate_decision_against_request(request, decision)
+        if self.pending_request_ids != _pending_recovery_request_ids(
+            self.recovery_requests, self.recovery_decisions
+        ):
+            raise CoverageInvariantError("pending recovery request view is inconsistent")
+
+    def require_ready_for_ownership(self) -> None:
+        self._validate_snapshot()
+        if self.pending_request_ids:
+            raise CoverageInvariantError("coverage has pending recovery requests")
+        if self.recovery_requests or self.recovery_decisions:
+            validate_recovery_chain(self.recovery_requests, self.recovery_decisions)
+            terminal_by_request = {
+                item.request_id: item
+                for item in self.recovery_decisions
+                if item.status in {"succeeded", "failed", "exhausted"}
+            }
+            if any(item.status != "succeeded" for item in terminal_by_request.values() if not any(
+                child.parent_decision_id == item.decision_id for child in self.recovery_requests
+            )):
+                raise CoverageInvariantError("coverage recovery chain did not terminate in success")
+        attempt_ids = {
+            attempt.attempt_id
+            for invocation in self.ocr_invocations
+            for attempt in invocation.attempts
+        }
+        observation_ids = {item.observation_id for item in self.observations}
+        for entry in self.entries:
+            if entry.materiality == "material" and not entry.ocr_attempt_ids:
+                raise CoverageInvariantError(f"component lacks OCR attempt: {entry.component_id}")
+            if not set(entry.ocr_attempt_ids) <= attempt_ids:
+                raise CoverageInvariantError(f"component has orphan OCR attempt: {entry.component_id}")
+            if not set(entry.observation_ids) <= observation_ids:
+                raise CoverageInvariantError(f"component has orphan observation: {entry.component_id}")
+
+    @classmethod
+    def from_canonical_json_bytes(cls, encoded: bytes) -> "PageCoverageResult":
+        if not isinstance(encoded, bytes):
+            raise TypeError("coverage canonical payload must be bytes")
+        payload = json.loads(encoded.decode("utf-8"))
+        if payload.get("schema_version") != 1:
+            raise CoverageInvariantError("unsupported coverage result schema")
+        ledgers = tuple(_ledger_from_json(item) for item in payload["ledger_history"])
+        components = tuple(_component_from_json(item) for item in payload["components"])
+        observations = tuple(_text_observation_from_json(item) for item in payload["observations"])
+        requests = tuple(OCRRequest(**item) for item in payload["ocr_requests"])
+        invocations = tuple(_invocation_from_json(item) for item in payload["ocr_invocations"])
+        recovery_requests = tuple(_recovery_request_from_json(item) for item in payload["recovery_requests"])
+        recovery_decisions = tuple(_recovery_decision_from_json(item) for item in payload["recovery_decisions"])
+        result = cls._build(
+            run_id=payload["run_id"],
+            origin_execution_id=payload["origin_execution_id"],
+            page_id=payload["page_id"],
+            page_source_sha256=payload["page_source_sha256"],
+            ledger_history=ledgers,
+            components=components,
+            observations=observations,
+            ocr_requests=requests,
+            ocr_invocations=invocations,
+            recovery_requests=recovery_requests,
+            recovery_decisions=recovery_decisions,
+            pending_request_ids=tuple(payload["pending_request_ids"]),
+        )
+        if result.canonical_json_bytes != encoded:
+            raise CoverageInvariantError("coverage canonical reopen changed bytes")
+        return result
+
+
+def _component_from_json(payload: Mapping[str, object]) -> "SourceTextComponent":
+    from .model import SourceTextComponent
+
+    values = dict(payload)
+    values["bbox_page"] = tuple(values["bbox_page"])
+    values["polygon_page"] = tuple(tuple(point) for point in values["polygon_page"])
+    for name in ("detector_sources", "script_evidence", "evidence_ids"):
+        values[name] = tuple(values.get(name) or ())
+    return SourceTextComponent(**values)
+
+
+def _text_observation_from_json(payload: Mapping[str, object]) -> "TextObservation":
+    from .model import TextObservation
+
+    values = dict(payload)
+    for name in ("bbox_page", "source_bbox_page", "text_pixel_bbox_page", "layout_bbox_page"):
+        if values.get(name) is not None:
+            values[name] = tuple(values[name])
+    values["component_ids"] = tuple(values.get("component_ids") or ())
+    values["polygons_page"] = tuple(
+        tuple(tuple(point) for point in polygon)
+        for polygon in values.get("polygons_page") or ()
+    )
+    for name in ("tile_provenance", "projection_ids", "line_texts"):
+        values[name] = tuple(values.get(name) or ())
+    return TextObservation(**values)
+
+
+def _transform_from_attempt_json(payload: Mapping[str, object]) -> OCRTransformSpec:
+    raw = json.loads(str(payload["transform_spec_canonical_json"]))
+    operations = []
+    for item in raw["operations"]:
+        values = dict(item)
+        for name in ("bbox_page", "output_size", "border_value_rgb", "affine_matrix_fixed_1e6"):
+            if values.get(name) is not None:
+                values[name] = tuple(values[name])
+        operations.append(OCRTransformOperation(**values))
+    spec = OCRTransformSpec.build(tuple(operations))
+    if spec.sha256 != payload["transform_spec_sha256"]:
+        raise CoverageInvariantError("OCR transform hash changed during reopen")
+    return spec
+
+
+def _record_from_json(payload: Mapping[str, object]) -> OCRObservationRecord:
+    values = dict(payload)
+    values["bbox_page"] = tuple(values["bbox_page"])
+    values["polygon_page"] = tuple(tuple(point) for point in values["polygon_page"])
+    return OCRObservationRecord(**values)
+
+
+def _invocation_from_json(payload: Mapping[str, object]) -> OCRInvocationResult:
+    request = OCRRequest(**payload["request"])
+    attempts = []
+    for item in payload["attempts"]:
+        values = dict(item)
+        values.pop("transform_spec_canonical_json")
+        values.pop("transform_spec_sha256")
+        values["transform_spec"] = _transform_from_attempt_json(item)
+        if values.get("input_bbox_page") is not None:
+            values["input_bbox_page"] = tuple(values["input_bbox_page"])
+        attempts.append(OCRAttempt(**values))
+    blocks = []
+    for item in payload["blocks"]:
+        values = dict(item)
+        values["bbox_page"] = tuple(values["bbox_page"])
+        values["polygon_page"] = tuple(tuple(point) for point in values["polygon_page"])
+        blocks.append(OCRBlock(**values))
+    result = OCRInvocationResult.build(
+        request=request,
+        blocks=tuple(blocks),
+        observations=tuple(_record_from_json(item) for item in payload["observations"]),
+        full_page_lines=tuple(_record_from_json(item) for item in payload["full_page_lines"]),
+        attempts=tuple(attempts),
+        diagnostics=OCRDiagnostics(
+            payload["diagnostics"]["provider"], payload["diagnostics"].get("extras") or {}
+        ),
+    )
+    if result.attempt_chain_sha256 != payload["attempt_chain_sha256"]:
+        raise CoverageInvariantError("OCR attempt chain changed during reopen")
+    return result
+
+
+def _recovery_request_from_json(payload: Mapping[str, object]) -> CoverageRecoveryRequest:
+    values = dict(payload)
+    values["observation_ids"] = tuple(values.get("observation_ids") or ())
+    values["evidence_ids"] = tuple(values.get("evidence_ids") or ())
+    if values.get("anchor_polygon_page") is not None:
+        values["anchor_polygon_page"] = tuple(tuple(point) for point in values["anchor_polygon_page"])
+    return CoverageRecoveryRequest(**values)
+
+
+def _recovery_decision_from_json(payload: Mapping[str, object]) -> CoverageRecoveryDecision:
+    values = dict(payload)
+    values["observation_ids"] = tuple(values.get("observation_ids") or ())
+    values["evidence_ids"] = tuple(values.get("evidence_ids") or ())
+    if values.get("anchor_polygon_page") is not None:
+        values["anchor_polygon_page"] = tuple(tuple(point) for point in values["anchor_polygon_page"])
+    return CoverageRecoveryDecision(**values)
+
+
+def _ledger_from_json(wrapper: Mapping[str, object]) -> PageCoverageLedger:
+    payload = wrapper["payload"]
+    inventory = tuple(CoverageComponentInventoryEntry(**item) for item in payload["component_inventory"])
+    entries = []
+    for item in payload["entries"]:
+        values = dict(item)
+        values["bbox_page"] = tuple(values["bbox_page"])
+        values["polygon_page"] = tuple(tuple(point) for point in values["polygon_page"])
+        for name in ("ocr_attempt_ids", "observation_ids", "protection_evidence_ids"):
+            values[name] = tuple(values.get(name) or ())
+        entries.append(CoverageEntry(**values))
+    dispositions = []
+    for item in payload["observation_dispositions"]:
+        values = dict(item)
+        values["evidence_ids"] = tuple(values.get("evidence_ids") or ())
+        dispositions.append(CoverageObservationDisposition(**values))
+    ledger = build_page_coverage_ledger(
+        run_id=payload["run_id"],
+        origin_execution_id=payload["origin_execution_id"],
+        page_id=payload["page_id"],
+        page_source_sha256=payload["page_source_sha256"],
+        inventory_version=int(payload["inventory_version"]),
+        parent_ledger_sha256=payload.get("parent_ledger_sha256"),
+        component_inventory=inventory,
+        expected_observation_ids=tuple(payload["expected_observation_ids"]),
+        entries=tuple(entries),
+        observation_dispositions=tuple(dispositions),
+        recovery_requests=tuple(_recovery_request_from_json(item) for item in payload["recovery_requests"]),
+        recovery_decisions=tuple(_recovery_decision_from_json(item) for item in payload["recovery_decisions"]),
+    )
+    if ledger.sha256 != wrapper["sha256"]:
+        raise CoverageInvariantError("coverage ledger hash changed during reopen")
+    return ledger
+
+
+def _bbox_overlap_fraction(left: BBox, right: BBox) -> float:
+    x1, y1 = max(left[0], right[0]), max(left[1], right[1])
+    x2, y2 = min(left[2], right[2]), min(left[3], right[3])
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    return intersection / float(max(1, (left[2] - left[0]) * (left[3] - left[1])))
+
+
+CoverageOCRRunner = Callable[..., OCRInvocationResult]
+
+
+def complete_page_coverage(
+    page_rgb: "np.ndarray",
+    *,
+    run_id: str,
+    origin_execution_id: str,
+    page_id: str,
+    page_source_sha256: str,
+    components: tuple["SourceTextComponent", ...],
+    band_evidence: Sequence[object],
+    ocr_runner: CoverageOCRRunner | None = None,
+) -> PageCoverageResult:
+    """Perform page-global and component-anchored OCR before owner resolution."""
+
+    from .hash_contract import canonical_page_sha256
+    from .model import TextObservation
+
+    del band_evidence
+    root_hash = canonical_page_sha256(page_rgb)
+    if root_hash != page_source_sha256:
+        raise CoverageIdentityError("coverage page pixels differ from page_source_sha256")
+    if ocr_runner is None:
+        from vision_stack.runtime import run_page_coverage_ocr
+
+        ocr_runner = run_page_coverage_ocr
+
+    requests: list[OCRRequest] = []
+    invocations: list[OCRInvocationResult] = []
+    records: list[tuple[OCRObservationRecord, tuple[str, ...]]] = []
+
+    full_request = OCRRequest(
+        run_id=run_id,
+        origin_execution_id=origin_execution_id,
+        page_id=page_id,
+        page_source_sha256=page_source_sha256,
+        root_input_pixel_sha256=root_hash,
+        invocation_id=f"{page_id}:coverage:full-page",
+        provider_family="paddleocr",
+    )
+    full = ocr_runner(page_rgb, request=full_request, bbox_page=None, variants=("full_page",))
+    requests.append(full_request)
+    invocations.append(full)
+    full_records = tuple(full.observations or full.full_page_lines)
+    associated: dict[str, list[OCRObservationRecord]] = {
+        component.component_id: [] for component in components
+    }
+    for record in full_records:
+        component_ids = tuple(
+            component.component_id
+            for component in components
+            if _bbox_overlap_fraction(record.bbox_page, component.bbox_page) >= 0.18
+        )
+        for component_id in component_ids:
+            associated[component_id].append(record)
+        records.append((record, component_ids))
+
+    for component in components:
+        if associated[component.component_id]:
+            continue
+        request = OCRRequest(
+            run_id=run_id,
+            origin_execution_id=origin_execution_id,
+            page_id=page_id,
+            page_source_sha256=page_source_sha256,
+            root_input_pixel_sha256=root_hash,
+            invocation_id=f"{page_id}:coverage:{component.component_id}",
+            provider_family="paddleocr",
+        )
+        invocation = ocr_runner(
+            page_rgb,
+            request=request,
+            bbox_page=component.bbox_page,
+            variants=("native", "gray", "inverted", "scale_2x"),
+        )
+        requests.append(request)
+        invocations.append(invocation)
+        for record in invocation.observations:
+            associated[component.component_id].append(record)
+            records.append((record, (component.component_id,)))
+
+    observations = tuple(
+        TextObservation(
+            observation_id=record.observation_id,
+            page_id=page_id,
+            component_ids=component_ids,
+            text=record.text,
+            confidence=record.confidence,
+            provider=record.source,
+            bbox_page=record.bbox_page,
+            polygons_page=(record.polygon_page,) if record.polygon_page else (),
+            provider_variant=record.variant_id,
+            provider_record_id=record.observation_id,
+            source_bbox_page=record.bbox_page,
+            text_pixel_bbox_page=record.bbox_page,
+            run_id=record.run_id,
+            origin_execution_id=record.origin_execution_id,
+            invocation_id=record.invocation_id,
+            attempt_id=record.attempt_id,
+            provider_family=record.provider_family,
+            page_source_sha256=record.page_source_sha256,
+            root_input_pixel_sha256=record.root_input_pixel_sha256,
+            input_pixel_sha256=record.input_pixel_sha256,
+            payload_sha256=record.payload_sha256,
+        )
+        for record, component_ids in records
+    )
+    attempts_by_invocation = {
+        invocation.invocation_id: tuple(item.attempt_id for item in invocation.attempts)
+        for invocation in invocations
+    }
+    full_attempt_ids = attempts_by_invocation[full.invocation_id]
+    entries = tuple(
+        CoverageEntry(
+            component_id=component.component_id,
+            run_id=run_id,
+            origin_execution_id=origin_execution_id,
+            page_id=page_id,
+            page_source_sha256=page_source_sha256,
+            bbox_page=component.bbox_page,
+            polygon_page=component.polygon_page,
+            materiality="material",
+            ocr_attempt_ids=tuple(dict.fromkeys((
+                *full_attempt_ids,
+                *attempts_by_invocation.get(
+                    f"{page_id}:coverage:{component.component_id}", ()
+                ),
+            ))),
+            observation_ids=tuple(item.observation_id for item in associated[component.component_id]),
+            state="observed" if associated[component.component_id] else "challenged",
+        )
+        for component in components
+    )
+    inventory = tuple(
+        build_component_inventory_entry(
+            component_id=component.component_id,
+            origin="discovery",
+            introduced_by_decision_id=None,
+            anchor_polygon_page=component.polygon_page,
+            ordinal=index,
+        )
+        for index, component in enumerate(components)
+    )
+    ledger = build_page_coverage_ledger(
+        run_id=run_id,
+        origin_execution_id=origin_execution_id,
+        page_id=page_id,
+        page_source_sha256=page_source_sha256,
+        inventory_version=1,
+        parent_ledger_sha256=None,
+        component_inventory=inventory,
+        expected_observation_ids=tuple(item.observation_id for item in observations),
+        entries=entries,
+    )
+    return PageCoverageResult._build(
+        run_id=run_id,
+        origin_execution_id=origin_execution_id,
+        page_id=page_id,
+        page_source_sha256=page_source_sha256,
+        ledger_history=(ledger,),
+        components=components,
+        observations=observations,
+        ocr_requests=tuple(requests),
+        ocr_invocations=tuple(invocations),
+        recovery_requests=(),
+        recovery_decisions=(),
+    )

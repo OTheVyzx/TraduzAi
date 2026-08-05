@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ownership.hash_contract import sha256_text
+from ownership.hash_contract import canonical_page_sha256
 from ownership.model import (
     OWNER_GRAPH_SCHEMA_VERSION,
     ComponentDisposition,
@@ -29,6 +30,7 @@ from ownership.model import (
 )
 from ownership.ocr_adapter import TileProjection
 from strip.types import BBox, Balloon, Band
+from vision_stack.ocr import OCREngine
 
 
 def _component() -> SourceTextComponent:
@@ -98,6 +100,68 @@ def _graph(*, projections: list[OwnerProjection] | None = None) -> OwnerGraph:
             )
         ],
     )
+
+
+def test_page_without_bands_never_builds_empty_observation_placeholder() -> None:
+    from strip.run import (
+        _complete_page_coverages_for_strip,
+        _resolve_owner_graph_from_evidence,
+    )
+
+    page = np.arange(80 * 120 * 3, dtype=np.uint8).reshape(80, 120, 3)
+    component = SourceTextComponent(
+        component_id="component-page-global",
+        page_id="page_001",
+        bbox_page=(10, 10, 95, 40),
+        polygon_page=((10, 10), (95, 10), (95, 40), (10, 40)),
+        detector_sources=("glyph_scan",),
+    )
+
+    class FakePaddle:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del image, det, rec, cls
+            return [[([[12, 12], [90, 12], [90, 35], [12, 35]], ("VISIBLE ENGLISH", 0.97))]]
+
+    class Runtime:
+        def __init__(self):
+            self.engine = OCREngine.__new__(OCREngine)
+            self.engine._backend = "paddleocr"
+            self.engine._model = FakePaddle()
+
+        def run_page_coverage_ocr(self, page_rgb, *, request, bbox_page, variants):
+            if bbox_page is None:
+                return self.engine.recognize_page_with_evidence(
+                    page_rgb, [], request=request, force_full_page=True
+                )
+            return self.engine.recognize_region_with_evidence(
+                page_rgb,
+                bbox_page=bbox_page,
+                request=request,
+                variants=variants,
+            )
+
+    strip = SimpleNamespace(
+        image=page,
+        height=page.shape[0],
+        width=page.shape[1],
+        source_page_breaks=[0, page.shape[0]],
+        page_x_offsets=[0],
+        source_page_widths=[page.shape[1]],
+    )
+    coverage = _complete_page_coverages_for_strip(
+        strip,
+        {"page_001": [component]},
+        runtime=Runtime(),
+        run_id="run-page-global",
+        origin_execution_id="execution-page-global",
+        idioma_origem="en",
+    )["page_001"]
+    graph = _resolve_owner_graph_from_evidence("page_001", [coverage])
+
+    assert coverage.page_source_sha256 == canonical_page_sha256(page)
+    assert coverage.observations
+    assert graph.observations
+    assert graph.owners
 
 
 def _detector_with_two_separate_balloons() -> MagicMock:
