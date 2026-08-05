@@ -1638,11 +1638,17 @@ def _ocr_empty_component_preserve_policy(
     """Classify only visually empty low-confidence glyph-scan proposals.
 
     OCR exhaustion alone is never enough to preserve a component.  This
-    disposition is limited to near-uniform crops produced solely by the
-    detector-independent glyph scan, with no script or external evidence.
+    disposition is limited to either near-uniform glyph-scan crops or an
+    evidence-bound dark-container heuristic that has no primary/script
+    confirmation.
     """
 
-    if tuple(component.detector_sources) != ("glyph_scan",):
+    detector_sources = frozenset(component.detector_sources)
+    if detector_sources == frozenset(("dark_balloon_band_scan", "glyph_scan")):
+        if component.script_evidence or not component.evidence_ids:
+            return None
+        return ("visual_non_text", "policy:explicit_visual_non_text")
+    if detector_sources != frozenset(("glyph_scan",)):
         return None
     if component.script_evidence or component.evidence_ids:
         return None

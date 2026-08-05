@@ -517,6 +517,65 @@ def test_ocr_empty_near_uniform_false_glyph_gets_explicit_non_text_disposition()
     coverage.require_ready_for_ownership()
 
 
+def test_ocr_empty_unconfirmed_dark_balloon_heuristic_gets_visual_non_text_disposition() -> None:
+    import cv2
+    import numpy as np
+
+    page = np.full((160, 240, 3), 210, dtype=np.uint8)
+    for offset in range(0, 120, 12):
+        cv2.line(page, (45 + offset, 35), (20 + offset, 135), (35, 45, 55), 3)
+    component = SourceTextComponent(
+        component_id="component-dark-art",
+        page_id=PAGE_ID,
+        bbox_page=(20, 25, 220, 145),
+        polygon_page=((20, 25), (220, 25), (220, 145), (20, 145)),
+        detector_sources=("dark_balloon_band_scan", "glyph_scan"),
+        confidence=0.865,
+        evidence_ids=("dark-balloon-heuristic-1",),
+    )
+
+    class EmptyPaddleModel:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del image, det, rec, cls
+            return [[]]
+
+    engine = OCREngine.__new__(OCREngine)
+    engine._backend = "paddleocr"
+    engine._model = EmptyPaddleModel()
+
+    def runner(page_rgb, *, request, bbox_page, variants):
+        if bbox_page is None:
+            return engine.recognize_page_with_evidence(
+                page_rgb, [], request=request, force_full_page=True
+            )
+        return engine.recognize_region_with_evidence(
+            page_rgb,
+            bbox_page=bbox_page,
+            request=request,
+            variants=variants,
+        )
+
+    coverage = complete_page_coverage(
+        page,
+        run_id=RUN_ID,
+        origin_execution_id=EXECUTION_ID,
+        page_id=PAGE_ID,
+        page_source_sha256=canonical_page_sha256(page),
+        components=(component,),
+        band_evidence=(),
+        ocr_runner=runner,
+    )
+
+    entry = coverage.entries[0]
+    assert entry.ocr_attempt_ids
+    assert entry.observation_ids == ()
+    assert entry.materiality == "non_text"
+    assert entry.state == "explicit_non_dialogue_preserve"
+    assert entry.semantic_role == "visual_non_text"
+    assert entry.preserve_policy == "policy:explicit_visual_non_text"
+    coverage.require_ready_for_ownership()
+
+
 def test_unique_full_page_observation_without_component_materializes_component() -> None:
     page, initial = _unassociated_coverage("READ ME")
 
