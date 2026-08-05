@@ -588,6 +588,7 @@ def test_fresh_complete_owner_evidence_accepts_already_ptbr_provider_noop(
 
     assert result.bindings[0].target_text == source
     assert result.bindings[0].language_verdict.policy_id == "already_target_language"
+    assert result.bindings[0].preserves_original_pixels
 
 
 def test_fresh_complete_owner_evidence_still_rejects_english_provider_noop() -> None:
@@ -643,6 +644,7 @@ def test_translation_binding_preserves_owner_and_hash_chain() -> None:
     assert binding.target_locale == "pt-BR"
     assert binding.attempt_ids == (attempt.attempt_id,)
     assert binding.translation_binding_sha256
+    assert not binding.preserves_original_pixels
 
 
 @pytest.mark.parametrize("route_action", sorted(TRANSLATION_ROUTE_ACTIONS))

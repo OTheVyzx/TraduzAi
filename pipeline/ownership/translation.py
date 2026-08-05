@@ -542,6 +542,23 @@ class TranslationBinding:
             self.owner_id,
         )
 
+    @property
+    def preserves_original_pixels(self) -> bool:
+        """Return whether complete language evidence authorizes a visual no-op."""
+
+        verdict = self.language_verdict
+        return bool(
+            verdict.accepted
+            and self.target_locale == "pt-BR"
+            and verdict.policy_id
+            in {
+                "already_target_language",
+                "source_neutral_nonlexical",
+                "source_neutral_proper_name",
+            }
+            and verdict.normalized_source_sha256 == verdict.normalized_target_sha256
+        )
+
     def canonical_payload(self) -> dict[str, object]:
         return {
             "run_id": self.run_id,
