@@ -1031,6 +1031,20 @@ def _require_append_only(previous: Sequence[object], current: Sequence[object], 
         raise CoverageInvariantError(f"{label} history is not append-only")
 
 
+def _require_observation_history(
+    previous: Sequence["TextObservation"], current: Sequence["TextObservation"]
+) -> None:
+    if len(current) < len(previous):
+        raise CoverageInvariantError("observations history is not append-only")
+    for old, new in zip(previous, current):
+        if old == new:
+            continue
+        if replace(new, component_ids=old.component_ids) != old:
+            raise CoverageInvariantError("observation history changed immutable evidence")
+        if not set(old.component_ids) <= set(new.component_ids):
+            raise CoverageInvariantError("observation association is not monotonic")
+
+
 def _pending_recovery_request_ids(
     requests: Sequence[CoverageRecoveryRequest],
     decisions: Sequence[CoverageRecoveryDecision],
@@ -1254,13 +1268,15 @@ class PageCoverageResult:
         for name in (
             "ledger_history",
             "components",
-            "observations",
             "ocr_requests",
             "ocr_invocations",
             "recovery_requests",
             "recovery_decisions",
         ):
             _require_append_only(getattr(previous, name), tuple(values[name]), name)
+        _require_observation_history(
+            previous.observations, tuple(values["observations"])
+        )
         if len(tuple(values["ledger_history"])) > len(previous.ledger_history) + 1:
             raise CoverageInvariantError("coverage successor appended multiple ledger versions")
         return cls._build(**values)
@@ -1751,4 +1767,240 @@ def complete_page_coverage(
         ocr_invocations=tuple(invocations),
         recovery_requests=(),
         recovery_decisions=(),
+    )
+
+
+def recover_unassociated_observations(
+    page_rgb: "np.ndarray", coverage: PageCoverageResult
+) -> PageCoverageResult:
+    from .hash_contract import canonical_page_sha256
+    from .model import SourceTextComponent
+
+    if canonical_page_sha256(page_rgb) != coverage.page_source_sha256:
+        raise CoverageIdentityError("association recovery received different page pixels")
+    unassociated = [item for item in coverage.observations if not item.component_ids]
+    if not unassociated:
+        return coverage
+
+    observations = list(coverage.observations)
+    components = list(coverage.components)
+    recovery_requests = list(coverage.recovery_requests)
+    recovery_decisions = list(coverage.recovery_decisions)
+    existing_recovery_observations = {
+        observation_id
+        for request in recovery_requests
+        for observation_id in request.observation_ids
+    }
+
+    def polygon_for(observation: "TextObservation") -> Polygon:
+        if observation.polygons_page and observation.polygons_page[0]:
+            return tuple(observation.polygons_page[0])
+        x1, y1, x2, y2 = observation.bbox_page
+        return ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
+
+    def matching_components(observation: "TextObservation") -> list["SourceTextComponent"]:
+        matches = []
+        for component in components:
+            observation_fraction = _bbox_overlap_fraction(
+                observation.bbox_page, component.bbox_page
+            )
+            component_fraction = _bbox_overlap_fraction(
+                component.bbox_page, observation.bbox_page
+            )
+            if max(observation_fraction, component_fraction) >= 0.55:
+                matches.append(component)
+        return matches
+
+    def request_for(observation: "TextObservation", *, attempt_kind: str):
+        polygon = polygon_for(observation)
+        return build_recovery_request(
+            request_id=(
+                "coverage_request_"
+                + canonical_json_sha256(
+                    {
+                        "attempt_kind": attempt_kind,
+                        "observation_id": observation.observation_id,
+                        "page_source_sha256": coverage.page_source_sha256,
+                    }
+                )[:20]
+            ),
+            run_id=coverage.run_id,
+            origin_execution_id=coverage.origin_execution_id,
+            page_id=coverage.page_id,
+            page_source_sha256=coverage.page_source_sha256,
+            component_id=None,
+            observation_ids=(observation.observation_id,),
+            anchor_polygon_page=polygon,
+            attempt_kind=attempt_kind,
+            transform_spec_sha256=canonical_json_sha256(
+                {"algorithm": attempt_kind, "schema_version": 1}
+            ),
+            geometry_sha256=canonical_json_sha256(
+                {"polygon_page": [list(point) for point in polygon]}
+            ),
+            input_pixel_sha256=observation.input_pixel_sha256,
+            reason="unassociated_full_page_observation",
+            evidence_ids=(observation.observation_id,),
+            parent_decision=None,
+            next_strategy=None,
+        )
+
+    changed_association = False
+    materialize = len(unassociated) == 1
+    for observation in unassociated:
+        matches = matching_components(observation)
+        index = observations.index(observation)
+        if len(matches) == 1:
+            observations[index] = replace(
+                observation, component_ids=(matches[0].component_id,)
+            )
+            changed_association = True
+            continue
+        if not materialize or len(matches) > 1:
+            if observation.observation_id not in existing_recovery_observations:
+                recovery_requests.append(
+                    request_for(observation, attempt_kind="anchored_association_recovery")
+                )
+            continue
+
+        request = request_for(
+            observation, attempt_kind="unassociated_observation_materialization"
+        )
+        polygon = polygon_for(observation)
+        component_id = "component_" + canonical_json_sha256(
+            {
+                "page_source_sha256": coverage.page_source_sha256,
+                "polygon_page": [list(point) for point in polygon],
+            }
+        )[:24]
+        decision = build_recovery_decision(
+            decision_id=f"decision_{request.request_sha256[:20]}",
+            request=request,
+            materialized_component_id=component_id,
+            attempt_id=observation.attempt_id,
+            status="succeeded",
+            reason="materialized_from_full_page_observation",
+            evidence_ids=(observation.observation_id,),
+            next_strategy=None,
+        )
+        component = SourceTextComponent(
+            component_id=component_id,
+            page_id=coverage.page_id,
+            bbox_page=observation.bbox_page,
+            polygon_page=polygon,
+            detector_sources=("ocr_full_page_materialization",),
+            confidence=observation.confidence,
+            evidence_ids=(observation.observation_id,),
+        )
+        inventory_entry = build_component_inventory_entry(
+            component_id=component_id,
+            origin="recovery_materialization",
+            introduced_by_decision_id=decision.decision_id,
+            anchor_polygon_page=polygon,
+            ordinal=len(coverage.ledger.component_inventory),
+            decision=decision,
+        )
+        # A full-page OCR/glyph-confirmed region that discovery omitted is
+        # conservatively treated as a protection conflict.  Downstream R2/R3
+        # may clean the confirmed glyph pixels while retaining this evidence
+        # to keep surrounding art protected.
+        protection_conflict = True
+        entry = CoverageEntry(
+            component_id=component_id,
+            run_id=coverage.run_id,
+            origin_execution_id=coverage.origin_execution_id,
+            page_id=coverage.page_id,
+            page_source_sha256=coverage.page_source_sha256,
+            bbox_page=observation.bbox_page,
+            polygon_page=polygon,
+            materiality="material",
+            ocr_attempt_ids=(observation.attempt_id,),
+            observation_ids=(observation.observation_id,),
+            protection_conflict=protection_conflict,
+            protection_evidence_ids=(observation.observation_id,),
+            state="observed",
+        )
+        recovery_requests.append(request)
+        recovery_decisions.append(decision)
+        components.append(component)
+        observations[index] = replace(
+            observation, component_ids=(component_id,)
+        )
+        ledger = build_page_coverage_ledger(
+            run_id=coverage.run_id,
+            origin_execution_id=coverage.origin_execution_id,
+            page_id=coverage.page_id,
+            page_source_sha256=coverage.page_source_sha256,
+            inventory_version=coverage.ledger.inventory_version + 1,
+            parent_ledger_sha256=coverage.ledger.sha256,
+            component_inventory=(*coverage.ledger.component_inventory, inventory_entry),
+            expected_observation_ids=tuple(
+                item.observation_id for item in observations
+            ),
+            entries=(*coverage.ledger.entries, entry),
+            observation_dispositions=coverage.ledger.observation_dispositions,
+            recovery_requests=tuple(recovery_requests),
+            recovery_decisions=tuple(recovery_decisions),
+        )
+        validate_inventory_successor(coverage.ledger, ledger)
+        return PageCoverageResult.build_from(
+            coverage,
+            ledger_history=(*coverage.ledger_history, ledger),
+            components=tuple(components),
+            observations=tuple(observations),
+            recovery_requests=tuple(recovery_requests),
+            recovery_decisions=tuple(recovery_decisions),
+        )
+
+    if not changed_association and tuple(recovery_requests) == coverage.recovery_requests:
+        return coverage
+    return PageCoverageResult.build_from(
+        coverage,
+        observations=tuple(observations),
+        recovery_requests=tuple(recovery_requests),
+        recovery_decisions=tuple(recovery_decisions),
+    )
+
+
+def complete_container_coverage(
+    page_rgb: "np.ndarray", coverage: PageCoverageResult
+) -> PageCoverageResult:
+    from .container_evidence import recover_component_visual_container
+    from .hash_contract import canonical_page_sha256
+
+    if canonical_page_sha256(page_rgb) != coverage.page_source_sha256:
+        raise CoverageIdentityError("container recovery received different page pixels")
+    entries: list[CoverageEntry] = []
+    changed = False
+    for entry in coverage.entries:
+        if entry.container_id or not entry.ocr_attempt_ids:
+            entries.append(entry)
+            continue
+        evidence = recover_component_visual_container(
+            page_rgb,
+            component_id=entry.component_id,
+            glyph_bbox_page=entry.bbox_page,
+            glyph_polygon_page=entry.polygon_page,
+        )
+        entries.append(replace(entry, container_id=evidence["evidence_id"]))
+        changed = True
+    if not changed:
+        return coverage
+    ledger = build_page_coverage_ledger(
+        run_id=coverage.run_id,
+        origin_execution_id=coverage.origin_execution_id,
+        page_id=coverage.page_id,
+        page_source_sha256=coverage.page_source_sha256,
+        inventory_version=coverage.ledger.inventory_version + 1,
+        parent_ledger_sha256=coverage.ledger.sha256,
+        component_inventory=coverage.ledger.component_inventory,
+        expected_observation_ids=coverage.ledger.expected_observation_ids,
+        entries=tuple(entries),
+        observation_dispositions=coverage.ledger.observation_dispositions,
+        recovery_requests=coverage.recovery_requests,
+        recovery_decisions=coverage.recovery_decisions,
+    )
+    return PageCoverageResult.build_from(
+        coverage,
+        ledger_history=(*coverage.ledger_history, ledger),
     )

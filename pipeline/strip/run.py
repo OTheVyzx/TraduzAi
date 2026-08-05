@@ -21,7 +21,12 @@ import cv2
 import numpy as np
 
 from compositor.owner_compositor import OwnerCompositionError, _array_sha256, compose_page
-from ownership.coverage import PageCoverageResult, complete_page_coverage
+from ownership.coverage import (
+    PageCoverageResult,
+    complete_container_coverage,
+    complete_page_coverage,
+    recover_unassociated_observations,
+)
 from ownership.hash_contract import canonical_page_sha256
 from ownership.model import (
     OwnerGlyphPatch,
@@ -2781,7 +2786,7 @@ def _complete_page_coverages_for_strip(
                 components=components,
             )
             continue
-        results[page_id] = complete_page_coverage(
+        coverage = complete_page_coverage(
             page_rgb,
             run_id=run_id,
             origin_execution_id=origin_execution_id,
@@ -2791,6 +2796,9 @@ def _complete_page_coverages_for_strip(
             band_evidence=(),
             ocr_runner=ocr_runner,
         )
+        coverage = recover_unassociated_observations(page_rgb, coverage)
+        coverage = complete_container_coverage(page_rgb, coverage)
+        results[page_id] = coverage
     return results
 
 

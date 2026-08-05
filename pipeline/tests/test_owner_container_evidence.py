@@ -38,3 +38,20 @@ def test_full_page_visual_container_rejects_proportional_fallback_without_bounda
     )
 
     assert evidence is None
+
+
+def test_component_container_falls_back_to_executable_support_local_geometry():
+    from ownership.container_evidence import recover_component_visual_container
+
+    image = np.full((180, 240, 3), 245, dtype=np.uint8)
+    evidence = recover_component_visual_container(
+        image,
+        component_id="component-a",
+        glyph_bbox_page=(78, 65, 163, 116),
+        glyph_polygon_page=((78, 65), (163, 65), (163, 116), (78, 116)),
+    )
+
+    assert evidence["source"] == "conservative_support_local_container"
+    assert evidence["conservative"] is True
+    x1, y1, x2, y2 = evidence["bbox_page"]
+    assert x1 <= 78 and y1 <= 65 and x2 >= 163 and y2 >= 116

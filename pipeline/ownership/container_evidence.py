@@ -106,3 +106,44 @@ def recover_full_page_visual_container(
         "bbox_page": recovered,
         "confidence": round(min(0.95, 0.70 + edge_density * 4.0), 6),
     }
+
+
+def recover_component_visual_container(
+    image_rgb: np.ndarray,
+    *,
+    component_id: str,
+    glyph_bbox_page: BBox,
+    glyph_polygon_page,
+) -> dict[str, Any]:
+    """Recover a visual container or derive an executable support-local one."""
+
+    del glyph_polygon_page
+    primary = recover_full_page_visual_container(
+        image_rgb,
+        owner_id=component_id,
+        semantic_body_bbox_page=glyph_bbox_page,
+        source_replacement_bbox_page=glyph_bbox_page,
+    )
+    if primary is not None:
+        return primary
+    height, width = image_rgb.shape[:2]
+    conservative = _proportional_fallback(
+        _bbox(glyph_bbox_page, width=width, height=height),
+        width=width,
+        height=height,
+    )
+    payload = {
+        "component_id": component_id,
+        "source": "conservative_support_local_container",
+        "bbox_page": list(conservative),
+    }
+    digest = sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "evidence_id": f"{component_id}:support_local_container:{digest}",
+        "source": "conservative_support_local_container",
+        "bbox_page": conservative,
+        "confidence": 0.60,
+        "conservative": True,
+    }

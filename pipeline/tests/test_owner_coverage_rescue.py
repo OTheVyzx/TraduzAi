@@ -18,6 +18,8 @@ from ownership.coverage import (
     build_recovery_decision,
     build_recovery_request,
     complete_page_coverage,
+    complete_container_coverage,
+    recover_unassociated_observations,
     validate_inventory_successor,
     validate_recovery_chain,
 )
@@ -402,6 +404,42 @@ def _coverage_recovery_request(
     )
 
 
+def _unassociated_coverage(*texts: str) -> tuple[object, PageCoverageResult]:
+    page = _coverage_page()
+
+    class FakePaddleModel:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del image, det, rec, cls
+            lines = []
+            for index, text in enumerate(texts):
+                x1, y1 = 10 + index * 55, 12 + index * 22
+                lines.append(([[x1, y1], [x1 + 42, y1], [x1 + 42, y1 + 16], [x1, y1 + 16]], (text, 0.96)))
+            return [lines]
+
+    engine = OCREngine.__new__(OCREngine)
+    engine._backend = "paddleocr"
+    engine._model = FakePaddleModel()
+
+    def runner(page_rgb, *, request, bbox_page, variants):
+        assert bbox_page is None
+        del variants
+        return engine.recognize_page_with_evidence(
+            page_rgb, [], request=request, force_full_page=True
+        )
+
+    coverage = complete_page_coverage(
+        page,
+        run_id=RUN_ID,
+        origin_execution_id=EXECUTION_ID,
+        page_id=PAGE_ID,
+        page_source_sha256=canonical_page_sha256(page),
+        components=(),
+        band_evidence=(),
+        ocr_runner=runner,
+    )
+    return page, coverage
+
+
 def test_component_without_band_gets_anchored_ocr_before_owner_resolution() -> None:
     coverage = _completed_coverage()
 
@@ -416,6 +454,90 @@ def test_component_without_band_gets_anchored_ocr_before_owner_resolution() -> N
         for attempt in invocation.attempts
     }
     assert set(coverage.ledger.entries[0].ocr_attempt_ids) <= physical_attempt_ids
+
+
+def test_unique_full_page_observation_without_component_materializes_component() -> None:
+    page, initial = _unassociated_coverage("READ ME")
+
+    result = recover_unassociated_observations(page, initial)
+
+    assert len(result.components) == 1
+    assert result.observations[0].component_ids == (result.components[0].component_id,)
+    assert result.recovery_decisions[0].reason == "materialized_from_full_page_observation"
+    assert result.ledger.expected_component_ids == (result.components[0].component_id,)
+    assert (
+        result.ledger.component_inventory[0].introduced_by_decision_id
+        == result.recovery_decisions[0].decision_id
+    )
+    assert result.ledger.parent_ledger_sha256 == initial.ledger.sha256
+    assert result.ocr_requests == initial.ocr_requests
+    assert result.ocr_invocations == initial.ocr_invocations
+    assert result.entries[0].protection_conflict
+    assert result.entries[0].protection_evidence_ids == (
+        result.observations[0].observation_id,
+    )
+
+
+def test_two_unassociated_regions_get_distinct_pending_recovery_fingerprints() -> None:
+    page, initial = _unassociated_coverage("FIRST", "SECOND")
+
+    pending = recover_unassociated_observations(page, initial)
+
+    assert len(pending.pending_requests) == 2
+    assert len({item.anchor_sha256 for item in pending.pending_requests}) == 2
+    assert len({item.attempt_fingerprint for item in pending.pending_requests}) == 2
+    assert not any(item.rejection_reason == "suppressed" for item in pending.observations)
+
+
+def test_ambiguous_full_page_observation_requests_anchored_recovery() -> None:
+    page, raw = _unassociated_coverage("WAIT")
+    components = (
+        SourceTextComponent(
+            component_id="component-left",
+            page_id=PAGE_ID,
+            bbox_page=(8, 10, 35, 30),
+            polygon_page=((8, 10), (35, 10), (35, 30), (8, 30)),
+            detector_sources=("glyph_scan",),
+        ),
+        SourceTextComponent(
+            component_id="component-right",
+            page_id=PAGE_ID,
+            bbox_page=(30, 10, 55, 30),
+            polygon_page=((30, 10), (55, 10), (55, 30), (30, 30)),
+            detector_sources=("glyph_scan",),
+        ),
+    )
+    initial = PageCoverageResult.initialize(
+        run_id=raw.run_id,
+        origin_execution_id=raw.origin_execution_id,
+        page_id=raw.page_id,
+        page_source_sha256=raw.page_source_sha256,
+        components=components,
+    )
+    initial = PageCoverageResult.build_from(
+        initial,
+        observations=raw.observations,
+        ocr_requests=raw.ocr_requests,
+        ocr_invocations=raw.ocr_invocations,
+    )
+
+    result = recover_unassociated_observations(page, initial)
+
+    assert len(result.pending_requests) == 1
+    request = result.pending_requests[0]
+    assert request.component_id is None
+    assert request.observation_ids == (raw.observations[0].observation_id,)
+    assert request.anchor_polygon_page == raw.observations[0].polygons_page[0]
+    assert result.observations[0].rejection_reason != "suppressed"
+
+
+def test_ocr_confirmed_component_recovers_container_before_graph_build() -> None:
+    coverage = _completed_coverage()
+
+    recovered = complete_container_coverage(_coverage_page(), coverage)
+
+    assert recovered.entries[0].container_id
+    assert recovered.entries[0].state == "observed"
 
 
 def test_coverage_recovery_snapshot_never_drops_request_or_invocation_evidence() -> None:
