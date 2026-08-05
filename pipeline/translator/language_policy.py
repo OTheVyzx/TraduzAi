@@ -36,7 +36,7 @@ _PTBR_WORDS = frozenset(
     pelo por porque possa que quem se sem ser seu sua tem todos um uma vamos você
     vocês abate abates
     """.split()
-)
+) | frozenset({"voce", "voces"})
 
 
 @dataclass(frozen=True)
@@ -242,6 +242,16 @@ def validate_target_language(
     )
     english_tokens = tuple(token for token in considered_tokens if token in _ENGLISH_WORDS)
     ptbr_tokens = tuple(token for token in considered_tokens if token in _PTBR_WORDS)
+    english_only_tokens = tuple(
+        token
+        for token in considered_tokens
+        if token in _ENGLISH_WORDS and token not in _PTBR_WORDS
+    )
+    ptbr_only_tokens = tuple(
+        token
+        for token in considered_tokens
+        if token in _PTBR_WORDS and token not in _ENGLISH_WORDS
+    )
     source_counter = Counter(source_tokens)
     source_only_tokens = tuple(
         sorted(
@@ -282,8 +292,8 @@ def validate_target_language(
             evidence is not None
             and evidence.coverage_complete
             and not evidence.source_only_tokens
-            and len(ptbr_tokens) > 0
-            and len(english_tokens) == 0
+            and len(ptbr_only_tokens) > 0
+            and len(english_only_tokens) == 0
         )
         if already_target:
             accepted = True

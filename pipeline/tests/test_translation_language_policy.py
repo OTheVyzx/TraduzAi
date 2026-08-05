@@ -97,6 +97,35 @@ def test_already_ptbr_container_needs_fresh_complete_page_evidence() -> None:
     assert with_evidence.policy_id == "already_target_language"
 
 
+def test_already_ptbr_accepts_shared_homographs_only_with_ptbr_specific_evidence() -> None:
+    source = "UAU, VOCE ME ASSUSTOU."
+    evidence = build_page_language_evidence(
+        texts=(source,),
+        coverage_complete=True,
+    )
+
+    verdict = validate_target_language(
+        source=source,
+        target=source,
+        role="dialogue",
+        page_language_evidence=evidence,
+    )
+    ambiguous_only = validate_target_language(
+        source="ME",
+        target="ME",
+        role="dialogue",
+        page_language_evidence=build_page_language_evidence(
+            texts=("ME",),
+            coverage_complete=True,
+        ),
+    )
+
+    assert evidence.source_only_tokens == ()
+    assert verdict.accepted
+    assert verdict.policy_id == "already_target_language"
+    assert not ambiguous_only.accepted
+
+
 def test_page_language_evidence_tracks_material_english_but_not_ptbr() -> None:
     english = build_page_language_evidence(
         texts=("THE PLAYER HAS 10 KILLS",),
