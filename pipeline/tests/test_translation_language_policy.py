@@ -152,6 +152,76 @@ def test_already_ptbr_recognizes_morphology_when_ocr_contains_unknown_tokens() -
     assert not english.accepted
 
 
+def test_joined_english_markers_block_mixed_unchanged_owner_text() -> None:
+    source = "ISSOANSRRAWO DIDINBEDODGEKMSSIMEOK SWPORBDSTRIKETFAOOEH"
+    evidence = build_page_language_evidence(
+        texts=(source,),
+        coverage_complete=True,
+    )
+    verdict = validate_target_language(
+        source=source,
+        target=source,
+        role="dialogue_body",
+        page_language_evidence=evidence,
+    )
+
+    assert {"dodge", "strike"} <= set(evidence.source_only_tokens)
+    assert not verdict.accepted
+
+
+def test_language_neutral_proper_name_uses_explicit_non_dialogue_policy() -> None:
+    source = "KIM SHYEOK!"
+    verdict = validate_target_language(
+        source=source,
+        target=source,
+        role="dialogue_body",
+        page_language_evidence=build_page_language_evidence(
+            texts=(source,),
+            coverage_complete=True,
+        ),
+    )
+    english = validate_target_language(
+        source="MATCH.",
+        target="MATCH.",
+        role="dialogue_body",
+        page_language_evidence=build_page_language_evidence(
+            texts=("MATCH.",),
+            coverage_complete=True,
+        ),
+    )
+
+    assert verdict.accepted
+    assert verdict.policy_id == "source_neutral_proper_name"
+    assert not english.accepted
+
+
+def test_joined_ptbr_marker_and_nonlexical_text_do_not_exhaust_translation() -> None:
+    joined = "VICE-MESTREDA"
+    joined_verdict = validate_target_language(
+        source=joined,
+        target=joined,
+        role="dialogue_body",
+        page_language_evidence=build_page_language_evidence(
+            texts=(joined,),
+            coverage_complete=True,
+        ),
+    )
+    numeric = validate_target_language(
+        source="000000",
+        target="000000",
+        role="dialogue_body",
+        page_language_evidence=build_page_language_evidence(
+            texts=("000000",),
+            coverage_complete=True,
+        ),
+    )
+
+    assert joined_verdict.accepted
+    assert joined_verdict.policy_id == "already_target_language"
+    assert numeric.accepted
+    assert numeric.policy_id == "source_neutral_nonlexical"
+
+
 def test_page_language_evidence_tracks_material_english_but_not_ptbr() -> None:
     english = build_page_language_evidence(
         texts=("THE PLAYER HAS 10 KILLS",),

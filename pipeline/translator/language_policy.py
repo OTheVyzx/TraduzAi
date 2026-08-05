@@ -27,6 +27,12 @@ _ENGLISH_WORDS = frozenset(
     there they this to up wait we what when where which who why will with would
     you your
     """.split()
+) | frozenset(
+    """
+    achievement arts been characteristics different dodge estimated first guild
+    heavenly lose match martial probably rank selective slaughter star strike
+    sword thoughts though unlocked vip while
+    """.split()
 )
 _PTBR_WORDS = frozenset(
     """
@@ -36,7 +42,12 @@ _PTBR_WORDS = frozenset(
     pelo por porque possa que quem se sem ser seu sua tem todos um uma vamos você
     vocês abate abates
     """.split()
-) | frozenset({"voce", "voces"})
+) | frozenset(
+    """
+    artes certo caracteristicas guilda idiota limpa limpo marciais mestre mestra
+    nacional seletiva seletivo tao voce voces
+    """.split()
+)
 _PTBR_MORPHOLOGY_SUFFIXES = (
     "ado",
     "ada",
@@ -53,18 +64,62 @@ _PTBR_MORPHOLOGY_SUFFIXES = (
     "dade",
     "dades",
 )
+_PTBR_JOIN_MARKERS = tuple(
+    sorted(
+        (
+            token
+            for token in _PTBR_WORDS
+            if len(token) >= 5 and token not in _ENGLISH_WORDS
+        ),
+        key=lambda token: (-len(token), token),
+    )
+)
 
 
 def _is_ptbr_token(token: str) -> bool:
     normalized = str(token or "").casefold()
     if normalized in _PTBR_WORDS:
         return True
-    return len(normalized) >= 6 and normalized.endswith(_PTBR_MORPHOLOGY_SUFFIXES)
+    if len(normalized) >= 6 and normalized.endswith(_PTBR_MORPHOLOGY_SUFFIXES):
+        return True
+    compact = re.sub(r"[^a-z]", "", normalized)
+    return len(compact) >= 8 and any(marker in compact for marker in _PTBR_JOIN_MARKERS)
 
 
 def _is_ptbr_specific_token(token: str) -> bool:
     normalized = str(token or "").casefold()
     return _is_ptbr_token(normalized) and normalized not in _ENGLISH_WORDS
+
+
+_ENGLISH_JOIN_MARKERS = tuple(
+    sorted(
+        (
+            token
+            for token in _ENGLISH_WORDS
+            if len(token) >= 4 and token not in _PTBR_WORDS
+        ),
+        key=lambda token: (-len(token), token),
+    )
+)
+
+
+def _english_only_markers(token: str) -> tuple[str, ...]:
+    normalized = str(token or "").casefold()
+    if normalized in _ENGLISH_WORDS and normalized not in _PTBR_WORDS:
+        return (normalized,)
+    compact = re.sub(r"[^a-z]", "", normalized)
+    if len(compact) < 8:
+        return ()
+    return tuple(marker for marker in _ENGLISH_JOIN_MARKERS if marker in compact)
+
+
+def _looks_like_neutral_proper_name(value: str, tokens: tuple[str, ...]) -> bool:
+    words = re.findall(r"[A-Za-z][A-Za-z'-]*", str(value or ""))
+    if not (1 <= len(words) <= 4) or len(words) != len(tokens):
+        return False
+    if any(_english_only_markers(token) or _is_ptbr_token(token) for token in tokens):
+        return False
+    return all(word[:1].isupper() for word in words)
 
 
 @dataclass(frozen=True)
@@ -98,7 +153,13 @@ def build_page_language_evidence(
         for token in _tokens(str(text or ""))
     }
     english_only = tuple(
-        sorted(token for token in tokens if token in _ENGLISH_WORDS and token not in _PTBR_WORDS)
+        sorted(
+            {
+                marker
+                for token in tokens
+                for marker in _english_only_markers(token)
+            }
+        )
     )
     return PageLanguageEvidence.build(
         coverage_complete=coverage_complete,
@@ -268,14 +329,18 @@ def validate_target_language(
     considered_tokens = tuple(
         token for token in target_tokens if token not in explicit_entity_tokens
     )
-    english_tokens = tuple(token for token in considered_tokens if token in _ENGLISH_WORDS)
+    english_tokens = tuple(
+        marker
+        for token in considered_tokens
+        for marker in _english_only_markers(token)
+    )
     ptbr_tokens = tuple(
         token for token in considered_tokens if _is_ptbr_token(token)
     )
     english_only_tokens = tuple(
-        token
+        marker
         for token in considered_tokens
-        if token in _ENGLISH_WORDS and not _is_ptbr_token(token)
+        for marker in _english_only_markers(token)
     )
     ptbr_only_tokens = tuple(
         token
@@ -330,6 +395,26 @@ def validate_target_language(
             retryable = False
             reason = "already_target_language"
             policy_id = "already_target_language"
+        elif bool(
+            evidence is not None
+            and evidence.coverage_complete
+            and not evidence.source_only_tokens
+            and not target_tokens
+        ):
+            accepted = True
+            retryable = False
+            reason = "source_neutral_nonlexical"
+            policy_id = "source_neutral_nonlexical"
+        elif bool(
+            evidence is not None
+            and evidence.coverage_complete
+            and not evidence.source_only_tokens
+            and _looks_like_neutral_proper_name(normalized_target, target_tokens)
+        ):
+            accepted = True
+            retryable = False
+            reason = "source_neutral_proper_name"
+            policy_id = "source_neutral_proper_name"
         else:
             normalized_role = str(role or "dialogue").casefold()
             reason = (
