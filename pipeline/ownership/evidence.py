@@ -198,3 +198,151 @@ def build_source_evidence_ledger(graph: Any) -> tuple[SourceEvidenceRecord, ...]
             )
         )
     return tuple(rows)
+
+
+class OwnerObservationCollisionError(ValueError):
+    """Raised when one observation ID is reused for incompatible evidence."""
+
+
+def merge_observation_strict(
+    existing: Any,
+    incoming: Any,
+) -> Any:
+    """Merge provenance only when identity, payload and physical input agree."""
+
+    from .model import TextObservation
+
+    if isinstance(existing, TextObservation) and isinstance(incoming, TextObservation):
+        return _merge_typed_observation_strict(existing, incoming)
+    if isinstance(existing, Mapping) and isinstance(incoming, Mapping):
+        return _merge_mapping_observation_strict(existing, incoming)
+    raise TypeError("observation merge requires two typed observations or two mappings")
+
+
+def _merge_typed_observation_strict(existing: Any, incoming: Any) -> Any:
+    from dataclasses import replace
+
+    if existing.observation_id != incoming.observation_id:
+        raise OwnerObservationCollisionError("observation identities differ")
+    immutable_fields = (
+        "run_id",
+        "origin_execution_id",
+        "page_id",
+        "page_source_sha256",
+        "root_input_pixel_sha256",
+        "input_pixel_sha256",
+        "invocation_id",
+        "attempt_id",
+        "provider_family",
+        "payload_sha256",
+        "text",
+        "bbox_page",
+    )
+    conflicts = tuple(
+        field_name
+        for field_name in immutable_fields
+        if getattr(existing, field_name) != getattr(incoming, field_name)
+    )
+    if conflicts:
+        raise OwnerObservationCollisionError(
+            "observation collision changed " + ", ".join(conflicts)
+        )
+    return replace(
+        existing,
+        component_ids=tuple(sorted(set(existing.component_ids) | set(incoming.component_ids))),
+        polygons_page=tuple(
+            sorted(set(existing.polygons_page) | set(incoming.polygons_page))
+        ),
+        tile_provenance=tuple(
+            sorted(set(existing.tile_provenance) | set(incoming.tile_provenance))
+        ),
+        projection_ids=tuple(
+            sorted(set(existing.projection_ids) | set(incoming.projection_ids))
+        ),
+    )
+
+
+def _merge_mapping_observation_strict(
+    existing: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> dict[str, Any]:
+    import copy
+    import json
+
+    existing_id = str(existing.get("observation_id") or "")
+    incoming_id = str(incoming.get("observation_id") or "")
+    if existing_id != incoming_id:
+        raise OwnerObservationCollisionError("observation identities differ")
+
+    immutable_fields = (
+        "run_id",
+        "origin_execution_id",
+        "page_id",
+        "page_source_sha256",
+        "root_input_pixel_sha256",
+        "input_pixel_sha256",
+        "invocation_id",
+        "attempt_id",
+        "provider_family",
+        "payload_sha256",
+        "text",
+        "bbox_page",
+    )
+    conflicts = tuple(
+        field_name
+        for field_name in immutable_fields
+        if existing.get(field_name) not in (None, "", [], ())
+        and incoming.get(field_name) not in (None, "", [], ())
+        and existing.get(field_name) != incoming.get(field_name)
+    )
+    if conflicts:
+        raise OwnerObservationCollisionError(
+            f"observation_id collision for {existing_id!r}: conflicting "
+            + ", ".join(conflicts)
+        )
+
+    merged = copy.deepcopy(dict(existing))
+    for field_name in (
+        "component_ids",
+        "polygons_page",
+        "tile_provenance",
+        "projection_ids",
+    ):
+        values: list[Any] = []
+        seen: set[str] = set()
+        for value in [
+            *list(existing.get(field_name) or ()),
+            *list(incoming.get(field_name) or ()),
+        ]:
+            token = json.dumps(
+                value,
+                sort_keys=True,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            if token in seen:
+                continue
+            seen.add(token)
+            values.append(copy.deepcopy(value))
+        merged[field_name] = values
+
+    for field_name, incoming_value in incoming.items():
+        if field_name in {
+            "component_ids",
+            "polygons_page",
+            "tile_provenance",
+            "projection_ids",
+            "legacy_selected",
+        }:
+            continue
+        if merged.get(field_name) in (None, "", [], ()) and incoming_value not in (
+            None,
+            "",
+            [],
+            (),
+        ):
+            merged[field_name] = copy.deepcopy(incoming_value)
+    merged["legacy_selected"] = bool(existing.get("legacy_selected")) or bool(
+        incoming.get("legacy_selected")
+    )
+    return merged

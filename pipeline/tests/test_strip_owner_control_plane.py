@@ -15,7 +15,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ownership.hash_contract import sha256_text
 from ownership.model import (
+    OWNER_GRAPH_SCHEMA_VERSION,
     ComponentDisposition,
     OwnerGraph,
     OwnerGraphValidationError,
@@ -50,6 +52,15 @@ def _observation(*, tile_id: str = "tile_a") -> TextObservation:
         bbox_page=(30, 30, 70, 70),
         tile_provenance=(tile_id,),
         coverage_score=1.0,
+        run_id="run-strip-owner-control",
+        origin_execution_id="execution-strip-owner-control",
+        invocation_id=f"invocation-strip-owner-{tile_id}",
+        attempt_id=f"attempt-strip-owner-{tile_id}",
+        provider_family="paddle",
+        page_source_sha256="a" * 64,
+        root_input_pixel_sha256="b" * 64,
+        input_pixel_sha256=sha256_text(f"pixels:{tile_id}"),
+        payload_sha256=sha256_text("COMPLETE SOURCE BODY"),
     )
 
 
@@ -69,8 +80,11 @@ def _graph(*, projections: list[OwnerProjection] | None = None) -> OwnerGraph:
         execution_tile_id=None,
     )
     return OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_001",
+        run_id="run-strip-owner-control",
+        origin_execution_id="execution-strip-owner-control",
+        page_source_sha256="a" * 64,
         components=[_component()],
         observations=[_observation()],
         owners=[owner],
@@ -769,8 +783,11 @@ def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode(
     monkeypatch.setattr(run, "detect_strip_balloons", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(run, "group_balloons_into_bands", lambda *_args, **_kwargs: [band])
     empty_graph = OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_001",
+        run_id="run-strip-owner-control-empty",
+        origin_execution_id="execution-strip-owner-control-empty",
+        page_source_sha256="b" * 64,
         components=[],
         observations=[],
         owners=[],

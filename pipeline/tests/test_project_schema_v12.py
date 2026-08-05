@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 import sys
 import unittest
 from pathlib import Path
@@ -11,12 +12,17 @@ from schema.project_schema_v12 import (  # noqa: E402
     build_empty_project_v12,
     validate_project_v12,
 )
+from ownership.model import OWNER_GRAPH_SCHEMA_VERSION  # noqa: E402
 
 
 def _verified_owner_graph_payload() -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": OWNER_GRAPH_SCHEMA_VERSION,
         "page_id": "page_001",
+        "run_id": "run-project-schema",
+        "origin_execution_id": "execution-project-schema",
+        "page_source_sha256": "a" * 64,
+        "verification_status": "verified",
         "components": [
             {
                 "component_id": "cmp_page_001_body",
@@ -40,6 +46,15 @@ def _verified_owner_graph_payload() -> dict:
                 "confidence": 0.97,
                 "provider": "fixture",
                 "bbox_page": [10, 20, 110, 80],
+                "run_id": "run-project-schema",
+                "origin_execution_id": "execution-project-schema",
+                "invocation_id": "invocation-project-schema",
+                "attempt_id": "attempt-project-schema",
+                "provider_family": "fixture",
+                "page_source_sha256": "a" * 64,
+                "root_input_pixel_sha256": "a" * 64,
+                "input_pixel_sha256": "b" * 64,
+                "payload_sha256": sha256(b"HELLO THERE").hexdigest(),
             }
         ],
         "owners": [
@@ -56,6 +71,7 @@ def _verified_owner_graph_payload() -> dict:
                 "state": "translated",
                 "route_action": "translate_inpaint_render",
                 "execution_tile_id": "tile_page_001_001",
+                "action_mask_ref": None,
             }
         ],
         "projections": [
@@ -95,7 +111,9 @@ class ProjectSchemaV12Tests(unittest.TestCase):
         self.assertEqual(project["source"]["page_count"], 2)
         self.assertEqual(project["qa"]["summary"]["total_pages"], 2)
         self.assertEqual(project["export_report"]["status"], "not_exported")
-        self.assertEqual(project["owner_graph_schema_version"], 1)
+        self.assertEqual(
+            project["owner_graph_schema_version"], OWNER_GRAPH_SCHEMA_VERSION
+        )
         self.assertEqual(project["owner_graph_status"], "legacy_unverified")
         self.assertEqual(project["page_owner_graphs"], [])
         self.assertIsInstance(project["owner_invariant_summary"], dict)
@@ -104,7 +122,9 @@ class ProjectSchemaV12Tests(unittest.TestCase):
     def test_project_roundtrip_preserves_owner_graph_and_ids(self) -> None:
         project = build_empty_project_v12(page_count=1)
         graph = _verified_owner_graph_payload()
-        self.assertEqual(project["owner_graph_schema_version"], 1)
+        self.assertEqual(
+            project["owner_graph_schema_version"], OWNER_GRAPH_SCHEMA_VERSION
+        )
         project["pages"] = [
             {
                 "page": 1,
@@ -206,6 +226,15 @@ class ProjectSchemaV12Tests(unittest.TestCase):
                 "text",
                 "provider",
                 "bbox_page",
+                "run_id",
+                "origin_execution_id",
+                "invocation_id",
+                "attempt_id",
+                "provider_family",
+                "page_source_sha256",
+                "root_input_pixel_sha256",
+                "input_pixel_sha256",
+                "payload_sha256",
             },
             "textOwner": {
                 "owner_id",

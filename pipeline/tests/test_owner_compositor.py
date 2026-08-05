@@ -24,7 +24,9 @@ from ownership.delivery import (  # noqa: E402
     build_owner_text_delivery_contract,
     seal_owner_text_execution_authority,
 )
+from ownership.hash_contract import sha256_text  # noqa: E402
 from ownership.model import (  # noqa: E402
+    OWNER_GRAPH_SCHEMA_VERSION,
     OwnerGlyphPatch,
     OwnerGraph,
     OwnerMutation,
@@ -84,12 +86,35 @@ def _render_geometry(owner_id: str, protected_sha256: str):
     bbox = (2, 2, 12, 12)
     polygon = ((2, 2), (12, 2), (12, 12), (2, 12))
     graph = OwnerGraph(
-        2,
-        PAGE_ID,
-        [SourceTextComponent(f"component_{owner_id}", PAGE_ID, bbox, polygon, ("fixture",))],
-        [TextObservation(f"observation_{owner_id}", PAGE_ID, (f"component_{owner_id}",), "SOURCE", 1.0, "fixture", bbox, polygons_page=(polygon,))],
-        [TextOwner(owner_id, PAGE_ID, [f"component_{owner_id}"], [f"observation_{owner_id}"], [f"observation_{owner_id}"], "freeform_sfx", "SOURCE", "ALVO", "owned", "translated", "translate_inpaint_render", f"tile_{owner_id}")],
-        [OwnerProjection(owner_id, f"tile_{owner_id}", "executor", (0, 0, PAGE_SHAPE[1], PAGE_SHAPE[0]), (0, 0, PAGE_SHAPE[1], PAGE_SHAPE[0]), (0, 0))],
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
+        page_id=PAGE_ID,
+        components=[SourceTextComponent(f"component_{owner_id}", PAGE_ID, bbox, polygon, ("fixture",))],
+        observations=[
+            TextObservation(
+                f"observation_{owner_id}",
+                PAGE_ID,
+                (f"component_{owner_id}",),
+                "SOURCE",
+                1.0,
+                "fixture",
+                bbox,
+                polygons_page=(polygon,),
+                run_id="run-owner-compositor",
+                origin_execution_id="execution-owner-compositor",
+                invocation_id=f"invocation-{owner_id}",
+                attempt_id=f"attempt-{owner_id}",
+                provider_family="fixture",
+                page_source_sha256="a" * 64,
+                root_input_pixel_sha256="b" * 64,
+                input_pixel_sha256="c" * 64,
+                payload_sha256=sha256_text("SOURCE"),
+            )
+        ],
+        owners=[TextOwner(owner_id, PAGE_ID, [f"component_{owner_id}"], [f"observation_{owner_id}"], [f"observation_{owner_id}"], "freeform_sfx", "SOURCE", "ALVO", "owned", "translated", "translate_inpaint_render", f"tile_{owner_id}")],
+        projections=[OwnerProjection(owner_id, f"tile_{owner_id}", "executor", (0, 0, PAGE_SHAPE[1], PAGE_SHAPE[0]), (0, 0, PAGE_SHAPE[1], PAGE_SHAPE[0]), (0, 0))],
+        run_id="run-owner-compositor",
+        origin_execution_id="execution-owner-compositor",
+        page_source_sha256="a" * 64,
     )
     return build_owner_render_geometry(
         graph, owner_id, page_width=PAGE_SHAPE[1], page_height=PAGE_SHAPE[0],

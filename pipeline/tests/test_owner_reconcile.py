@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ownership.hash_contract import sha256_text  # noqa: E402
 from ownership.model import SourceTextComponent, TextObservation  # noqa: E402
 from ownership.reconcile import SemanticRegion, build_page_owner_graph  # noqa: E402
 
@@ -47,6 +48,15 @@ def _observation(
         tile_provenance=tile_provenance,
         coverage_score=coverage_score,
         language_score=language_score,
+        run_id="run-owner-reconcile",
+        origin_execution_id="execution-owner-reconcile",
+        invocation_id=f"invocation-{observation_id}",
+        attempt_id=f"attempt-{observation_id}",
+        provider_family=provider,
+        page_source_sha256="a" * 64,
+        root_input_pixel_sha256="b" * 64,
+        input_pixel_sha256=sha256_text(f"pixels:{observation_id}"),
+        payload_sha256=sha256_text(text),
     )
 
 
@@ -324,7 +334,7 @@ def test_ocr_ready_graph_does_not_require_executor_before_execution_planning() -
     )
 
     assert graph.owners[0].state == "ocr_ready"
-    assert graph.validate() == []
+    assert graph.validate() == ()
 
 
 def test_overlapping_partial_component_sets_require_review() -> None:

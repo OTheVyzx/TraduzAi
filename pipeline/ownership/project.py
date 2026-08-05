@@ -10,10 +10,14 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Iterable, Sequence
 
-from .model import OwnerGraph, OwnerGraphValidationError
+from .model import (
+    OWNER_GRAPH_LEGACY_SCHEMA_VERSION,
+    OWNER_GRAPH_SCHEMA_VERSION,
+    OwnerGraph,
+    OwnerGraphValidationError,
+)
 
 
-OWNER_GRAPH_SCHEMA_VERSION = 1
 OWNER_GRAPH_STATUS_VERIFIED = "verified"
 OWNER_GRAPH_STATUS_LEGACY_UNVERIFIED = "legacy_unverified"
 OWNER_GRAPH_STATUSES = frozenset(
@@ -124,12 +128,24 @@ def _require_known_references(
             )
 
 
-def validate_serialized_owner_graph(graph_payload: Any) -> OwnerGraph:
+def validate_serialized_owner_graph(
+    graph_payload: Any,
+    *,
+    enforce: bool = False,
+) -> OwnerGraph:
     """Validate a serialized graph more strictly than the tolerant reader."""
 
     if not isinstance(graph_payload, dict):
         raise OwnerProjectValidationError("owner graph must be an object")
-    if graph_payload.get("schema_version") != OWNER_GRAPH_SCHEMA_VERSION:
+    schema_version = graph_payload.get("schema_version")
+    if schema_version == OWNER_GRAPH_LEGACY_SCHEMA_VERSION:
+        try:
+            return OwnerGraph.from_dict(deepcopy(graph_payload), enforce=enforce)
+        except OwnerGraphValidationError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise OwnerProjectValidationError(f"owner graph is invalid: {exc}") from exc
+    if schema_version != OWNER_GRAPH_SCHEMA_VERSION:
         raise OwnerProjectValidationError(
             f"owner graph schema_version must be {OWNER_GRAPH_SCHEMA_VERSION}"
         )
@@ -280,9 +296,11 @@ def validate_serialized_owner_graph(graph_payload: Any) -> OwnerGraph:
                 )
 
     try:
-        graph = OwnerGraph.from_dict(deepcopy(graph_payload))
-        graph.require_valid()
-    except (OwnerGraphValidationError, TypeError, ValueError) as exc:
+        graph = OwnerGraph.from_dict(deepcopy(graph_payload), enforce=enforce)
+        graph.require_valid(mode="enforce" if enforce else "shadow")
+    except OwnerGraphValidationError:
+        raise
+    except (TypeError, ValueError) as exc:
         raise OwnerProjectValidationError(f"owner graph is invalid: {exc}") from exc
     return graph
 
@@ -295,7 +313,7 @@ def build_owner_invariant_summary(
     validated = [
         graph
         if isinstance(graph, OwnerGraph)
-        else validate_serialized_owner_graph(graph)
+        else validate_serialized_owner_graph(graph, enforce=True)
         for graph in graphs
     ]
     violations = [violation for graph in validated for violation in graph.violations]
@@ -336,7 +354,7 @@ def serialize_page_owner_graphs(records: Iterable[Any]) -> list[dict[str, Any]]:
     component_pages: dict[str, str] = {}
     observation_pages: dict[str, str] = {}
     for payload in _graph_payload_candidates(records):
-        graph = validate_serialized_owner_graph(payload)
+        graph = validate_serialized_owner_graph(payload, enforce=True)
         canonical = graph.to_dict()
         existing = by_page.get(graph.page_id)
         if existing is not None:
@@ -717,6 +735,6 @@ def verified_owner_graphs_from_project(project: dict[str, Any]) -> list[OwnerGra
             "legacy_unverified project must reprocess the page before owner execution"
         )
     return [
-        validate_serialized_owner_graph(payload)
+        validate_serialized_owner_graph(payload, enforce=True)
         for payload in project.get("page_owner_graphs") or []
     ]

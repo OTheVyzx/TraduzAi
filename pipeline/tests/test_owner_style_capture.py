@@ -8,7 +8,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from ownership.hash_contract import sha256_text
 from ownership.model import (
+    OWNER_GRAPH_SCHEMA_VERSION,
     ComponentDisposition,
     OwnerGraph,
     SourceTextComponent,
@@ -44,6 +46,15 @@ def _graph(*confidences: float, route_action: str = "translate_inpaint_render") 
             provider="paddle_full_page",
             bbox_page=component.bbox_page,
             polygons_page=(component.polygon_page,),
+            run_id="run-style-capture",
+            origin_execution_id="execution-style-capture",
+            invocation_id=f"invocation-style-capture-{index}",
+            attempt_id=f"attempt-style-capture-{index}",
+            provider_family="paddle",
+            page_source_sha256="a" * 64,
+            root_input_pixel_sha256="b" * 64,
+            input_pixel_sha256=f"{index:064x}",
+            payload_sha256=sha256_text("SOURCE"),
         )
         for index, confidence in enumerate(confidences, start=1)
     ]
@@ -62,8 +73,11 @@ def _graph(*confidences: float, route_action: str = "translate_inpaint_render") 
         execution_tile_id=None,
     )
     return OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_001",
+        run_id="run-style-capture",
+        origin_execution_id="execution-style-capture",
+        page_source_sha256="a" * 64,
         components=[component],
         observations=observations,
         owners=[owner],

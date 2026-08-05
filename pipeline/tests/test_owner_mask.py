@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ownership.model import TextOwner  # noqa: E402
+from ownership.model import OWNER_GRAPH_SCHEMA_VERSION, TextOwner  # noqa: E402
 
 
 def _owner() -> TextOwner:
@@ -757,8 +757,11 @@ def test_owner_action_mask_ref_roundtrips_with_owner_graph():
     owner = _owner()
     owner.action_mask_ref = "owner_masks/own_page_001_body/action_mask.png"
     graph = OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_001",
+        run_id="run-owner-mask",
+        origin_execution_id="execution-owner-mask",
+        page_source_sha256="a" * 64,
         components=[],
         observations=[],
         owners=[owner],
@@ -1756,8 +1759,11 @@ def test_mask_ready_owner_without_action_ref_is_invalid():
     owner.state = "mask_ready"
     owner.action_mask_ref = None
     graph = OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_001",
+        run_id="run-owner-mask",
+        origin_execution_id="execution-owner-mask",
+        page_source_sha256="a" * 64,
         components=[],
         observations=[],
         owners=[owner],

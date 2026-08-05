@@ -16,8 +16,11 @@ from ownership.ocr_adapter import (  # noqa: E402
     attach_observation_manifest,
     collect_page_observations,
     record_to_observation,
+    ocr_record_to_observation,
 )
-from ownership.model import OwnerGraph  # noqa: E402
+from ownership.hash_contract import sha256_text  # noqa: E402
+from ownership.ocr_contract import OCRObservationRecord  # noqa: E402
+from ownership.model import OWNER_GRAPH_SCHEMA_VERSION, OwnerGraph  # noqa: E402
 
 
 def _projection() -> TileProjection:
@@ -26,6 +29,46 @@ def _projection() -> TileProjection:
         tile_id="band_014",
         offset_xy=(17, 240),
     )
+
+
+def test_atomic_ocr_record_identity_is_preserved_without_regeneration() -> None:
+    payload = "CURRENT ENGLISH BODY"
+    record = OCRObservationRecord(
+        observation_id="atomic-observation-1",
+        attempt_id="atomic-attempt-1",
+        run_id="run-atomic",
+        origin_execution_id="execution-atomic",
+        page_id="page_003",
+        page_source_sha256="a" * 64,
+        root_input_pixel_sha256="b" * 64,
+        input_pixel_sha256="c" * 64,
+        invocation_id="invocation-atomic",
+        provider_family="paddleocr",
+        variant_id="inverted",
+        payload_sha256=sha256_text(payload),
+        text=payload,
+        confidence=0.96,
+        bbox_page=(10, 20, 180, 70),
+        polygon_page=((10, 20), (180, 20), (180, 70), (10, 70)),
+        source="paddle_full_page",
+    )
+
+    observation = ocr_record_to_observation(
+        record,
+        TileProjection(page_id="page_003", tile_id="full-page", coordinate_space="page"),
+    )
+
+    assert observation.observation_id == record.observation_id
+    assert observation.run_id == record.run_id
+    assert observation.origin_execution_id == record.origin_execution_id
+    assert observation.invocation_id == record.invocation_id
+    assert observation.attempt_id == record.attempt_id
+    assert observation.provider_family == record.provider_family
+    assert observation.provider_variant == record.variant_id
+    assert observation.page_source_sha256 == record.page_source_sha256
+    assert observation.root_input_pixel_sha256 == record.root_input_pixel_sha256
+    assert observation.input_pixel_sha256 == record.input_pixel_sha256
+    assert observation.payload_sha256 == record.payload_sha256
 
 
 def test_full_page_crop_negative_rotated_and_recovery_become_observations() -> None:
@@ -494,8 +537,11 @@ def test_enriched_observation_round_trips_through_owner_graph_serialization() ->
         ),
     )
     graph = OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_003",
+        run_id="run-ocr-adapter",
+        origin_execution_id="execution-ocr-adapter",
+        page_source_sha256="a" * 64,
         components=[],
         observations=[observation],
         owners=[],
@@ -647,7 +693,7 @@ def test_malformed_secondary_bbox_is_not_silently_accepted() -> None:
     assert observation.rejection_reason == "invalid_source_bbox"
 
 
-def test_manifest_keeps_first_reading_when_same_observation_is_later_normalized() -> None:
+def test_manifest_rejects_same_id_when_text_is_later_normalized() -> None:
     raw = record_to_observation(
         {
             "text": "raw  spacing",
@@ -662,11 +708,8 @@ def test_manifest_keeps_first_reading_when_same_observation_is_later_normalized(
         legacy_selected=True,
     )
 
-    attached = attach_observation_manifest(
-        attach_observation_manifest({}, [raw]),
-        [legacy_selected],
-    )
-
-    assert len(attached["owner_observations"]) == 1
-    assert attached["owner_observations"][0]["text"] == "raw  spacing"
-    assert attached["owner_observations"][0]["legacy_selected"] is True
+    with pytest.raises(ValueError, match="observation_id collision.*text"):
+        attach_observation_manifest(
+            attach_observation_manifest({}, [raw]),
+            [legacy_selected],
+        )

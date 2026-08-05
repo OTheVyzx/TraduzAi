@@ -7,7 +7,9 @@ import importlib.util
 import numpy as np
 import pytest
 
+from ownership.hash_contract import sha256_text
 from ownership.model import (
+    OWNER_GRAPH_SCHEMA_VERSION,
     ComponentDisposition,
     OwnerGraph,
     OwnerProjection,
@@ -34,6 +36,15 @@ def _graph(*, role: str = "dialogue", reverse: bool = False) -> OwnerGraph:
             polygons_page=(_polygon((24, 32, 68, 53)), _polygon((26, 60, 78, 83))),
             tile_provenance=("tile_002", "tile_001"),
             projection_ids=("projection_b", "projection_a"),
+            run_id="run-render-geometry",
+            origin_execution_id="execution-render-geometry",
+            invocation_id="invocation-observation-a",
+            attempt_id="attempt-observation-a",
+            provider_family="paddle",
+            page_source_sha256="a" * 64,
+            root_input_pixel_sha256="b" * 64,
+            input_pixel_sha256="c" * 64,
+            payload_sha256=sha256_text("SOURCE BODY"),
         )
     ]
     projections = [
@@ -45,8 +56,11 @@ def _graph(*, role: str = "dialogue", reverse: bool = False) -> OwnerGraph:
         observations.reverse()
         projections.reverse()
     return OwnerGraph(
-        schema_version=2,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_1",
+        run_id="run-render-geometry",
+        origin_execution_id="execution-render-geometry",
+        page_source_sha256="a" * 64,
         components=components,
         observations=observations,
         owners=[TextOwner("owner_a", "page_1", ["component_b", "component_a"], ["observation_a"], ["observation_a"], role, "SOURCE BODY", "CORPO COMPLETO", "owned", "translated", "translate", "tile_001")],
@@ -126,6 +140,15 @@ def test_verified_container_is_partitioned_away_from_adjacent_foreign_owner():
             "paddle",
             (25, 15, 75, 28),
             polygons_page=(_polygon((25, 15, 75, 28)),),
+            run_id="run-render-geometry",
+            origin_execution_id="execution-render-geometry",
+            invocation_id="invocation-observation-foreign-top",
+            attempt_id="attempt-observation-foreign-top",
+            provider_family="paddle",
+            page_source_sha256="a" * 64,
+            root_input_pixel_sha256="b" * 64,
+            input_pixel_sha256="d" * 64,
+            payload_sha256=sha256_text("FOREIGN"),
         )
     )
     graph.owners.append(
@@ -185,6 +208,15 @@ def test_preserved_foreign_component_uses_accepted_ocr_geometry_not_rejected_coa
                 "paddle_full_page",
                 (25, 15, 75, 27),
                 polygons_page=(_polygon((25, 15, 75, 27)),),
+                run_id="run-render-geometry",
+                origin_execution_id="execution-render-geometry",
+                invocation_id="invocation-observation-ding",
+                attempt_id="attempt-observation-ding",
+                provider_family="paddle",
+                page_source_sha256="a" * 64,
+                root_input_pixel_sha256="b" * 64,
+                input_pixel_sha256="e" * 64,
+                payload_sha256=sha256_text("DING"),
             ),
             TextObservation(
                 "observation_ding_elixir",
@@ -196,6 +228,15 @@ def test_preserved_foreign_component_uses_accepted_ocr_geometry_not_rejected_coa
                 (25, 15, 75, 35),
                 polygons_page=(_polygon((25, 15, 75, 35)),),
                 rejection_reason="cross_region_same_role_observation",
+                run_id="run-render-geometry",
+                origin_execution_id="execution-render-geometry",
+                invocation_id="invocation-observation-ding-elixir",
+                attempt_id="attempt-observation-ding-elixir",
+                provider_family="candidate_crop_direct_paddle",
+                page_source_sha256="a" * 64,
+                root_input_pixel_sha256="b" * 64,
+                input_pixel_sha256="f" * 64,
+                payload_sha256=sha256_text("DING ELIXIR"),
             ),
         ]
     )
@@ -253,6 +294,15 @@ def test_preserved_foreign_component_ignores_minority_accepted_bbox_outliers():
                 "paddle_full_page",
                 bbox,
                 polygons_page=(_polygon(bbox),),
+                run_id="run-render-geometry",
+                origin_execution_id="execution-render-geometry",
+                invocation_id=f"invocation-observation-credit-{index}",
+                attempt_id=f"attempt-observation-credit-{index}",
+                provider_family="paddle",
+                page_source_sha256="a" * 64,
+                root_input_pixel_sha256="b" * 64,
+                input_pixel_sha256=f"{index + 16:064x}",
+                payload_sha256=sha256_text("READ AT EXAMPLE.COM"),
             )
         )
     graph.component_dispositions.append(
@@ -300,6 +350,15 @@ def test_foreign_component_may_overlap_component_padding_without_source_ink_over
             "paddle_full_page",
             (60, 15, 90, 31),
             polygons_page=(_polygon((60, 15, 90, 31)),),
+            run_id="run-render-geometry",
+            origin_execution_id="execution-render-geometry",
+            invocation_id="invocation-observation-ding-padding",
+            attempt_id="attempt-observation-ding-padding",
+            provider_family="paddle",
+            page_source_sha256="a" * 64,
+            root_input_pixel_sha256="b" * 64,
+            input_pixel_sha256="1" * 64,
+            payload_sha256=sha256_text("DING"),
         )
     )
 
@@ -340,6 +399,15 @@ def test_foreign_component_overlapping_source_replacement_still_requires_review(
             "paddle_full_page",
             (60, 15, 90, 40),
             polygons_page=(_polygon((60, 15, 90, 40)),),
+            run_id="run-render-geometry",
+            origin_execution_id="execution-render-geometry",
+            invocation_id="invocation-observation-foreign-overlap",
+            attempt_id="attempt-observation-foreign-overlap",
+            provider_family="paddle",
+            page_source_sha256="a" * 64,
+            root_input_pixel_sha256="b" * 64,
+            input_pixel_sha256="2" * 64,
+            payload_sha256=sha256_text("FOREIGN"),
         )
     )
 

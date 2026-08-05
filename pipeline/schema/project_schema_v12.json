@@ -74,7 +74,7 @@
         "paginas": { "type": "array" }
       }
     },
-    "owner_graph_schema_version": { "const": 1 },
+    "owner_graph_schema_version": { "const": 2 },
     "owner_graph_status": {
       "enum": ["verified", "legacy_unverified"]
     },
@@ -164,7 +164,16 @@
         "text",
         "confidence",
         "provider",
-        "bbox_page"
+        "bbox_page",
+        "run_id",
+        "origin_execution_id",
+        "invocation_id",
+        "attempt_id",
+        "provider_family",
+        "page_source_sha256",
+        "root_input_pixel_sha256",
+        "input_pixel_sha256",
+        "payload_sha256"
       ],
       "properties": {
         "observation_id": {
@@ -197,7 +206,16 @@
           "items": { "type": "integer" },
           "minItems": 4,
           "maxItems": 4
-        }
+        },
+        "run_id": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+        "origin_execution_id": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+        "invocation_id": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+        "attempt_id": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+        "provider_family": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+        "page_source_sha256": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+        "root_input_pixel_sha256": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+        "input_pixel_sha256": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+        "payload_sha256": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" }
       }
     },
     "textOwner": {
@@ -372,6 +390,10 @@
       "required": [
         "schema_version",
         "page_id",
+        "run_id",
+        "origin_execution_id",
+        "page_source_sha256",
+        "verification_status",
         "components",
         "observations",
         "owners",
@@ -380,12 +402,16 @@
         "violations"
       ],
       "properties": {
-        "schema_version": { "const": 1 },
+        "schema_version": { "const": 2 },
         "page_id": {
           "type": "string",
           "minLength": 1,
           "pattern": "^\\S(?:.*\\S)?$"
         },
+        "run_id": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+        "origin_execution_id": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+        "page_source_sha256": { "type": "string", "minLength": 1, "pattern": "^\\S(?:.*\\S)?$" },
+        "verification_status": { "const": "verified" },
         "components": {
           "type": "array",
           "items": { "$ref": "#/$defs/sourceTextComponent" }

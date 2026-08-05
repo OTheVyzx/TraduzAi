@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from schema.migrate_project import migrate_project_to_v12  # noqa: E402
 from schema.project_schema_v12 import SCHEMA_VERSION, validate_project_v12  # noqa: E402
 from ownership.project import (  # noqa: E402
+    OWNER_GRAPH_SCHEMA_VERSION,
     OwnerProjectValidationError,
     verified_owner_graphs_from_project,
 )
@@ -42,12 +43,16 @@ class ProjectMigrationTests(unittest.TestCase):
             },
             "export_report": {"status": "not_exported", "files": []},
             "legacy": {"paginas": []},
-            "owner_graph_schema_version": 1,
+            "owner_graph_schema_version": OWNER_GRAPH_SCHEMA_VERSION,
             "owner_graph_status": "verified",
             "page_owner_graphs": [
                 {
-                    "schema_version": 1,
+                    "schema_version": OWNER_GRAPH_SCHEMA_VERSION,
                     "page_id": "page_001",
+                    "run_id": "verified-existing",
+                    "origin_execution_id": "verified-existing-execution",
+                    "page_source_sha256": "a" * 64,
+                    "verification_status": "verified",
                     "components": [],
                     "observations": [],
                     "owners": [],
@@ -116,7 +121,9 @@ class ProjectMigrationTests(unittest.TestCase):
         self.assertEqual(region["region_type"], "speech_balloon")
         self.assertEqual(region["ocr_confidence"], 0.91)
         self.assertEqual(region["qa_flags"], ["needs_review"])
-        self.assertEqual(migrated["owner_graph_schema_version"], 1)
+        self.assertEqual(
+            migrated["owner_graph_schema_version"], OWNER_GRAPH_SCHEMA_VERSION
+        )
         self.assertEqual(migrated["owner_graph_status"], "legacy_unverified")
         self.assertEqual(migrated["page_owner_graphs"], [])
         self.assertEqual(validate_project_v12(migrated), [])

@@ -8,7 +8,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ownership.hash_contract import sha256_text  # noqa: E402
 from ownership.model import (  # noqa: E402
+    OWNER_GRAPH_SCHEMA_VERSION,
     ComponentDisposition,
     OwnerGraph,
     OwnerGraphValidationError,
@@ -42,6 +44,15 @@ def _observation(
         provider="full_page_ocr",
         bbox_page=(100, 120, 300, 180),
         tile_provenance=("tile_a",),
+        run_id="run-owner-graph",
+        origin_execution_id="execution-owner-graph",
+        invocation_id=f"invocation-{observation_id}",
+        attempt_id=f"attempt-{observation_id}",
+        provider_family="full_page_ocr",
+        page_source_sha256="a" * 64,
+        root_input_pixel_sha256="b" * 64,
+        input_pixel_sha256="c" * 64,
+        payload_sha256=sha256_text("SOURCE BODY"),
     )
 
 
@@ -91,8 +102,11 @@ def _disposition(
 
 def _valid_graph() -> OwnerGraph:
     return OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_a",
+        run_id="run-owner-graph",
+        origin_execution_id="execution-owner-graph",
+        page_source_sha256="a" * 64,
         components=[_component()],
         observations=[_observation()],
         owners=[_owner()],

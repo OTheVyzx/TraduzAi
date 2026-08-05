@@ -10635,7 +10635,9 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(int(saved[3, 6]), 2)
 
     def test_build_project_json_includes_serialized_owner_graphs(self) -> None:
+        from ownership.hash_contract import sha256_text
         from ownership.model import (
+            OWNER_GRAPH_SCHEMA_VERSION,
             ComponentDisposition,
             OwnerGraph,
             SourceTextComponent,
@@ -10644,8 +10646,11 @@ class MainEmitTests(unittest.TestCase):
         )
 
         graph = OwnerGraph(
-            schema_version=1,
+            schema_version=OWNER_GRAPH_SCHEMA_VERSION,
             page_id="page_001",
+            run_id="run-main-emit",
+            origin_execution_id="execution-main-emit",
+            page_source_sha256="a" * 64,
             components=[
                 SourceTextComponent(
                     component_id="cmp_page_001_body",
@@ -10664,6 +10669,15 @@ class MainEmitTests(unittest.TestCase):
                     confidence=0.97,
                     provider="fixture",
                     bbox_page=(10, 20, 110, 80),
+                    run_id="run-main-emit",
+                    origin_execution_id="execution-main-emit",
+                    invocation_id="invocation-main-emit-body",
+                    attempt_id="attempt-main-emit-body",
+                    provider_family="fixture",
+                    page_source_sha256="a" * 64,
+                    root_input_pixel_sha256="b" * 64,
+                    input_pixel_sha256="c" * 64,
+                    payload_sha256=sha256_text("HELLO THERE"),
                 )
             ],
             owners=[
@@ -10726,7 +10740,7 @@ class MainEmitTests(unittest.TestCase):
             0.1,
         )
 
-        self.assertEqual(project["owner_graph_schema_version"], 1)
+        self.assertEqual(project["owner_graph_schema_version"], OWNER_GRAPH_SCHEMA_VERSION)
         self.assertEqual(project["owner_graph_status"], "verified")
         self.assertEqual(project["page_owner_graphs"], [graph.to_dict()])
         self.assertEqual(project["owner_invariant_summary"]["owner_count"], 1)

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 from hashlib import sha256
 import json
 import math
 from pathlib import PurePosixPath
 import re
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 import numpy as np
 
@@ -23,6 +23,9 @@ except ImportError:  # pragma: no cover - supports package imports
 
 BBox = tuple[int, int, int, int]
 Point = tuple[int, int]
+
+OWNER_GRAPH_SCHEMA_VERSION = 2
+OWNER_GRAPH_LEGACY_SCHEMA_VERSION = 1
 
 FINAL_COMPONENT_DECISIONS = frozenset({"owned", "preserve", "suppress", "review"})
 OWNER_DISPOSITIONS = frozenset({"owned", "review"})
@@ -203,7 +206,6 @@ class TextObservation:
     legacy_rejection_reason: str | None = None
     legacy_selected: bool = False
     provider_variant: str = ""
-    attempt_id: str = ""
     provider_record_id: str | None = None
     projection_ids: tuple[str, ...] = ()
     raw_text: str | None = None
@@ -213,6 +215,34 @@ class TextObservation:
     line_texts: tuple[str, ...] = ()
     rotation_deg: float | None = None
     rotation_source: str | None = None
+    _: KW_ONLY
+    run_id: str = ""
+    origin_execution_id: str = ""
+    invocation_id: str = ""
+    attempt_id: str = ""
+    provider_family: str = ""
+    page_source_sha256: str = ""
+    root_input_pixel_sha256: str = ""
+    input_pixel_sha256: str = ""
+    payload_sha256: str = ""
+
+    @property
+    def identity_complete(self) -> bool:
+        return all(
+            str(value or "").strip()
+            for value in (
+                self.run_id,
+                self.origin_execution_id,
+                self.page_id,
+                self.invocation_id,
+                self.attempt_id,
+                self.provider_family,
+                self.page_source_sha256,
+                self.root_input_pixel_sha256,
+                self.input_pixel_sha256,
+                self.payload_sha256,
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -1372,9 +1402,57 @@ class OwnerGraph:
     projections: list[OwnerProjection]
     component_dispositions: list[ComponentDisposition] = field(default_factory=list)
     violations: list[OwnerViolation] = field(default_factory=list)
+    _: KW_ONLY
+    run_id: str = ""
+    origin_execution_id: str = ""
+    page_source_sha256: str = ""
+    verification_status: Literal["verified", "legacy_unverified"] = "verified"
 
-    def validate(self) -> list[OwnerViolation]:
+    def validate(self, *, mode: str = "legacy") -> tuple[OwnerViolation, ...]:
         violations = list(self.violations)
+        if mode not in {"legacy", "shadow", "enforce"}:
+            raise ValueError(f"unsupported owner graph validation mode: {mode}")
+        if self.schema_version not in {
+            OWNER_GRAPH_LEGACY_SCHEMA_VERSION,
+            OWNER_GRAPH_SCHEMA_VERSION,
+        }:
+            violations.append(
+                _violation(
+                    "owner_graph_schema_unknown",
+                    "Owner graph schema version is unsupported.",
+                    str(self.schema_version),
+                )
+            )
+        if mode == "enforce":
+            if self.schema_version != OWNER_GRAPH_SCHEMA_VERSION:
+                violations.append(
+                    _violation(
+                        "owner_graph_schema_legacy",
+                        "Legacy owner graphs cannot enter enforce mode.",
+                        str(self.schema_version),
+                    )
+                )
+            if self.verification_status != "verified":
+                violations.append(
+                    _violation(
+                        "owner_graph_unverified",
+                        "Only explicitly verified owner graphs can enter enforce mode.",
+                        self.verification_status,
+                    )
+                )
+            for field_name, value in (
+                ("run_id", self.run_id),
+                ("origin_execution_id", self.origin_execution_id),
+                ("page_id", self.page_id),
+                ("page_source_sha256", self.page_source_sha256),
+            ):
+                if not str(value or "").strip():
+                    violations.append(
+                        _violation(
+                            f"owner_graph_{field_name}_missing",
+                            f"Verified owner graph is missing {field_name}.",
+                        )
+                    )
         component_ids = {component.component_id for component in self.components}
         observation_ids = {observation.observation_id for observation in self.observations}
         observations_by_id = {
@@ -1432,6 +1510,50 @@ class OwnerGraph:
                     )
                 )
         for observation in self.observations:
+            if mode == "enforce":
+                if not observation.identity_complete:
+                    violations.append(
+                        _violation(
+                            "observation_identity_incomplete",
+                            "Text observation has incomplete OCR request identity.",
+                            observation.observation_id,
+                        )
+                    )
+                for field_name, observed, expected in (
+                    ("run_id", observation.run_id, self.run_id),
+                    (
+                        "origin_execution_id",
+                        observation.origin_execution_id,
+                        self.origin_execution_id,
+                    ),
+                    ("page_id", observation.page_id, self.page_id),
+                    (
+                        "page_source_sha256",
+                        observation.page_source_sha256,
+                        self.page_source_sha256,
+                    ),
+                ):
+                    if observed != expected:
+                        violations.append(
+                            _violation(
+                                f"observation_{field_name}_mismatch",
+                                f"Text observation {field_name} differs from its graph.",
+                                observation.observation_id,
+                                str(observed),
+                                str(expected),
+                            )
+                        )
+                expected_payload_sha256 = sha256(
+                    str(observation.text or "").encode("utf-8")
+                ).hexdigest()
+                if observation.payload_sha256 != expected_payload_sha256:
+                    violations.append(
+                        _violation(
+                            "observation_payload_hash_mismatch",
+                            "Text observation payload hash does not match its text.",
+                            observation.observation_id,
+                        )
+                    )
             if observation.page_id != self.page_id:
                 violations.append(
                     _violation(
@@ -2039,10 +2161,10 @@ class OwnerGraph:
                         )
                     )
 
-        return _dedupe_and_sort_violations(violations)
+        return tuple(_dedupe_and_sort_violations(violations))
 
-    def require_valid(self) -> None:
-        violations = self.validate()
+    def require_valid(self, *, mode: str = "legacy") -> None:
+        violations = self.validate(mode=mode)
         if any(violation.severity == "critical" for violation in violations):
             raise OwnerGraphValidationError(violations)
 
@@ -2050,6 +2172,14 @@ class OwnerGraph:
         return {
             "schema_version": int(self.schema_version),
             "page_id": self.page_id,
+            "run_id": self.run_id,
+            "origin_execution_id": self.origin_execution_id,
+            "page_source_sha256": self.page_source_sha256,
+            "verification_status": (
+                "legacy_unverified"
+                if self.schema_version == OWNER_GRAPH_LEGACY_SCHEMA_VERSION
+                else self.verification_status
+            ),
             "components": [
                 {
                     "component_id": component.component_id,
@@ -2093,7 +2223,6 @@ class OwnerGraph:
                     "legacy_rejection_reason": observation.legacy_rejection_reason,
                     "legacy_selected": bool(observation.legacy_selected),
                     "provider_variant": observation.provider_variant,
-                    "attempt_id": observation.attempt_id,
                     "provider_record_id": observation.provider_record_id,
                     "projection_ids": list(observation.projection_ids),
                     "raw_text": observation.raw_text,
@@ -2119,6 +2248,15 @@ class OwnerGraph:
                         else None
                     ),
                     "rotation_source": observation.rotation_source,
+                    "run_id": observation.run_id,
+                    "origin_execution_id": observation.origin_execution_id,
+                    "invocation_id": observation.invocation_id,
+                    "attempt_id": observation.attempt_id,
+                    "provider_family": observation.provider_family,
+                    "page_source_sha256": observation.page_source_sha256,
+                    "root_input_pixel_sha256": observation.root_input_pixel_sha256,
+                    "input_pixel_sha256": observation.input_pixel_sha256,
+                    "payload_sha256": observation.payload_sha256,
                 }
                 for observation in sorted(
                     self.observations, key=lambda item: item.observation_id
@@ -2174,9 +2312,23 @@ class OwnerGraph:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "OwnerGraph":
-        return cls(
-            schema_version=int(data.get("schema_version") or 1),
+    def from_dict(cls, data: dict[str, Any], *, enforce: bool = False) -> "OwnerGraph":
+        schema_version = int(data.get("schema_version") or OWNER_GRAPH_LEGACY_SCHEMA_VERSION)
+        if schema_version not in {
+            OWNER_GRAPH_LEGACY_SCHEMA_VERSION,
+            OWNER_GRAPH_SCHEMA_VERSION,
+        }:
+            raise OwnerGraphValidationError(
+                (
+                    _violation(
+                        "owner_graph_schema_unknown",
+                        "Owner graph schema version is unsupported.",
+                        str(schema_version),
+                    ),
+                )
+            )
+        graph = cls(
+            schema_version=schema_version,
             page_id=str(data.get("page_id") or ""),
             components=[
                 SourceTextComponent(
@@ -2243,7 +2395,6 @@ class OwnerGraph:
                     ),
                     legacy_selected=bool(item.get("legacy_selected", False)),
                     provider_variant=str(item.get("provider_variant") or ""),
-                    attempt_id=str(item.get("attempt_id") or ""),
                     provider_record_id=(
                         str(item["provider_record_id"])
                         if item.get("provider_record_id") is not None
@@ -2271,6 +2422,19 @@ class OwnerGraph:
                         if item.get("rotation_source") is not None
                         else None
                     ),
+                    run_id=str(item.get("run_id") or ""),
+                    origin_execution_id=str(item.get("origin_execution_id") or ""),
+                    invocation_id=str(item.get("invocation_id") or ""),
+                    attempt_id=str(
+                        item.get("attempt_id") or item.get("ocr_attempt_id") or ""
+                    ),
+                    provider_family=str(item.get("provider_family") or ""),
+                    page_source_sha256=str(item.get("page_source_sha256") or ""),
+                    root_input_pixel_sha256=str(
+                        item.get("root_input_pixel_sha256") or ""
+                    ),
+                    input_pixel_sha256=str(item.get("input_pixel_sha256") or ""),
+                    payload_sha256=str(item.get("payload_sha256") or ""),
                 )
                 for item in data.get("observations") or ()
             ],
@@ -2340,7 +2504,31 @@ class OwnerGraph:
             violations=[
                 OwnerViolation.from_dict(item) for item in data.get("violations") or ()
             ],
+            run_id=str(data.get("run_id") or ""),
+            origin_execution_id=str(data.get("origin_execution_id") or ""),
+            page_source_sha256=str(data.get("page_source_sha256") or ""),
+            verification_status=(
+                str(data.get("verification_status") or "")
+                if schema_version == OWNER_GRAPH_SCHEMA_VERSION
+                else "legacy_unverified"
+            ),
         )
+        for item in data.get("observations") or ():
+            legacy_attempt = item.get("ocr_attempt_id")
+            canonical_attempt = item.get("attempt_id")
+            if legacy_attempt and canonical_attempt and str(legacy_attempt) != str(canonical_attempt):
+                raise OwnerGraphValidationError(
+                    (
+                        _violation(
+                            "observation_attempt_identity_conflict",
+                            "Legacy and canonical OCR attempt identities disagree.",
+                            str(item.get("observation_id") or ""),
+                        ),
+                    )
+                )
+        if enforce:
+            graph.require_valid(mode="enforce")
+        return graph
 
 
 def _violation(code: str, message: str, *offenders: str) -> OwnerViolation:

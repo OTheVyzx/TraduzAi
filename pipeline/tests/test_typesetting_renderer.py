@@ -39,7 +39,9 @@ from typesetter.renderer import (
     render_band_image,
     render_text_block,
 )
+from ownership.hash_contract import sha256_text
 from ownership.model import (
+    OWNER_GRAPH_SCHEMA_VERSION,
     ComponentDisposition,
     OwnerGlyphPatch,
     OwnerGraph,
@@ -878,10 +880,22 @@ class TypesettingRendererTests(unittest.TestCase):
             provider="paddle_full_page",
             bbox_page=component.bbox_page,
             tile_provenance=("tile_executor",),
+            run_id="run-typesetting-renderer",
+            origin_execution_id="execution-typesetting-renderer",
+            invocation_id="invocation-typesetting-renderer-body",
+            attempt_id="attempt-typesetting-renderer-body",
+            provider_family="paddle",
+            page_source_sha256="a" * 64,
+            root_input_pixel_sha256="b" * 64,
+            input_pixel_sha256="c" * 64,
+            payload_sha256=sha256_text("SOURCE BODY"),
         )
         graph = OwnerGraph(
-            schema_version=1,
+            schema_version=OWNER_GRAPH_SCHEMA_VERSION,
             page_id="page_001",
+            run_id="run-typesetting-renderer",
+            origin_execution_id="execution-typesetting-renderer",
+            page_source_sha256="a" * 64,
             owners=[owner],
             components=[component],
             observations=[observation],

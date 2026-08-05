@@ -11,7 +11,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ownership.hash_contract import sha256_text
 from ownership.model import (
+    OWNER_GRAPH_SCHEMA_VERSION,
     ComponentDisposition,
     OwnerGraph,
     OwnerGraphValidationError,
@@ -67,6 +69,15 @@ def _observation(
         bbox_page=component.bbox_page,
         tile_provenance=tile_provenance or (f"tile_{owner_suffix}",),
         coverage_score=1.0,
+        run_id="run-owner-translation",
+        origin_execution_id="execution-owner-translation",
+        invocation_id=f"invocation-owner-translation-{suffix}",
+        attempt_id=f"attempt-owner-translation-{suffix}",
+        provider_family="paddle",
+        page_source_sha256="a" * 64,
+        root_input_pixel_sha256="b" * 64,
+        input_pixel_sha256=sha256_text(f"pixels:{suffix}"),
+        payload_sha256=sha256_text(text),
     )
 
 
@@ -127,8 +138,11 @@ def _graph(
         )
 
     return OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_001",
+        run_id="run-owner-translation",
+        origin_execution_id="execution-owner-translation",
+        page_source_sha256="a" * 64,
         components=components,
         observations=observations,
         owners=owners,

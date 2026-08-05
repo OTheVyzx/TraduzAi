@@ -9962,6 +9962,14 @@ def _observation_from_manifest_row(
         rotation_source=(
             str(row.get("rotation_source")) if row.get("rotation_source") else None
         ),
+        run_id=str(row.get("run_id") or ""),
+        origin_execution_id=str(row.get("origin_execution_id") or ""),
+        invocation_id=str(row.get("invocation_id") or ""),
+        provider_family=str(row.get("provider_family") or ""),
+        page_source_sha256=str(row.get("page_source_sha256") or ""),
+        root_input_pixel_sha256=str(row.get("root_input_pixel_sha256") or ""),
+        input_pixel_sha256=str(row.get("input_pixel_sha256") or ""),
+        payload_sha256=str(row.get("payload_sha256") or ""),
     )
 
 

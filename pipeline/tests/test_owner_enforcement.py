@@ -44,6 +44,7 @@ def test_missing_container_is_deferred_to_evidence_reconciliation():
 
 
 def test_numeric_footer_and_header_reach_translator_as_one_payload():
+    from ownership.hash_contract import sha256_text
     from ownership.model import SourceTextComponent, TextObservation
     from ownership.reconcile import SemanticRegion, build_page_owner_graph
     from ownership.translation import owners_to_translation_page
@@ -64,6 +65,15 @@ def test_numeric_footer_and_header_reach_translator_as_one_payload():
             confidence=0.99,
             provider="fixture",
             bbox_page=(100, 100, 300, 145),
+            run_id="run-owner-enforcement-consensus",
+            origin_execution_id="execution-owner-enforcement-consensus",
+            invocation_id="invocation-truncated",
+            attempt_id="attempt-truncated",
+            provider_family="fixture",
+            page_source_sha256="a" * 64,
+            root_input_pixel_sha256="b" * 64,
+            input_pixel_sha256="c" * 64,
+            payload_sha256=sha256_text("TOTAL PURCHASE AMOUNT"),
         ),
         TextObservation(
             observation_id="complete_a",
@@ -73,6 +83,15 @@ def test_numeric_footer_and_header_reach_translator_as_one_payload():
             confidence=0.91,
             provider="fixture",
             bbox_page=(95, 95, 305, 205),
+            run_id="run-owner-enforcement-consensus",
+            origin_execution_id="execution-owner-enforcement-consensus",
+            invocation_id="invocation-complete-a",
+            attempt_id="attempt-complete-a",
+            provider_family="fixture",
+            page_source_sha256="a" * 64,
+            root_input_pixel_sha256="b" * 64,
+            input_pixel_sha256="d" * 64,
+            payload_sha256=sha256_text("TOTAL PURCHASE AMOUNT 200MILLION"),
         ),
         TextObservation(
             observation_id="complete_b",
@@ -82,6 +101,15 @@ def test_numeric_footer_and_header_reach_translator_as_one_payload():
             confidence=0.88,
             provider="fixture",
             bbox_page=(94, 94, 306, 206),
+            run_id="run-owner-enforcement-consensus",
+            origin_execution_id="execution-owner-enforcement-consensus",
+            invocation_id="invocation-complete-b",
+            attempt_id="attempt-complete-b",
+            provider_family="fixture",
+            page_source_sha256="a" * 64,
+            root_input_pixel_sha256="b" * 64,
+            input_pixel_sha256="e" * 64,
+            payload_sha256=sha256_text("TOTAL PURCHASE AMOUNT 200 MILLION"),
         ),
     ]
     graph = build_page_owner_graph(
@@ -177,7 +205,9 @@ def test_owner_mode_does_not_call_mask_or_renderer_semantic_merge_helpers():
 
 def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
     from inpainter.owner_mask import execute_owner_inpaint
+    from ownership.hash_contract import sha256_text
     from ownership.model import (
+        OWNER_GRAPH_SCHEMA_VERSION,
         ComponentDisposition,
         OwnerGlyphPatch,
         OwnerGraph,
@@ -202,8 +232,11 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
     bbox = (8, 7, 42, 27)
     polygon = ((8, 7), (42, 7), (42, 27), (8, 27))
     graph = OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_001",
+        run_id="run-owner-enforcement",
+        origin_execution_id="execution-owner-enforcement",
+        page_source_sha256="a" * 64,
         components=[
             SourceTextComponent(
                 component_id="component_a",
@@ -225,6 +258,15 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
                 bbox_page=bbox,
                 polygons_page=(polygon,),
                 layout_bbox_page=(4, 3, 48, 32),
+                run_id="run-owner-enforcement",
+                origin_execution_id="execution-owner-enforcement",
+                invocation_id="invocation-owner-enforcement-a",
+                attempt_id="attempt-owner-enforcement-a",
+                provider_family="fixture",
+                page_source_sha256="a" * 64,
+                root_input_pixel_sha256="b" * 64,
+                input_pixel_sha256="c" * 64,
+                payload_sha256=sha256_text("SOURCE"),
             )
         ],
         owners=[
@@ -604,7 +646,7 @@ def test_atomic_rejection_revokes_all_owner_write_authority():
     assert reviewed_owner.action_mask_ref is None
     assert reviewed.projections == []
     assert reviewed.component_dispositions[0].decision == "review"
-    assert reviewed.validate() == []
+    assert reviewed.validate() == ()
 
 
 def test_owner_layout_safe_polygon_uses_raster_coordinates_at_page_edges():

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+from ownership.hash_contract import sha256_text
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -11,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def _graph(*, source="SOURCE BODY", translated="CORPO TRADUZIDO", state="rendered"):
     from ownership.model import (
+        OWNER_GRAPH_SCHEMA_VERSION,
         ComponentDisposition,
         OwnerGraph,
         OwnerProjection,
@@ -34,6 +36,15 @@ def _graph(*, source="SOURCE BODY", translated="CORPO TRADUZIDO", state="rendere
         confidence=0.9,
         provider="source_ocr",
         bbox_page=(5, 5, 30, 17),
+        run_id="run-final-pixel-qa",
+        origin_execution_id="execution-final-pixel-qa",
+        invocation_id="invocation-final-pixel-qa-primary",
+        attempt_id="attempt-final-pixel-qa-primary",
+        provider_family="source_ocr",
+        page_source_sha256="a" * 64,
+        root_input_pixel_sha256="b" * 64,
+        input_pixel_sha256="c" * 64,
+        payload_sha256=sha256_text(source),
     )
     owner = TextOwner(
         owner_id="owner_a",
@@ -64,8 +75,11 @@ def _graph(*, source="SOURCE BODY", translated="CORPO TRADUZIDO", state="rendere
         reason="resolved_by_owner_graph",
     )
     return OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_001",
+        run_id="run-final-pixel-qa",
+        origin_execution_id="execution-final-pixel-qa",
+        page_source_sha256="a" * 64,
         components=[component],
         observations=[observation],
         owners=[owner],
@@ -403,6 +417,15 @@ def test_unselected_high_confidence_source_suffix_blocks_incomplete_payload():
         confidence=0.96,
         provider="anchored_crop_2x",
         bbox_page=(5, 5, 30, 17),
+        run_id="run-final-pixel-qa",
+        origin_execution_id="execution-final-pixel-qa",
+        invocation_id="invocation-final-pixel-qa-suffix",
+        attempt_id="attempt-final-pixel-qa-suffix",
+        provider_family="anchored_crop",
+        page_source_sha256="a" * 64,
+        root_input_pixel_sha256="b" * 64,
+        input_pixel_sha256="d" * 64,
+        payload_sha256=sha256_text("THE REWARD IS 200 MILLION GOLD"),
     )
     graph.observations.append(extra)
     graph.owners[0] = replace(

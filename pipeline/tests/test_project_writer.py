@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from main import _save_project_json
 from project_writer import validate_project_consistency, write_project_json_atomic
 from style_v2_fixtures import valid_owner_style_raster_contract
+from ownership.model import OWNER_GRAPH_SCHEMA_VERSION
 
 
 def _project():
@@ -21,8 +23,12 @@ def _project():
 
 def _verified_owner_project():
     graph = {
-        "schema_version": 1,
+        "schema_version": OWNER_GRAPH_SCHEMA_VERSION,
         "page_id": "page_001",
+        "run_id": "run-project-writer",
+        "origin_execution_id": "execution-project-writer",
+        "page_source_sha256": "a" * 64,
+        "verification_status": "verified",
         "components": [
             {
                 "component_id": "cmp_page_001_body",
@@ -41,6 +47,15 @@ def _verified_owner_project():
                 "confidence": 0.97,
                 "provider": "fixture",
                 "bbox_page": [10, 20, 110, 80],
+                "run_id": "run-project-writer",
+                "origin_execution_id": "execution-project-writer",
+                "invocation_id": "invocation-project-writer",
+                "attempt_id": "attempt-project-writer",
+                "provider_family": "fixture",
+                "page_source_sha256": "a" * 64,
+                "root_input_pixel_sha256": "a" * 64,
+                "input_pixel_sha256": "b" * 64,
+                "payload_sha256": sha256(b"HELLO THERE").hexdigest(),
             }
         ],
         "owners": [
@@ -57,6 +72,7 @@ def _verified_owner_project():
                 "state": "ocr_ready",
                 "route_action": "translate_inpaint_render",
                 "execution_tile_id": None,
+                "action_mask_ref": None,
             }
         ],
         "projections": [],
@@ -92,7 +108,7 @@ def _verified_owner_project():
         ],
         "estatisticas": {"total_paginas": 1},
         "qa": {"summary": {"total": 0}},
-        "owner_graph_schema_version": 1,
+        "owner_graph_schema_version": OWNER_GRAPH_SCHEMA_VERSION,
         "owner_graph_status": "verified",
         "page_owner_graphs": [graph],
         "owner_invariant_summary": {
@@ -184,12 +200,16 @@ def test_project_writer_rejects_layer_owner_not_in_graph():
     project = _project()
     project.update(
         {
-            "owner_graph_schema_version": 1,
+            "owner_graph_schema_version": OWNER_GRAPH_SCHEMA_VERSION,
             "owner_graph_status": "verified",
             "page_owner_graphs": [
                 {
-                    "schema_version": 1,
+                    "schema_version": OWNER_GRAPH_SCHEMA_VERSION,
                     "page_id": "page_001",
+                    "run_id": "run-project-writer-empty",
+                    "origin_execution_id": "execution-project-writer-empty",
+                    "page_source_sha256": "c" * 64,
+                    "verification_status": "verified",
                     "components": [],
                     "observations": [],
                     "owners": [],
@@ -449,7 +469,7 @@ def test_legacy_unverified_project_cannot_publish_owner_summary_claims():
     project = _project()
     project.update(
         {
-            "owner_graph_schema_version": 1,
+            "owner_graph_schema_version": OWNER_GRAPH_SCHEMA_VERSION,
             "owner_graph_status": "legacy_unverified",
             "page_owner_graphs": [],
             "owner_invariant_summary": {"owner_count": 1},

@@ -23,7 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from layout import balloon_layout as balloon_layout_mod  # noqa: E402
 from ownership.delivery import seal_owner_text_execution_authority  # noqa: E402
+from ownership.hash_contract import sha256_text  # noqa: E402
 from ownership.model import (  # noqa: E402
+    OWNER_GRAPH_SCHEMA_VERSION,
     ComponentDisposition,
     OwnerGraph,
     OwnerProjection,
@@ -93,6 +95,15 @@ def _owner_graph(
                 polygons_page=(_polygon_for_bbox(bbox),),
                 tile_provenance=("tile_executor", "tile_context"),
                 coverage_score=1.0,
+                run_id="run-owner-layout",
+                origin_execution_id="execution-owner-layout",
+                invocation_id=f"invocation-owner-layout-{index:03d}",
+                attempt_id=f"attempt-owner-layout-{index:03d}",
+                provider_family="paddle",
+                page_source_sha256="a" * 64,
+                root_input_pixel_sha256="b" * 64,
+                input_pixel_sha256=f"{index + 1:064x}",
+                payload_sha256=sha256_text(source_payload),
             )
         )
         owners.append(
@@ -132,8 +143,11 @@ def _owner_graph(
         )
 
     graph = OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id=PAGE_ID,
+        run_id="run-owner-layout",
+        origin_execution_id="execution-owner-layout",
+        page_source_sha256="a" * 64,
         components=components,
         observations=observations,
         owners=owners,

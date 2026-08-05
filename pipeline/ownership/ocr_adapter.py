@@ -8,12 +8,13 @@ before those mutations and never infers a semantic owner from a band.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 import json
 import math
 from typing import Literal, Mapping, Sequence
 
 from .coordinates import bbox_tile_to_page, polygon_tile_to_page, stable_observation_id
+from .evidence import merge_observation_strict
 from .model import BBox, Point, TextObservation
 
 
@@ -218,12 +219,27 @@ def observation_to_dict(observation: TextObservation) -> dict:
         "line_texts": list(observation.line_texts),
         "rotation_deg": observation.rotation_deg,
         "rotation_source": observation.rotation_source,
+        "run_id": observation.run_id,
+        "origin_execution_id": observation.origin_execution_id,
+        "invocation_id": observation.invocation_id,
+        "provider_family": observation.provider_family,
+        "page_source_sha256": observation.page_source_sha256,
+        "root_input_pixel_sha256": observation.root_input_pixel_sha256,
+        "input_pixel_sha256": observation.input_pixel_sha256,
+        "payload_sha256": observation.payload_sha256,
     }
 
 
 def record_to_observation(record: dict, projection: TileProjection) -> TextObservation:
     """Convert one provider record without dropping empty/rejected candidates."""
 
+    if not isinstance(record, Mapping):
+        if not is_dataclass(record):
+            raise TypeError("OCR record must be a mapping or immutable dataclass")
+        record = asdict(record)
+    else:
+        record = dict(record)
+    request_identity = tuple(str(value) for value in record.get("request_identity") or ())
     provider = str(
         record.get("provider")
         or record.get("ocr_provider")
@@ -267,7 +283,8 @@ def record_to_observation(record: dict, projection: TileProjection) -> TextObser
     )
     occurrence_index = max(0, int(record.get("_observation_occurrence_index") or 0))
     provider_variant = str(
-        record.get("provider_variant")
+        record.get("variant_id")
+        or record.get("provider_variant")
         or record.get("variant")
         or record.get("ocr_variant")
         or record.get("attempt_kind")
@@ -399,15 +416,16 @@ def record_to_observation(record: dict, projection: TileProjection) -> TextObser
             ]
         )
     )
+    observation_id = str(record.get("observation_id") or "") or stable_observation_id(
+        projection.page_id,
+        identity_provider,
+        bbox_page,
+        component_ids,
+        0 if provider_record_id is not None else occurrence_index,
+    )
     return TextObservation(
-        observation_id=stable_observation_id(
-            projection.page_id,
-            identity_provider,
-            bbox_page,
-            component_ids,
-            0 if provider_record_id is not None else occurrence_index,
-        ),
-        page_id=projection.page_id,
+        observation_id=observation_id,
+        page_id=str(record.get("page_id") or projection.page_id),
         component_ids=component_ids,
         text=text,
         confidence=confidence or 0.0,
@@ -440,7 +458,38 @@ def record_to_observation(record: dict, projection: TileProjection) -> TextObser
             if record.get("rotation_source") is not None
             else None
         ),
+        run_id=str(
+            record.get("run_id") or (request_identity[0] if len(request_identity) > 0 else "")
+        ),
+        origin_execution_id=str(
+            record.get("origin_execution_id")
+            or (request_identity[1] if len(request_identity) > 1 else "")
+        ),
+        invocation_id=str(
+            record.get("invocation_id")
+            or (request_identity[5] if len(request_identity) > 5 else "")
+        ),
+        provider_family=str(
+            record.get("provider_family")
+            or (request_identity[6] if len(request_identity) > 6 else "")
+        ),
+        page_source_sha256=str(
+            record.get("page_source_sha256")
+            or (request_identity[3] if len(request_identity) > 3 else "")
+        ),
+        root_input_pixel_sha256=str(
+            record.get("root_input_pixel_sha256")
+            or (request_identity[4] if len(request_identity) > 4 else "")
+        ),
+        input_pixel_sha256=str(record.get("input_pixel_sha256") or ""),
+        payload_sha256=str(record.get("payload_sha256") or ""),
     )
+
+
+def ocr_record_to_observation(record: object, projection: TileProjection) -> TextObservation:
+    """Convert one Task-2 OCR record without regenerating identity or hashes."""
+
+    return record_to_observation(record, projection)  # type: ignore[arg-type]
 
 
 def collect_page_observations(
@@ -452,7 +501,7 @@ def collect_page_observations(
     observations: list[TextObservation] = []
     for provider, records in records_by_provider.items():
         for occurrence_index, source_record in enumerate(records):
-            record = dict(source_record)
+            record = asdict(source_record) if is_dataclass(source_record) else dict(source_record)
             record["provider"] = str(record.get("provider") or provider)
             record["provider_variant"] = str(
                 record.get("provider_variant")
@@ -493,70 +542,6 @@ def attach_observation_manifest(
             merged.append(payload)
             continue
         position = index_by_id[observation_id]
-        merged[position] = _union_manifest_observation(merged[position], payload)
+        merged[position] = merge_observation_strict(merged[position], payload)
     result["owner_observations"] = merged
     return result
-
-
-def _union_manifest_observation(existing: dict, incoming: dict) -> dict:
-    for field in (
-        "page_id",
-        "provider",
-        "provider_variant",
-        "attempt_id",
-        "provider_record_id",
-        "bbox_page",
-    ):
-        existing_value = existing.get(field)
-        incoming_value = incoming.get(field)
-        if existing_value in (None, "", [], ()) or incoming_value in (None, "", [], ()):
-            continue
-        if existing_value != incoming_value:
-            observation_id = str(existing.get("observation_id") or incoming.get("observation_id") or "")
-            raise ValueError(
-                f"observation_id collision for {observation_id!r}: conflicting {field}"
-            )
-
-    merged = copy.deepcopy(existing)
-    for field in ("component_ids", "polygons_page", "tile_provenance", "projection_ids"):
-        values: list = []
-        seen: set[str] = set()
-        for value in [*list(existing.get(field) or ()), *list(incoming.get(field) or ())]:
-            token = json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
-            if token in seen:
-                continue
-            seen.add(token)
-            values.append(copy.deepcopy(value))
-        merged[field] = values
-
-    for field in (
-        "page_id",
-        "text",
-        "raw_text",
-        "confidence",
-        "provider",
-        "provider_variant",
-        "attempt_id",
-        "provider_record_id",
-        "bbox_page",
-        "source_bbox_page",
-        "text_pixel_bbox_page",
-        "layout_bbox_page",
-        "coverage_score",
-        "language_score",
-        "rejection_reason",
-        "line_texts",
-        "rotation_deg",
-        "rotation_source",
-    ):
-        if merged.get(field) in (None, "", [], ()) and incoming.get(field) not in (
-            None,
-            "",
-            [],
-            (),
-        ):
-            merged[field] = copy.deepcopy(incoming.get(field))
-    merged["legacy_selected"] = bool(existing.get("legacy_selected")) or bool(
-        incoming.get("legacy_selected")
-    )
-    return merged

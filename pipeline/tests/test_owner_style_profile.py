@@ -12,7 +12,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ownership.hash_contract import sha256_text  # noqa: E402
 from ownership.model import (  # noqa: E402
+    OWNER_GRAPH_SCHEMA_VERSION,
     ComponentDisposition,
     OwnerGraph,
     OwnerProjection,
@@ -53,6 +55,15 @@ def _fixture() -> tuple[np.ndarray, OwnerGraph]:
         polygons_page=(component.polygon_page,),
         tile_provenance=("tile_bottom", "tile_top"),
         coverage_score=1.0,
+        run_id="run-style-profile",
+        origin_execution_id="execution-style-profile",
+        invocation_id="invocation-style-profile-a",
+        attempt_id="attempt-style-profile-a",
+        provider_family="paddle",
+        page_source_sha256="a" * 64,
+        root_input_pixel_sha256="b" * 64,
+        input_pixel_sha256="c" * 64,
+        payload_sha256=sha256_text("SOURCE BODY"),
     )
     owner = TextOwner(
         owner_id="owner_a",
@@ -73,8 +84,11 @@ def _fixture() -> tuple[np.ndarray, OwnerGraph]:
         OwnerProjection("owner_a", "tile_bottom", "context_only", bbox, bbox, (0, 0)),
     ]
     graph = OwnerGraph(
-        schema_version=1,
+        schema_version=OWNER_GRAPH_SCHEMA_VERSION,
         page_id="page_001",
+        run_id="run-style-profile",
+        origin_execution_id="execution-style-profile",
+        page_source_sha256="a" * 64,
         components=[component],
         observations=[observation],
         owners=[owner],
