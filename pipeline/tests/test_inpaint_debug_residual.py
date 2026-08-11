@@ -484,6 +484,21 @@ def test_detect_residual_text_uses_absolute_pixel_gate_for_large_regions():
     assert residual["has_residual"] is True
 
 
+def test_detect_residual_text_ignores_subglyph_noise_in_large_regions():
+    from qa.inpaint_residual import detect_residual_text
+
+    before = np.full((160, 240, 3), 245, dtype=np.uint8)
+    after = before.copy()
+    after[72:76, 90:100] = 48
+    mask = np.ones((160, 240), dtype=np.uint8) * 255
+
+    residual = detect_residual_text(before, after, mask)
+
+    assert residual["dark_residual_pixels"] == 40
+    assert residual["score"] < 0.01
+    assert residual["has_residual"] is False
+
+
 def test_detect_residual_text_flags_bright_remnants_on_colored_panel():
     from qa.inpaint_residual import detect_residual_text
 
@@ -509,6 +524,76 @@ def test_detect_residual_text_flags_bright_remnants_on_colored_panel():
     assert residual["has_residual"] is True
     assert residual["light_residual_pixels"] > 0
     assert "light_residual_pixels" in residual["flags"]
+
+
+def test_detect_residual_text_flags_faded_dark_glyphs_on_light_balloon():
+    from qa.inpaint_residual import detect_residual_text
+
+    import cv2
+
+    before = np.full((100, 220, 3), 242, dtype=np.uint8)
+    cv2.putText(
+        before,
+        "WHAT IS THIS?!",
+        (22, 59),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.72,
+        (22, 22, 22),
+        2,
+        cv2.LINE_AA,
+    )
+    after = before.copy()
+    source_dark = np.all(before <= 112, axis=2)
+    after[source_dark] = (166, 166, 166)
+    mask = np.zeros(before.shape[:2], dtype=np.uint8)
+    mask[30:72, 14:210] = 255
+
+    residual = detect_residual_text(
+        before,
+        after,
+        mask,
+        include_unchanged_dark=True,
+        include_light_residual=True,
+    )
+
+    assert residual["faded_dark_residual_pixels"] >= 64
+    assert residual["has_residual"] is True
+    assert "faded_dark_residual_pixels" in residual["flags"]
+
+
+def test_detect_residual_text_does_not_treat_white_balloon_as_dark_text_context():
+    from qa.inpaint_residual import detect_residual_text
+
+    import cv2
+
+    before = np.full((90, 180, 3), 252, dtype=np.uint8)
+    cv2.ellipse(before, (90, 45), (78, 36), 0, 0, 360, (35, 35, 35), 2)
+    cv2.putText(
+        before,
+        "READY?",
+        (47, 51),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (25, 25, 25),
+        2,
+        cv2.LINE_AA,
+    )
+    after = before.copy()
+    after[31:58, 38:145] = 252
+    mask = np.zeros((90, 180), dtype=np.uint8)
+    mask[29:60, 34:149] = 255
+
+    residual = detect_residual_text(
+        before,
+        after,
+        mask,
+        include_unchanged_dark=True,
+        include_light_residual=True,
+    )
+
+    assert residual["dark_background_context"] is False
+    assert residual["light_residual_pixels"] == 0
+    assert residual["has_residual"] is False
 
 
 def test_detect_residual_text_does_not_flag_removed_light_text_as_dark_residue():

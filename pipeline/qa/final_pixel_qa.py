@@ -26,6 +26,10 @@ from qa.language_residual import (
     classify_unowned_text,
     deduplicate_language_issues,
 )
+from translator.language_policy import (
+    build_page_language_evidence,
+    validate_target_language,
+)
 
 
 _CONTRACT_NAMES = (
@@ -42,6 +46,7 @@ _CONTRACT_NAMES = (
 _RENDER_ROUTES = frozenset(
     {"translate_inpaint_render", "translate_sfx_inpaint_render", "translate_render_only"}
 )
+_MIN_SOURCE_SUPPORT_CLEANUP_RATIO = 0.35
 
 
 @dataclass(frozen=True)
@@ -85,7 +90,11 @@ class FinalPixelQaReport:
 
 
 def _tokens(value: Any) -> tuple[str, ...]:
-    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", str(value or ""))
+        if not unicodedata.combining(character)
+    ).casefold()
     normalized = re.sub(r"(?<=\d)(?=[^\W\d_])|(?<=[^\W\d_])(?=\d)", " ", normalized)
     return tuple(
         token
@@ -94,9 +103,24 @@ def _tokens(value: Any) -> tuple[str, ...]:
     )
 
 
-def source_payload_visible(source_payload: str, observed_text: str) -> bool:
+def source_payload_visible(
+    source_payload: str,
+    observed_text: str,
+    *,
+    translated_payload: str | None = None,
+) -> bool:
     source = _tokens(source_payload)
     observed = _tokens(observed_text)
+    translated = _tokens(translated_payload)
+    if translated and source == translated:
+        # A verified target-language repaint can legitimately render the same
+        # lexical payload after the original pixels were removed.  Pixel
+        # replacement and target-materialization contracts own that proof;
+        # OCR cannot distinguish old glyphs from the freshly rendered target.
+        return False
+    if translated and source != translated:
+        translated_set = set(translated)
+        source = tuple(token for token in source if token not in translated_set)
     if not source or not observed:
         return False
     observed_set = set(observed)
@@ -108,6 +132,60 @@ def source_payload_visible(source_payload: str, observed_text: str) -> bool:
         return True
     matched = sum(token in observed_set for token in source)
     return matched >= 2 and matched / len(source) >= 0.75
+
+
+def _target_payload_observed(target_payload: str, observed_text: str) -> bool:
+    target = _tokens(target_payload)
+    observed = _tokens(observed_text)
+    if not target or not observed:
+        return False
+    target_set = set(target)
+    observed_set = set(observed)
+    if observed_set <= target_set or target_set <= observed_set:
+        return True
+    return bool(set(zip(target, target[1:])) & set(zip(observed, observed[1:])))
+
+
+def is_verified_target_language_no_repaint(owner: Any) -> bool:
+    """Recognize the terminal owner state backed by an accepted PT-BR identity binding."""
+
+    def field(name: str) -> Any:
+        return owner.get(name) if isinstance(owner, Mapping) else getattr(owner, name, None)
+
+    source = " ".join(
+        unicodedata.normalize("NFC", str(field("source_payload") or "")).split()
+    )
+    target = " ".join(
+        unicodedata.normalize("NFC", str(field("translated_payload") or "")).split()
+    )
+    return bool(
+        field("state") == "target_ready"
+        and field("route_action") in _RENDER_ROUTES
+        and source
+        and source == target
+    )
+
+
+def _is_verified_no_repaint_owner(owner: Any) -> bool:
+    return is_verified_target_language_no_repaint(owner)
+
+
+def _is_verified_target_language_observation(text: str) -> bool:
+    """Accept terminal PT-BR/no-lexical text without weakening English detection."""
+
+    evidence = build_page_language_evidence(
+        texts=[text],
+        coverage_complete=True,
+    )
+    verdict = validate_target_language(
+        source=text,
+        target=text,
+        role="dialogue",
+        page_language_evidence=evidence,
+    )
+    if not verdict.accepted:
+        return False
+    return verdict.reason in {"already_target_language", "source_neutral_nonlexical"}
 
 
 def _bbox(value: Any) -> tuple[int, int, int, int] | None:
@@ -426,6 +504,7 @@ def evaluate_final_pixel_observation(
         for owner in graph.owners
     }
     for owner in graph.owners:
+        preserves_original = _is_verified_no_repaint_owner(owner)
         if owner.state == "review_required" or owner.route_action == "review_required":
             add(
                 "owner_route_not_final",
@@ -434,10 +513,14 @@ def evaluate_final_pixel_observation(
                 component_ids=tuple(owner.component_ids),
                 offenders=(owner.state, owner.route_action),
             )
-        elif owner.route_action in _RENDER_ROUTES and owner.state not in {
+        elif (
+            owner.route_action in _RENDER_ROUTES
+            and not preserves_original
+            and owner.state not in {
             "rendered",
             "verified",
-        }:
+            }
+        ):
             add(
                 "owner_route_not_final",
                 "route_state_contract",
@@ -489,7 +572,11 @@ def evaluate_final_pixel_observation(
                     owner_id=owner.owner_id,
                     component_ids=tuple(owner.component_ids),
                 )
-        if owner.route_action in _RENDER_ROUTES and not np.any(glyph_map == owner.owner_id):
+        if (
+            owner.route_action in _RENDER_ROUTES
+            and not preserves_original
+            and not np.any(glyph_map == owner.owner_id)
+        ):
             add(
                 "missing_owner_glyphs",
                 "pixel_ownership_contract",
@@ -521,7 +608,7 @@ def evaluate_final_pixel_observation(
         if owner.route_action in {
             "translate_inpaint_render",
             "translate_sfx_inpaint_render",
-        } and cleanup_map.shape == expected_shape:
+        } and not preserves_original and cleanup_map.shape == expected_shape:
             for component_id in owner.component_ids:
                 component = next(
                     (item for item in graph.components if item.component_id == component_id),
@@ -535,23 +622,44 @@ def evaluate_final_pixel_observation(
                 ):
                     continue
                 evidence_mask = np.zeros(expected_shape, dtype=np.uint8)
-                raw_polygon = component.polygon_page
-                if geometry is not None:
-                    try:
-                        raw_polygon = geometry.logical_polygon_to_frame(raw_polygon)
-                    except ValueError:
-                        add(
-                            "owner_polygon_outside_page_surface",
-                            "qa_integrity_contract",
-                            owner_id=owner.owner_id,
-                            component_ids=(component_id,),
-                        )
-                        continue
-                polygon = np.asarray(raw_polygon, dtype=np.int32)
-                if polygon.ndim == 2 and polygon.shape[0] >= 3:
-                    cv2.fillPoly(evidence_mask, [polygon], 1)
+                selected_polygons = [
+                    polygon
+                    for source_observation in observations_by_owner.get(
+                        owner.owner_id,
+                        [],
+                    )
+                    if source_observation.observation_id
+                    in set(owner.selected_observation_ids)
+                    and component_id in set(source_observation.component_ids)
+                    for polygon in source_observation.polygons_page
+                ]
+                for raw_polygon in selected_polygons or [component.polygon_page]:
+                    if geometry is not None:
+                        try:
+                            raw_polygon = geometry.logical_polygon_to_frame(raw_polygon)
+                        except ValueError:
+                            add(
+                                "owner_polygon_outside_page_surface",
+                                "qa_integrity_contract",
+                                owner_id=owner.owner_id,
+                                component_ids=(component_id,),
+                            )
+                            continue
+                    polygon = np.asarray(raw_polygon, dtype=np.int32)
+                    if polygon.ndim == 2 and polygon.shape[0] >= 3:
+                        cv2.fillPoly(evidence_mask, [polygon], 1)
                 outside = (evidence_mask > 0) & (cleanup_map != owner.owner_id)
-                if np.any(outside):
+                evidence_pixels = int(np.count_nonzero(evidence_mask))
+                outside_pixels = int(np.count_nonzero(outside))
+                coverage_ratio = (
+                    1.0 - (outside_pixels / float(evidence_pixels))
+                    if evidence_pixels > 0
+                    else 0.0
+                )
+                if (
+                    evidence_pixels <= 0
+                    or coverage_ratio < _MIN_SOURCE_SUPPORT_CLEANUP_RATIO
+                ):
                     add(
                         "source_evidence_outside_cleanup",
                         "pixel_ownership_contract",
@@ -559,7 +667,8 @@ def evaluate_final_pixel_observation(
                         component_ids=(component_id,),
                         offenders=(
                             component_id,
-                            f"outside_pixels:{int(np.count_nonzero(outside))}",
+                            f"outside_pixels:{outside_pixels}",
+                            f"coverage_ratio:{coverage_ratio:.6f}",
                         ),
                     )
 
@@ -567,9 +676,52 @@ def evaluate_final_pixel_observation(
         text = _record_text(record)
         if not text:
             continue
+        text_tokens = _tokens(text)
+        if not text_tokens:
+            continue
         bbox = _record_bbox(record)
         candidate_owners: set[str] = set()
         anchored_component_id = str(record.get("final_probe_target_id") or "")
+        if anchored_component_id.startswith("full-page:"):
+            # Full-page OCR variants are global language probes.  Their bbox
+            # intentionally covers the framed canvas, including letterbox,
+            # so it cannot be used as localized ownership evidence.  It still
+            # challenges every known source payload and can block a residual.
+            for owner in graph.owners:
+                if _is_verified_no_repaint_owner(owner):
+                    continue
+                source_candidates = [owner.source_payload] + [
+                    item.text for item in observations_by_owner.get(owner.owner_id, [])
+                ]
+                visible_source = next(
+                    (
+                        source
+                        for source in source_candidates
+                        if source_payload_visible(
+                            source,
+                            text,
+                            translated_payload=owner.translated_payload,
+                        )
+                    ),
+                    None,
+                )
+                if visible_source is not None:
+                    add(
+                        "source_payload_visible",
+                        "final_language_contract",
+                        owner_id=owner.owner_id,
+                        component_ids=tuple(owner.component_ids),
+                        offenders=(text, visible_source),
+                    )
+            continue
+        anchored_disposition = dispositions.get(anchored_component_id)
+        if (
+            anchored_disposition is not None
+            and anchored_disposition.decision == "suppress"
+            and len(text_tokens) == 1
+            and len(text_tokens[0]) <= 2
+        ):
+            continue
         if anchored_component_id in owner_by_component:
             candidate_owners.add(owner_by_component[anchored_component_id].owner_id)
         frame_bbox = bbox
@@ -589,12 +741,49 @@ def evaluate_final_pixel_observation(
                 for value in np.unique(glyph_map[y1:y2, x1:x2])
                 if str(value) in known_owner_ids
             )
+        candidate_owners.update(
+            owner.owner_id
+            for owner in graph.owners
+            if _target_payload_observed(owner.translated_payload, text)
+        )
         matching_components = [
             component
             for component in graph.components
-            if bbox is not None and _overlap_ratio(bbox, component.bbox_page) >= 0.2
+            if (
+                bbox is not None
+                and (
+                    _overlap_ratio(bbox, component.bbox_page) >= 0.2
+                    or (
+                        frame_bbox is not None
+                        and frame_bbox != bbox
+                        and _overlap_ratio(frame_bbox, component.bbox_page) >= 0.2
+                    )
+                )
+            )
         ]
+        scanlation_zone_top = min(
+            (
+                int(component.bbox_page[1])
+                for component in graph.components
+                if (
+                    (disposition := dispositions.get(component.component_id)) is not None
+                    and disposition.decision == "preserve"
+                    and disposition.reason == "policy:scanlation_apparatus"
+                )
+            ),
+            default=None,
+        )
+        if (
+            not matching_components
+            and not candidate_owners
+            and bbox is not None
+            and scanlation_zone_top is not None
+            and bbox[1] >= scanlation_zone_top
+        ):
+            continue
         if not matching_components and not candidate_owners:
+            if _is_verified_target_language_observation(text):
+                continue
             add(
                 "independently_detected_text_without_owner",
                 "source_coverage_contract",
@@ -608,6 +797,8 @@ def evaluate_final_pixel_observation(
         )
         for owner_id in sorted(candidate_owners):
             owner = next(item for item in graph.owners if item.owner_id == owner_id)
+            if _is_verified_no_repaint_owner(owner):
+                continue
             source_candidates = [owner.source_payload] + [
                 item.text for item in observations_by_owner.get(owner_id, [])
             ]
@@ -615,7 +806,11 @@ def evaluate_final_pixel_observation(
                 (
                     source
                     for source in source_candidates
-                    if source_payload_visible(source, text)
+                    if source_payload_visible(
+                        source,
+                        text,
+                        translated_payload=owner.translated_payload,
+                    )
                 ),
                 None,
             )

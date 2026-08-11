@@ -30,6 +30,8 @@ from strip.page_pipeline import (
     PagePipelineServices,
     PagePipelineIdentityError,
     PagePipelineStateError,
+    _material_post_cleanup_residual_mask,
+    _terminal_source_support_mask,
     run_page_owner_pipeline,
 )
 from strip.types import Band
@@ -38,6 +40,74 @@ from strip.process_bands import _run_translate_stage
 
 def _page() -> np.ndarray:
     return np.full((90, 140, 3), 245, dtype=np.uint8)
+
+
+def test_terminal_replacement_verdict_uses_measured_post_cleanup_residual_mask() -> None:
+    original = _page()
+    cleanup = original.copy()
+    action = np.zeros(original.shape[:2], dtype=np.uint8)
+    action[20:60, 20:120] = 255
+    cleanup[35:45, 55:85] = 20
+
+    residual = _material_post_cleanup_residual_mask(original, cleanup, action)
+
+    assert np.count_nonzero(residual[35:45, 55:85]) > 0
+
+
+def test_terminal_replacement_verdict_ignores_submaterial_detector_noise() -> None:
+    original = _page()
+    cleanup = original.copy()
+    action = np.zeros(original.shape[:2], dtype=np.uint8)
+    action[20:60, 20:120] = 255
+    cleanup[35, 55] = 20
+
+    residual = _material_post_cleanup_residual_mask(original, cleanup, action)
+
+    assert np.count_nonzero(residual) == 0
+
+
+def test_terminal_replacement_verdict_projects_framed_cleanup_to_logical_page() -> None:
+    from strip.page_surface_geometry import PageSurfaceGeometry
+
+    original = _page()
+    logical_cleanup = original.copy()
+    logical_cleanup[35:45, 55:85] = 20
+    action = np.zeros(original.shape[:2], dtype=np.uint8)
+    action[20:60, 20:120] = 255
+    geometry = PageSurfaceGeometry.build(
+        logical_width=140,
+        logical_height=90,
+        frame_width=200,
+        frame_height=90,
+        content_origin_xy=(30, 0),
+    )
+    framed_cleanup = geometry.logical_array_to_frame(logical_cleanup, fill_value=255)
+
+    residual = _material_post_cleanup_residual_mask(
+        original,
+        framed_cleanup,
+        action,
+        page_surface_geometry=geometry,
+    )
+
+    assert residual.shape == action.shape
+    assert np.count_nonzero(residual[35:45, 55:85]) > 0
+
+
+def test_terminal_verdict_prefers_authenticated_glyph_support_over_inpaint_area() -> None:
+    action = np.zeros((90, 140), dtype=np.uint8)
+    action[20:60, 20:120] = 255
+    source_support = np.zeros_like(action)
+    source_support[35:45, 55:85] = 255
+    mutation = SimpleNamespace(
+        action_mask=action,
+        source_support_mask=source_support,
+    )
+
+    measured = _terminal_source_support_mask(mutation)
+
+    assert np.array_equal(measured, source_support)
+    assert np.count_nonzero(measured) < np.count_nonzero(action)
 
 
 def _ready_coverage(request: PagePipelineRequest) -> PageCoverageResult:
@@ -227,6 +297,27 @@ def test_page_pipeline_passes_fresh_complete_language_evidence(monkeypatch):
     assert "this" in captured[owner_id].source_only_tokens
 
 
+def test_page_pipeline_requires_repaint_for_already_target_ocr_pixels(monkeypatch):
+    import strip.page_pipeline as page_pipeline
+
+    captured = {}
+    original = page_pipeline.translate_owner_page
+
+    def recording_translate_owner_page(*args, **kwargs):
+        captured.update(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        page_pipeline,
+        "translate_owner_page",
+        recording_translate_owner_page,
+    )
+
+    run_page_owner_pipeline(_request(), _services())
+
+    assert captured["repaint_already_target_pixels"] is True
+
+
 def test_execution_record_adapter_converts_nested_tuples_but_not_invalid_sets() -> None:
     from ownership.execution import FrozenJSONSnapshot
     from strip.page_pipeline import _json_compatible_execution_value
@@ -322,6 +413,65 @@ def test_page_execution_result_carries_direct_page_commits():
 
     assert result.page_commits[0].page_id == result.page_id
     assert not hasattr(result, "commits_by_band")
+
+
+def test_page_pipeline_persists_execution_repair_journal():
+    from ownership.repair import (
+        OwnerRepairCase,
+        RepairExecutionFeedback,
+        run_repair_ladder,
+    )
+
+    def execute(request, graph, translation_result):
+        support = np.zeros((request.original_page.height, request.original_page.width), dtype=np.uint8)
+        support[28:34, 36:84] = 255
+        interior = np.zeros_like(support)
+        interior[20:48, 22:112] = 255
+        empty = np.zeros_like(support)
+        case = OwnerRepairCase.build(
+            original_rgb=request.original_page.mutable_attempt_copy(),
+            translation=translation_result.bindings[0],
+            execution_id=request.execution_id,
+            source_support_mask=support,
+            container_interior_mask=interior,
+            container_border_mask=empty,
+            protected_art_mask=empty,
+            positive_residual_mask=empty,
+            attempt_executor=lambda original_rgb, **_kwargs: RepairExecutionFeedback.committed(
+                original_rgb
+            ),
+        )
+        ladder = run_repair_ladder(
+            case,
+            max_strategy="R0",
+            scheduler=lambda _seconds: None,
+        )
+        return SimpleNamespace(
+            graph=graph,
+            commits=(),
+            records=(
+                {
+                    "owner_id": translation_result.bindings[0].owner_id,
+                    "translated": translation_result.bindings[0].target_text,
+                    "state": "repair_pending",
+                },
+            ),
+            target_materializations=(),
+            repair_requests=ladder.repair_requests,
+            repair_history=ladder.attempts,
+            repair_budget_policy_sha256=ladder.repair_budget_policy_sha256,
+        )
+
+    result = run_page_owner_pipeline(
+        _request(),
+        replace(_services(), execution_fn=execute),
+    )
+
+    assert result.repair_requests
+    assert result.repair_history
+    assert result.repair_budget_policy_sha256 == (
+        result.repair_history[0].repair_budget_policy_sha256
+    )
 
 
 def test_page_result_selects_post_execution_owner_graph():

@@ -296,6 +296,45 @@ def test_owner_commit_rejects_residual_above_profile_threshold() -> None:
     assert "residual" in commit.reason
 
 
+def test_owner_commit_rejects_material_absolute_residual_below_ratio_threshold() -> None:
+    apply_atomic, glyph_patch_type, _commit_type = _atomic_api()
+    original = np.full((12, 16, 3), 220, dtype=np.uint8)
+    base = _mutation(original)
+    flags = ("faded_dark_residual_pixels",)
+    score = 0.007
+    evidence_sha = owner_residual_evidence_sha256(
+        owner_id=base.owner_id,
+        page_id=base.page_id,
+        before_sha256=base.before_sha256,
+        after_sha256=base.after_sha256,
+        action_mask_sha256=base.action_mask_sha256,
+        protected_art_mask_sha256=base.protected_art_mask_sha256,
+        component_geometry_sha256=base.component_geometry_sha256,
+        residual_score=score,
+        residual_threshold=base.residual_threshold,
+        residual_method=base.residual_method,
+        residual_flags=flags,
+    )
+    mutation = replace(
+        base,
+        residual_score=score,
+        residual_flags=flags,
+        residual_evidence_sha256=evidence_sha,
+    )
+    glyph = _glyph_patch(
+        mutation,
+        glyph_patch_type,
+        render_completed=True,
+        fit_status="ok",
+    )
+
+    commit = apply_atomic(original, mutation, glyph)
+
+    assert commit.committed is False
+    assert commit.review_required is True
+    assert "residual" in commit.reason
+
+
 def test_residual_threshold_and_evidence_are_part_of_mutation_hash_chain() -> None:
     original = np.full((12, 16, 3), 220, dtype=np.uint8)
     mutation = _mutation(original)

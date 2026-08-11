@@ -6,10 +6,17 @@ import copy
 from collections import Counter
 from dataclasses import dataclass
 import json
+import re
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
 from .hash_contract import canonical_json_bytes, canonical_json_sha256, sha256_bytes, sha256_text
-from .model import TRANSLATION_ROUTE_ACTIONS, OwnerGraph, OwnerViolation, TextOwner
+from .model import (
+    TRANSLATION_ROUTE_ACTIONS,
+    ComponentDisposition,
+    OwnerGraph,
+    OwnerViolation,
+    TextOwner,
+)
 try:
     from translator.language_policy import (
         PageLanguageEvidence,
@@ -25,6 +32,32 @@ except ImportError:  # pragma: no cover - package import
 
 
 _TRANSLATABLE_STATES = frozenset({"owned", "ocr_ready", "execution_planned"})
+_NOOP_DISPLAY_MAX_TOKEN_LENGTH = 12
+_NOOP_DISPLAY_MIN_INK_HEIGHT_RATIO = 0.68
+_NOOP_DISPLAY_MAX_COMPONENT_ASPECT = 1.8
+_NOOP_EMPHATIC_DISPLAY_MAX_COMPONENT_ASPECT = 4.0
+
+
+def _already_target_requires_source_replacement(
+    source_text: str,
+    verdict: TargetLanguageVerdict,
+) -> bool:
+    """Identify short mixed-overlay OCR without repainting coherent PT-BR pages."""
+
+    source = str(source_text or "").strip()
+    if not source or re.search(
+        r"\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|io|co)\b",
+        source,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    tokens = re.findall(r"[^\W_]+", source, flags=re.UNICODE)
+    return bool(
+        2 <= len(tokens) <= 6
+        and verdict.ptbr_token_ratio_ppm <= 500_000
+        and any(len(token) >= 11 for token in tokens)
+    )
+_NOOP_DISPLAY_TRAILING_MARKS = frozenset("!?….-~")
 
 
 def _translation_owners(graph: OwnerGraph) -> list[TextOwner]:
@@ -113,6 +146,113 @@ def _block_translation_owners(graph: OwnerGraph, owner_ids: set[str]) -> None:
         owner.translated_payload = None
         owner.state = "review_required"
         owner.route_action = "review_required"
+
+
+def _is_short_noop_display_sfx(
+    graph: OwnerGraph,
+    owner: TextOwner,
+    translated_payload: str,
+) -> bool:
+    """Return whether a no-op result is large display SFX that must stay original.
+
+    The geometry guard prevents unchanged dialogue or ordinary labels from being
+    silently preserved when a translator fails to localize them.
+    """
+
+    source = " ".join(str(owner.source_payload or "").split())
+    translated = " ".join(str(translated_payload or "").split())
+    if not source or source.casefold() != translated.casefold():
+        return False
+    lexeme = source.rstrip("".join(sorted(_NOOP_DISPLAY_TRAILING_MARKS)))
+    trailing_marks = source[len(lexeme) :]
+    emphatic_display = bool(trailing_marks) and all(
+        mark in _NOOP_DISPLAY_TRAILING_MARKS for mark in trailing_marks
+    )
+    if not lexeme.isalpha() or not (
+        2 <= len(lexeme) <= _NOOP_DISPLAY_MAX_TOKEN_LENGTH
+    ):
+        return False
+
+    selected_ids = set(owner.selected_observation_ids)
+    selected_observations = [
+        observation
+        for observation in graph.observations
+        if observation.observation_id in selected_ids
+    ]
+    if emphatic_display and any(
+        observation.layout_bbox_page is not None
+        for observation in selected_observations
+    ):
+        return False
+
+    component_ids = set(owner.component_ids)
+    component_boxes = [
+        component.bbox_page
+        for component in graph.components
+        if component.component_id in component_ids
+    ]
+    if not component_boxes:
+        return False
+    component_width = max(box[2] for box in component_boxes) - min(
+        box[0] for box in component_boxes
+    )
+    component_height = max(box[3] for box in component_boxes) - min(
+        box[1] for box in component_boxes
+    )
+    if component_width <= 0 or component_height <= 0:
+        return False
+    max_component_aspect = (
+        _NOOP_EMPHATIC_DISPLAY_MAX_COMPONENT_ASPECT
+        if emphatic_display
+        else _NOOP_DISPLAY_MAX_COMPONENT_ASPECT
+    )
+    if component_width / component_height > max_component_aspect:
+        return False
+
+    heights = sorted(
+        observation.bbox_page[3] - observation.bbox_page[1]
+        for observation in selected_observations
+    )
+    if not heights:
+        return False
+    middle = len(heights) // 2
+    median_height = (
+        heights[middle]
+        if len(heights) % 2
+        else (heights[middle - 1] + heights[middle]) / 2.0
+    )
+    return median_height / component_height >= _NOOP_DISPLAY_MIN_INK_HEIGHT_RATIO
+
+
+def _preserve_short_noop_display_sfx(
+    graph: OwnerGraph,
+    owner_ids: set[str],
+) -> None:
+    if not owner_ids:
+        return
+    component_ids = {
+        component_id
+        for owner in graph.owners
+        if owner.owner_id in owner_ids
+        for component_id in owner.component_ids
+    }
+    graph.owners = [owner for owner in graph.owners if owner.owner_id not in owner_ids]
+    graph.projections = [
+        projection
+        for projection in graph.projections
+        if projection.owner_id not in owner_ids
+    ]
+    graph.component_dispositions = [
+        ComponentDisposition(
+            component_id=disposition.component_id,
+            decision="preserve",
+            owner_id=None,
+            reason="policy:short_noop_display_sfx",
+        )
+        if disposition.component_id in component_ids
+        else disposition
+        for disposition in graph.component_dispositions
+    ]
 
 
 def merge_owner_translations(
@@ -241,10 +381,17 @@ def merge_owner_translations(
         _block_translation_owners(merged, expected_ids)
         return merged
 
+    preserved_owner_ids: set[str] = set()
     for owner in owners:
         record = record_by_owner[owner.owner_id]
-        owner.translated_payload = record["translated"].strip()
+        translated_payload = record["translated"].strip()
+        if _is_short_noop_display_sfx(merged, owner, translated_payload):
+            preserved_owner_ids.add(owner.owner_id)
+            continue
+        owner.translated_payload = translated_payload
         owner.state = "translated"
+    _preserve_short_noop_display_sfx(merged, preserved_owner_ids)
+    merged.require_valid()
     return merged
 
 
@@ -555,6 +702,7 @@ class TranslationBinding:
                 "already_target_language",
                 "source_neutral_nonlexical",
                 "source_neutral_proper_name",
+                "source_neutral_structured_identifiers",
             }
             and verdict.normalized_source_sha256 == verdict.normalized_target_sha256
         )
@@ -733,6 +881,7 @@ def translate_owner(
     attempt_controls: Sequence = (),
     attempt_kwargs: Mapping[str, object] | None = None,
     page_language_evidence: PageLanguageEvidence | None = None,
+    repaint_already_target_pixels: bool = False,
 ) -> tuple[TranslationBinding, tuple[TranslationAttempt, ...]]:
     attempts: list[TranslationAttempt] = []
     source_verdict = validate_target_language(
@@ -741,10 +890,45 @@ def translate_owner(
         role=request.semantic_role,
         page_language_evidence=page_language_evidence,
     )
+    if (
+        repaint_already_target_pixels
+        and source_verdict.accepted
+        and source_verdict.policy_id == "already_target_language"
+        and _already_target_requires_source_replacement(
+            request.source_text,
+            source_verdict,
+        )
+    ):
+        verdict_payload = source_verdict.to_dict()
+        verdict_payload.pop("verdict_sha256", None)
+        verdict_payload.update(
+            policy_id="already_target_language_repaint",
+            reason="already_target_language_requires_source_replacement",
+        )
+        repaint_verdict = TargetLanguageVerdict.from_dict(verdict_payload)
+        attempt = TranslationAttempt.build(
+            request=request,
+            backend="language_policy",
+            variant=repaint_verdict.policy_id,
+            provider_model=None,
+            provider_metadata={"decision": "replace_source_pixels_with_verified_target"},
+            target_text=request.source_text,
+            provider_called=False,
+            cache_hit=True,
+            status="accepted",
+            language_verdict=repaint_verdict,
+            attempt_index=1,
+        )
+        return bind_translation(
+            request,
+            request.source_text,
+            (attempt,),
+        ), (attempt,)
     if source_verdict.accepted and source_verdict.policy_id in {
         "already_target_language",
         "source_neutral_nonlexical",
         "source_neutral_proper_name",
+        "source_neutral_structured_identifiers",
     }:
         attempt = TranslationAttempt.build(
             request=request,
@@ -935,6 +1119,7 @@ def translate_owner_page(
     attempt_controls: Sequence = (),
     attempt_kwargs: Mapping[str, object] | None = None,
     page_language_evidence_by_owner: Mapping[str, PageLanguageEvidence] | None = None,
+    repaint_already_target_pixels: bool = False,
 ) -> OwnerPageTranslationResult:
     attempts: list[TranslationAttempt] = []
     bindings: list[TranslationBinding] = []
@@ -949,6 +1134,7 @@ def translate_owner_page(
                 page_language_evidence=(page_language_evidence_by_owner or {}).get(
                     request.owner_id
                 ),
+                repaint_already_target_pixels=repaint_already_target_pixels,
             )
         except (TranslationValidationExhausted, TranslationInfrastructureError) as exc:
             error_type = type(exc)

@@ -18,6 +18,10 @@ from .locale_policy import validate_target_locale
 
 _TOKEN_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:'[A-Za-z]+)?", re.UNICODE)
 _PLACEHOLDER_RE = re.compile(r"\{[^{}]+\}")
+_STRUCTURED_IDENTIFIER_LIST_RE = re.compile(
+    r"(?:[A-Z]{1,4}:[A-Z0-9][A-Z0-9_-]{1,23})"
+    r"(?:\s+[A-Z]{1,4}:[A-Z0-9][A-Z0-9_-]{1,23})+"
+)
 _DIGIT_LED_NUMERIC_OCR_ZERO_RE = re.compile(
     r"(?<![A-Za-z0-9])(?P<token>[0-9][0-9Oo.,]*[Oo][0-9Oo.,]*)(?![A-Za-z0-9])"
 )
@@ -57,7 +61,7 @@ _PTBR_WORDS = frozenset(
 ) | frozenset(
     """
     artes certo caracteristicas guilda idiota limpa limpo marciais mestre mestra
-    nacional seletiva seletivo tao voce voces
+    nacional novato seletiva seletivo tao voce voces
     """.split()
 )
 _PTBR_MORPHOLOGY_SUFFIXES = (
@@ -72,6 +76,10 @@ _PTBR_MORPHOLOGY_SUFFIXES = (
     "ando",
     "endo",
     "indo",
+    "avam",
+    "aram",
+    "eram",
+    "iram",
     "mente",
     "dade",
     "dades",
@@ -132,6 +140,21 @@ def _looks_like_neutral_proper_name(value: str, tokens: tuple[str, ...]) -> bool
     if any(_english_only_markers(token) or _is_ptbr_token(token) for token in tokens):
         return False
     return all(word[:1].isupper() for word in words)
+
+
+def _looks_like_unit_glyph_fragment(tokens: tuple[str, ...]) -> bool:
+    """Treat one unknown alphabetic glyph as OCR/display evidence, not prose."""
+
+    return bool(
+        len(tokens) == 1
+        and len(tokens[0]) == 1
+        and tokens[0].isalpha()
+        and not _english_only_markers(tokens[0])
+    )
+
+
+def _looks_like_structured_identifier_list(value: str) -> bool:
+    return _STRUCTURED_IDENTIFIER_LIST_RE.fullmatch(str(value or "")) is not None
 
 
 @dataclass(frozen=True)
@@ -419,6 +442,9 @@ def validate_target_language(
         reason = "entity_mismatch"
     elif normalized_source.casefold() == normalized_target.casefold():
         evidence = page_language_evidence
+        structured_identifiers = _looks_like_structured_identifier_list(
+            normalized_target
+        )
         already_target = bool(
             evidence is not None
             and evidence.coverage_complete
@@ -426,7 +452,12 @@ def validate_target_language(
             and len(ptbr_only_tokens) > 0
             and len(english_only_tokens) == 0
         )
-        if already_target:
+        if structured_identifiers:
+            accepted = True
+            retryable = False
+            reason = "source_neutral_structured_identifiers"
+            policy_id = "source_neutral_structured_identifiers"
+        elif already_target:
             accepted = True
             retryable = False
             reason = "already_target_language"
@@ -435,7 +466,10 @@ def validate_target_language(
             evidence is not None
             and evidence.coverage_complete
             and not evidence.source_only_tokens
-            and not target_tokens
+            and (
+                not target_tokens
+                or _looks_like_unit_glyph_fragment(target_tokens)
+            )
         ):
             accepted = True
             retryable = False

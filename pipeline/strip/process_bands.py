@@ -2791,6 +2791,8 @@ class OwnerPageExecution:
     translation_result: OwnerPageTranslationResult | None = None
     target_materializations: tuple[Any, ...] = ()
     repair_requests: tuple[Any, ...] = ()
+    repair_history: tuple[Any, ...] = ()
+    repair_budget_policy_sha256: str | None = None
 
 
 def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None = None) -> dict:
@@ -7123,6 +7125,7 @@ def _run_translate_stage(
                 "models_dir": models_dir,
                 "translation_context": translation_context,
             },
+            repaint_already_target_pixels=True,
         )
         merged_graph = apply_owner_translation_result(owner_graph, translation_result)
         binding_by_owner = {item.owner_id: item for item in translation_result.bindings}
@@ -9141,8 +9144,11 @@ def apply_atomic_owner_execution(
         )
         if residual_evidence_sha256 != expected_residual_evidence_sha256:
             raise ValueError("mutation residual evidence hash mismatch")
-        if float(mutation.residual_score) > float(mutation.residual_threshold):
-            raise ValueError("mutation residual score exceeds its verified threshold")
+        if (
+            float(mutation.residual_score) > float(mutation.residual_threshold)
+            or bool(mutation.residual_flags)
+        ):
+            raise ValueError("mutation residual evidence remains material")
         mutation_is_safe = True
     except (TypeError, ValueError) as exc:
         return _review(f"cleanup_contract_invalid:{exc}")
@@ -10032,6 +10038,23 @@ def _observation_from_manifest_row(
         except (TypeError, ValueError):
             return None
 
+    def _outside_authoritative_page(value: tuple[int, int, int, int] | None) -> bool:
+        if value is None or projection.page_size is None:
+            return False
+        page_width, page_height = (int(item) for item in projection.page_size)
+        x1, y1, x2, y2 = value
+        return x1 < 0 or y1 < 0 or x2 > page_width or y2 > page_height
+
+    bbox_page = tuple(int(value) for value in bbox)
+    layout_bbox_page = _optional_bbox(row.get("layout_bbox_page"))
+    if _outside_authoritative_page(layout_bbox_page):
+        layout_bbox_page = None
+    rejection_reason = (
+        str(row.get("rejection_reason")) if row.get("rejection_reason") else None
+    )
+    if rejection_reason is None and _outside_authoritative_page(bbox_page):
+        rejection_reason = "bbox_outside_page"
+
     return TextObservation(
         observation_id=str(row.get("observation_id") or ""),
         page_id=str(row.get("page_id") or projection.page_id),
@@ -10039,7 +10062,7 @@ def _observation_from_manifest_row(
         text=str(row.get("text") or ""),
         confidence=float(row.get("confidence") or 0.0),
         provider=str(row.get("provider") or "unknown_ocr"),
-        bbox_page=tuple(int(value) for value in bbox),
+        bbox_page=bbox_page,
         polygons_page=tuple(polygons),
         tile_provenance=tuple(
             sorted(
@@ -10052,9 +10075,7 @@ def _observation_from_manifest_row(
         ),
         coverage_score=_optional_float(row.get("coverage_score")),
         language_score=_optional_float(row.get("language_score")),
-        rejection_reason=(
-            str(row.get("rejection_reason")) if row.get("rejection_reason") else None
-        ),
+        rejection_reason=rejection_reason,
         legacy_selected=bool(row.get("legacy_selected")),
         provider_variant=str(row.get("provider_variant") or ""),
         attempt_id=str(row.get("attempt_id") or "primary"),
@@ -10075,7 +10096,7 @@ def _observation_from_manifest_row(
         raw_text=(str(row.get("raw_text")) if row.get("raw_text") is not None else None),
         source_bbox_page=_optional_bbox(row.get("source_bbox_page")),
         text_pixel_bbox_page=_optional_bbox(row.get("text_pixel_bbox_page")),
-        layout_bbox_page=_optional_bbox(row.get("layout_bbox_page")),
+        layout_bbox_page=layout_bbox_page,
         line_texts=tuple(str(value) for value in row.get("line_texts") or ()),
         rotation_deg=_optional_float(row.get("rotation_deg")),
         rotation_source=(
@@ -10227,6 +10248,27 @@ def _owner_glyph_raster(
     """Extract source ink inside OCR support, never authorizing a bbox fill."""
 
     support = _page_polygon_mask(page_rgb.shape[:2], support_polygons)
+    polygon_heights = [
+        max(point[1] for point in polygon) - min(point[1] for point in polygon) + 1
+        for polygon in support_polygons
+        if polygon
+    ]
+    if polygon_heights:
+        # OCR line polygons commonly stop before trailing punctuation.  Keep
+        # the expansion local to the line scale; component geometry remains
+        # the hard authority boundary in _owner_component_glyph_raster.
+        support_padding = max(
+            3,
+            min(10, int(math.ceil(float(np.median(polygon_heights)) * 0.40))),
+        )
+        support = cv2.dilate(
+            support,
+            cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                ((support_padding * 2) + 1, (support_padding * 2) + 1),
+            ),
+            iterations=1,
+        )
     ys, xs = np.nonzero(support)
     if xs.size <= 0:
         raise ValueError("owner OCR support has no page-space pixels")
@@ -10321,6 +10363,89 @@ def _owner_component_glyph_raster(
     return clipped
 
 
+def _owner_source_effect_support(
+    core_mask: np.ndarray,
+    *,
+    component_bbox_page: tuple[int, int, int, int],
+) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """Include bounded outline/shadow pixels omitted by a tight OCR bbox."""
+
+    core = np.asarray(core_mask)
+    if core.dtype != np.uint8 or core.ndim != 2 or not np.any(core > 0):
+        raise ValueError("owner source effect support requires a binary uint8 core")
+    height, width = core.shape
+    x1, y1, x2, y2 = _canonical_owner_bbox(
+        component_bbox_page,
+        shape=(height, width),
+        label="owner source effect component bbox",
+    )
+    component_area = (x2 - x1) * (y2 - y1)
+    if component_area / float(max(1, height * width)) >= 0.20:
+        bounded = np.ascontiguousarray(
+            np.where(core > 0, 255, 0).astype(np.uint8)
+        )
+        bounded.setflags(write=False)
+        return bounded, (x1, y1, x2, y2)
+    glyph_height = max(1, y2 - y1)
+    radius = max(3, min(12, int(math.ceil(glyph_height * 0.32))))
+    expanded_bbox = (
+        max(0, x1 - radius),
+        max(0, y1 - radius),
+        min(width, x2 + radius),
+        min(height, y2 + radius),
+    )
+    expanded = cv2.dilate(
+        np.where(core > 0, 255, 0).astype(np.uint8),
+        cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (radius * 2 + 1, radius * 2 + 1),
+        ),
+        iterations=1,
+    )
+    bounded = np.zeros_like(expanded)
+    ex1, ey1, ex2, ey2 = expanded_bbox
+    bounded[ey1:ey2, ex1:ex2] = expanded[ey1:ey2, ex1:ex2]
+    bounded = np.ascontiguousarray(bounded, dtype=np.uint8)
+    bounded.setflags(write=False)
+    return bounded, expanded_bbox
+
+
+def _owner_cleanup_effect_support_for_mode(
+    effect_support: np.ndarray,
+    *,
+    style_copy_mode: str,
+    component_bbox_page: tuple[int, int, int, int],
+    verified_container_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Authorize source fringe cleanup without leaking beyond OCR ownership."""
+
+    if str(style_copy_mode or "off").strip().casefold() == "off":
+        if verified_container_mask is not None:
+            container = np.asarray(verified_container_mask)
+            if container.shape != effect_support.shape[:2]:
+                raise ValueError("verified container mask shape mismatch")
+            clipped = np.where(
+                (effect_support > 0) & (container > 0),
+                255,
+                0,
+            ).astype(np.uint8)
+            clipped = np.ascontiguousarray(clipped, dtype=np.uint8)
+            clipped.setflags(write=False)
+            return clipped
+        height, width = effect_support.shape[:2]
+        x1, y1, x2, y2 = (int(value) for value in component_bbox_page)
+        x1 = max(0, min(width, x1))
+        x2 = max(x1, min(width, x2))
+        y1 = max(0, min(height, y1))
+        y2 = max(y1, min(height, y2))
+        clipped = np.zeros_like(effect_support, dtype=np.uint8)
+        clipped[y1:y2, x1:x2] = effect_support[y1:y2, x1:x2]
+        clipped = np.ascontiguousarray(clipped, dtype=np.uint8)
+        clipped.setflags(write=False)
+        return clipped
+    return effect_support
+
+
 def _transition_owner_to_review(graph: OwnerGraph, owner_id: str) -> OwnerGraph:
     """Revoke every write capability after an atomic owner-chain rejection."""
 
@@ -10350,15 +10475,47 @@ def _transition_owner_to_review(graph: OwnerGraph, owner_id: str) -> OwnerGraph:
 
 def _owner_dialogue_container_safe_bbox(
     bbox: tuple[int, int, int, int],
+    *,
+    anchor_bbox: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int, int, int]:
-    """Return a central chord-safe rectangle for a curved dialogue container."""
+    """Return a chord-safe rectangle anchored to the source body, not its tail."""
 
     x1, y1, x2, y2 = bbox
     width = x2 - x1
     height = y2 - y1
     inset_x = int(math.ceil(width * 0.15))
     inset_y = int(math.ceil(height * 0.15))
-    safe = (x1 + inset_x, y1 + inset_y, x2 - inset_x, y2 - inset_y)
+    safe_width = width - (inset_x * 2)
+    safe_height = height - (inset_y * 2)
+    if anchor_bbox is None:
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+    else:
+        ax1, ay1, ax2, ay2 = anchor_bbox
+        container_center_x = (x1 + x2) // 2
+        container_center_y = (y1 + y2) // 2
+        anchor_center_x = (int(ax1) + int(ax2)) // 2
+        anchor_center_y = (int(ay1) + int(ay2)) // 2
+        # A speech tail meaningfully displaces the container bbox on one axis.
+        # Small detector asymmetries must not jitter otherwise centred balloons.
+        center_x = (
+            anchor_center_x
+            if abs(anchor_center_x - container_center_x) > width * 0.12
+            else container_center_x
+        )
+        center_y = (
+            anchor_center_y
+            if abs(anchor_center_y - container_center_y) > height * 0.12
+            else container_center_y
+        )
+    safe_x1 = max(x1, center_x - (safe_width // 2))
+    safe_y1 = max(y1, center_y - (safe_height // 2))
+    safe = (
+        safe_x1,
+        safe_y1,
+        min(x2, safe_x1 + safe_width),
+        min(y2, center_y + ((safe_height + 1) // 2)),
+    )
     if safe[2] - safe[0] < 4 or safe[3] - safe[1] < 4:
         return bbox
     return safe
@@ -10460,7 +10617,14 @@ def _owner_layout_regions(
         )
     )
     layout_safe_bbox = (
-        _owner_dialogue_container_safe_bbox(layout_container_bbox)
+        _owner_dialogue_container_safe_bbox(
+            layout_container_bbox,
+            anchor_bbox=(
+                tuple(owner_render_geometry.source_replacement_bbox_page)
+                if owner_render_geometry is not None
+                else source_replacement_bbox
+            ),
+        )
         if layout_container_bbox is not None
         and verified_visual_container
         and not authenticated_source_typography_slot
@@ -10756,6 +10920,15 @@ def _owner_layout_regions(
                 "layout_region_id": f"{owner.owner_id}__shared_container",
                 "order": 0,
                 "component_ids": list(owner.component_ids),
+                **(
+                    {
+                        "paint_safe_polygon_page": copy.deepcopy(
+                            atomic["safe_polygon_page"]
+                        )
+                    }
+                    if authenticated_source_typography_slot
+                    else {}
+                ),
                 "source_ink_heights_px": source_heights,
                 "source_x_heights_px": source_x_heights,
                 "source_ink_height_median_px": (
@@ -10869,6 +11042,13 @@ def _owner_translation_binding_fields(
         "source_payload_sha256": binding.source_payload_sha256,
         "target_payload_sha256": binding.target_payload_sha256,
     }
+
+
+def _owner_repair_start_strategy(owner: Any) -> str:
+    """Choose the first bounded repair tier from semantic body structure."""
+
+    component_ids = tuple(getattr(owner, "component_ids", ()) or ())
+    return "R2" if len(component_ids) > 1 else "R0"
 
 
 def _owner_execution_review_seed(
@@ -11393,6 +11573,8 @@ def execute_owner_page_graph(
     commits: list[OwnerExecutionCommit] = []
     target_materializations: list[Any] = []
     repair_requests: list[Any] = []
+    repair_history: list[Any] = []
+    repair_budget_policy_sha256: str | None = None
     final_records: list[dict[str, Any]] = []
     bindings_by_owner = {
         binding.owner_id: binding
@@ -11441,6 +11623,7 @@ def execute_owner_page_graph(
             }
         )
         evidence: list[OwnerMaskEvidence] = []
+        source_effect_mask = np.zeros(source.shape[:2], dtype=np.uint8)
         component_bboxes: dict[str, tuple[int, int, int, int]] = {}
         selected_observations = [
             observations[observation_id]
@@ -11465,12 +11648,14 @@ def execute_owner_page_graph(
         )
         for component_id in owner.component_ids:
             component = components[component_id]
-            component_bboxes[component_id] = (
+            component_bbox = (
                 max(0, int(component.bbox_page[0])),
                 max(0, int(component.bbox_page[1])),
                 min(int(source.shape[1]), int(component.bbox_page[2])),
                 min(int(source.shape[0]), int(component.bbox_page[3])),
             )
+            component_bboxes[component_id] = component_bbox
+            component_evidence_start = len(evidence)
             selected = [
                 observations[observation_id]
                 for observation_id in owner.selected_observation_ids
@@ -11520,12 +11705,45 @@ def execute_owner_page_graph(
                             line_index=line_index,
                         )
                     )
+            component_evidence = evidence[component_evidence_start:]
+            if component_evidence:
+                expanded_bbox = component_bbox
+                for evidence_index in range(component_evidence_start, len(evidence)):
+                    item = evidence[evidence_index]
+                    if item.glyph_mask is None:
+                        continue
+                    effect_support, item_bbox = _owner_source_effect_support(
+                        item.glyph_mask,
+                        component_bbox_page=component_bbox,
+                    )
+                    cleanup_effect_support = _owner_cleanup_effect_support_for_mode(
+                        effect_support,
+                        style_copy_mode=style_copy_mode,
+                        component_bbox_page=component_bbox,
+                    )
+                    evidence[evidence_index] = replace(
+                        item,
+                        effect_support_mask=cleanup_effect_support,
+                    )
+                    source_effect_mask = np.maximum(
+                        source_effect_mask,
+                        cleanup_effect_support,
+                    )
+                    if str(style_copy_mode or "off").strip().casefold() != "off":
+                        expanded_bbox = (
+                            min(expanded_bbox[0], item_bbox[0]),
+                            min(expanded_bbox[1], item_bbox[1]),
+                            max(expanded_bbox[2], item_bbox[2]),
+                            max(expanded_bbox[3], item_bbox[3]),
+                        )
+                component_bboxes[component_id] = expanded_bbox
         source_glyph_mask = np.zeros(source.shape[:2], dtype=np.uint8)
         for item in evidence:
             if item.glyph_mask is not None:
                 source_glyph_mask = np.maximum(source_glyph_mask, item.glyph_mask)
             if item.line_mask is not None:
                 source_glyph_mask = np.maximum(source_glyph_mask, item.line_mask)
+        source_effect_mask = np.maximum(source_effect_mask, source_glyph_mask)
         owner_visual_profile = owner_visual_profiles.get(owner.owner_id)
         if owner_visual_profile is None:
             raise ValueError(
@@ -11557,16 +11775,43 @@ def execute_owner_page_graph(
             single,
             owner.owner_id,
         )
-        protected_mask = (
-            release_source_replacement_from_protection(
-                raw_protected_mask,
-                source_replacement_bbox,
-                source_replacement_mask=source_glyph_mask,
-                foreign_component_masks=foreign_component_masks,
+        try:
+            protected_mask = (
+                release_source_replacement_from_protection(
+                    raw_protected_mask,
+                    source_replacement_bbox,
+                    source_replacement_mask=source_effect_mask,
+                    foreign_component_masks=foreign_component_masks,
+                )
+                if np.any(source_glyph_mask)
+                else raw_protected_mask
             )
-            if np.any(source_glyph_mask)
-            else raw_protected_mask
-        )
+        except ValueError as exc:
+            if str(exc) != "source replacement mask is empty":
+                raise
+            logger.warning(
+                "owner source replacement rejected: page_id=%s owner_id=%s reason=%s",
+                owner.page_id,
+                owner.owner_id,
+                exc,
+            )
+            _transition_owner_to_review(executed_graph, owner.owner_id)
+            review_seed = copy.deepcopy(record)
+            review_seed["owner_execution_rejection_reason"] = str(exc)
+            review_seed["qa_flags"] = sorted(
+                {
+                    *list(review_seed.get("qa_flags") or []),
+                    "owner_mask_unsafe",
+                }
+            )
+            final_records.append(
+                _owner_non_rendering_record(
+                    executed_graph,
+                    owner,
+                    seed=review_seed,
+                )
+            )
+            continue
         container_evidence = [
             {
                 "evidence_id": f"{observation.observation_id}:layout_container",
@@ -11614,6 +11859,12 @@ def execute_owner_page_graph(
         record["owner_render_geometry"] = owner_render_geometry.to_dict()
         record["owner_render_geometry_sha256"] = owner_render_geometry.geometry_sha256
         if owner_render_geometry.status != "ready":
+            logger.warning(
+                "owner render geometry rejected: page_id=%s owner_id=%s reason=%s",
+                owner.page_id,
+                owner.owner_id,
+                owner_render_geometry.reason,
+            )
             _transition_owner_to_review(executed_graph, owner.owner_id)
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = owner_render_geometry.reason
@@ -11624,6 +11875,51 @@ def execute_owner_page_graph(
                 _owner_non_rendering_record(executed_graph, owner, seed=review_seed)
             )
             continue
+        if normalized_style_mode == "off":
+            container_polygon = owner_render_geometry.layout_container_polygon_page
+            if container_polygon is not None:
+                verified_container_mask = _page_polygon_mask(
+                    source.shape[:2],
+                    [tuple(container_polygon)],
+                )
+                promoted_evidence: list[OwnerMaskEvidence] = []
+                source_effect_mask = source_glyph_mask.copy()
+                for item in evidence:
+                    if item.glyph_mask is None:
+                        promoted_evidence.append(item)
+                        continue
+                    component_bbox = tuple(components[item.component_id].bbox_page)
+                    full_effect_support, _effect_bbox = _owner_source_effect_support(
+                        item.glyph_mask,
+                        component_bbox_page=component_bbox,
+                    )
+                    cleanup_effect_support = _owner_cleanup_effect_support_for_mode(
+                        full_effect_support,
+                        style_copy_mode=style_copy_mode,
+                        component_bbox_page=component_bbox,
+                        verified_container_mask=verified_container_mask,
+                    )
+                    cleanup_effect_support = positive_evidence_excluding_protected(
+                        cleanup_effect_support,
+                        protected_mask,
+                    )
+                    promoted_evidence.append(
+                        replace(item, effect_support_mask=cleanup_effect_support)
+                    )
+                    if np.any(cleanup_effect_support):
+                        source_effect_mask = np.maximum(
+                            source_effect_mask,
+                            cleanup_effect_support,
+                        )
+                        cleanup_bbox = _owner_mask_bbox(cleanup_effect_support)
+                        previous_bbox = component_bboxes[item.component_id]
+                        component_bboxes[item.component_id] = (
+                            min(previous_bbox[0], cleanup_bbox[0]),
+                            min(previous_bbox[1], cleanup_bbox[1]),
+                            max(previous_bbox[2], cleanup_bbox[2]),
+                            max(previous_bbox[3], cleanup_bbox[3]),
+                        )
+                evidence = promoted_evidence
         owner_layout_regions = _owner_layout_regions(
             single,
             page_width=int(source.shape[1]),
@@ -11699,6 +11995,13 @@ def execute_owner_page_graph(
             )
             continue
         if not plan.coverage_complete:
+            logger.warning(
+                "owner mask coverage rejected: page_id=%s owner_id=%s "
+                "uncovered_source_ink_pixels=%s",
+                owner.page_id,
+                owner.owner_id,
+                plan.uncovered_source_ink_pixels,
+            )
             _transition_owner_to_review(executed_graph, owner.owner_id)
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = (
@@ -11735,6 +12038,9 @@ def execute_owner_page_graph(
                 "bbox": list(plan.owner_bbox_page),
                 "source_bbox": list(plan.owner_bbox_page),
                 "text_pixel_bbox": list(plan.owner_bbox_page),
+                "_owner_component_bboxes_page": {
+                    key: list(value) for key, value in component_bboxes.items()
+                },
                 "owner_mask_coverage": {
                     "selected_observation_ids": sorted(owner.selected_observation_ids),
                     "expected_line_ids": [list(value) for value in plan.expected_line_ids],
@@ -11779,6 +12085,7 @@ def execute_owner_page_graph(
             mutation,
             text_execution_authority_sha256=execution_authority.authority_sha256,
             text_execution_authority=execution_authority,
+            source_support_mask=source_effect_mask,
         )
         single_owner.state = "inpainted"
         owner.state = "inpainted"
@@ -11793,6 +12100,9 @@ def execute_owner_page_graph(
             owner_graph=single,
             layout_regions=owner_layout_regions,
         )
+        layout_page["texts"][0]["_owner_component_bboxes_page"] = {
+            key: list(value) for key, value in component_bboxes.items()
+        }
         layout_page["texts"][0]["owner_style_capture"] = copy.deepcopy(
             record["owner_style_capture"]
         )
@@ -11854,16 +12164,203 @@ def execute_owner_page_graph(
                 next_strategy="r0_precise_retry",
             )
             if replacement.outcome is None:
-                repair_requests.append(replacement.repair_request)
-                owner.state = "repair_pending"
-                single_owner.state = "repair_pending"
-                review_seed = copy.deepcopy(record)
-                review_seed["owner_execution_rejection_reason"] = (
-                    replacement.repair_request.reason
+                from inpainter.owner_mask import build_repair_owner_mask_plan
+                from ownership.repair import (
+                    OwnerRepairCase,
+                    RepairExecutionFeedback,
+                    rebuild_r2_text_region,
+                    rebuild_r3_container_interior,
+                    run_repair_ladder,
                 )
-                review_seed["state"] = "repair_pending"
-                final_records.append(review_seed)
-                continue
+
+                repair_interior_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+                owner_x1, owner_y1, owner_x2, owner_y2 = plan.owner_bbox_page
+                repair_interior_mask[owner_y1:owner_y2, owner_x1:owner_x2] = 255
+                repair_capture: dict[str, Any] = {}
+
+                class _OwnerRepairInpaintEngine:
+                    def __init__(self, strategy: str, variant: str):
+                        self.strategy = str(strategy)
+                        self.variant = str(variant)
+                        self.engine_name = (
+                            f"owner_repair_{self.strategy.lower()}_{self.variant}"
+                        )
+
+                    def inpaint(self, image, mask, **_kwargs):
+                        if self.strategy == "R2":
+                            return np.array(
+                                rebuild_r2_text_region(image, mask),
+                                copy=True,
+                            )
+                        if self.strategy == "R3":
+                            return np.array(
+                                rebuild_r3_container_interior(
+                                    image,
+                                    mask,
+                                    variant=self.variant,
+                                ),
+                                copy=True,
+                            )
+                        radius = 3 if self.strategy == "R0" else 5
+                        return cv2.inpaint(
+                            np.ascontiguousarray(image),
+                            np.where(np.asarray(mask) > 0, 255, 0).astype(np.uint8),
+                            radius,
+                            cv2.INPAINT_TELEA,
+                        )
+
+                def _execute_repair_attempt(
+                    *,
+                    strategy,
+                    variant,
+                    original_rgb,
+                    cleanup_mask,
+                    request,
+                    translation,
+                ):
+                    del request
+                    try:
+                        bounded_cleanup_mask = np.where(
+                            (np.asarray(cleanup_mask) > 0)
+                            & (repair_interior_mask > 0),
+                            255,
+                            0,
+                        ).astype(np.uint8)
+                        repair_plan = build_repair_owner_mask_plan(
+                            plan,
+                            bounded_cleanup_mask,
+                            evidence_id=f"repair:{strategy}:{variant}",
+                        )
+                        repair_page = copy.deepcopy(inpaint_page)
+                        repair_record = repair_page["texts"][0]
+                        repair_record["state"] = "mask_ready"
+                        repair_record["action_mask_ref"] = repair_plan.action_mask_ref
+                        repaired_mutation = inpainter.inpaint_band_image(
+                            original_rgb,
+                            repair_page,
+                            owner_mask_plan=repair_plan,
+                            owner_inpainter=_OwnerRepairInpaintEngine(
+                                str(strategy),
+                                str(variant),
+                            ),
+                        )
+                        repaired_mutation = replace(
+                            repaired_mutation,
+                            text_execution_authority_sha256=(
+                                execution_authority.authority_sha256
+                            ),
+                            text_execution_authority=execution_authority,
+                            source_support_mask=source_effect_mask,
+                        )
+                        if (
+                            float(repaired_mutation.residual_score or 0.0)
+                            > float(repaired_mutation.residual_threshold or 0.0)
+                            or bool(repaired_mutation.residual_flags)
+                        ):
+                            return RepairExecutionFeedback.visual_residual(
+                                str(repaired_mutation.residual_evidence_sha256 or "residual")
+                            )
+                        repair_layout_page = copy.deepcopy(layout_page)
+                        repair_layout_record = repair_layout_page["texts"][0]
+                        repair_layout_record["state"] = "inpainted"
+                        repair_layout_record["action_mask_ref"] = (
+                            repair_plan.action_mask_ref
+                        )
+                        single_owner.state = "inpainted"
+                        single_owner.action_mask_ref = repair_plan.action_mask_ref
+                        owner.state = "inpainted"
+                        owner.action_mask_ref = repair_plan.action_mask_ref
+                        repaired_glyph_patch = typesetter.render_band_image(
+                            repaired_mutation.result_rgb,
+                            repair_layout_page,
+                            owner_graph=single,
+                        )
+                        repaired_transaction = OwnerReplacementTransaction.build(
+                            original_rgb=source,
+                            mutation=repaired_mutation,
+                            translation=translation,
+                            execution_id=graph.origin_execution_id,
+                            atomic_options=atomic_kwargs,
+                        )
+                        repaired_replacement = execute_owner_replacement(
+                            repaired_transaction,
+                            repaired_mutation,
+                            repaired_glyph_patch,
+                            failed_stage="repair",
+                            failure_reason=f"repair_{strategy}_{variant}_rejected",
+                            evidence_ids=(repair_plan.action_mask_ref,),
+                            next_strategy=str(strategy),
+                        )
+                        if repaired_replacement.outcome is None:
+                            return RepairExecutionFeedback.visual_residual(
+                                repaired_replacement.repair_request.request_id
+                            )
+                        repair_capture.clear()
+                        repair_capture.update(
+                            {
+                                "replacement": repaired_replacement,
+                                "mutation": repaired_mutation,
+                                "glyph_patch": repaired_glyph_patch,
+                                "layout_page": repair_layout_page,
+                                "plan": repair_plan,
+                            }
+                        )
+                        return RepairExecutionFeedback.committed(
+                            repaired_replacement.outcome.final_page
+                        )
+                    except (UnsafeOwnerMaskError, ValueError) as exc:
+                        return RepairExecutionFeedback.visual_residual(
+                            f"{type(exc).__name__}:{str(exc)}"
+                        )
+
+                repair_case = OwnerRepairCase.build(
+                    original_rgb=source,
+                    translation=binding,
+                    execution_id=graph.origin_execution_id,
+                    source_support_mask=source_effect_mask,
+                    container_interior_mask=repair_interior_mask,
+                    container_border_mask=np.zeros(source.shape[:2], dtype=np.uint8),
+                    protected_art_mask=plan.protected_art_mask,
+                    positive_residual_mask=source_effect_mask,
+                    attempt_executor=_execute_repair_attempt,
+                )
+                ladder = run_repair_ladder(
+                    repair_case,
+                    start_strategy=_owner_repair_start_strategy(owner),
+                    scheduler=lambda _seconds: None,
+                )
+                repair_requests.extend(ladder.repair_requests)
+                repair_history.extend(ladder.attempts)
+                repair_budget_policy_sha256 = ladder.repair_budget_policy_sha256
+                if ladder.status != "committed" or not repair_capture:
+                    logger.warning(
+                        "owner repair ladder exhausted: page_id=%s owner_id=%s attempts=%s",
+                        owner.page_id,
+                        owner.owner_id,
+                        [
+                            {
+                                "strategy": attempt.strategy,
+                                "variant": attempt.variant,
+                                "outcome": attempt.outcome,
+                                "evidence_ids": list(attempt.evidence_ids),
+                            }
+                            for attempt in ladder.attempts
+                        ],
+                    )
+                    owner.state = "repair_pending"
+                    single_owner.state = "repair_pending"
+                    review_seed = copy.deepcopy(record)
+                    review_seed["owner_execution_rejection_reason"] = (
+                        replacement.repair_request.reason
+                    )
+                    review_seed["state"] = "repair_pending"
+                    final_records.append(review_seed)
+                    continue
+                replacement = repair_capture["replacement"]
+                mutation = repair_capture["mutation"]
+                glyph_patch = repair_capture["glyph_patch"]
+                layout_page = repair_capture["layout_page"]
+                plan = repair_capture["plan"]
             commit = replacement.outcome.commit
             target_materializations.append(replacement.outcome.materialization)
         else:
@@ -11887,6 +12384,23 @@ def execute_owner_page_graph(
                 list(glyph_patch.glyph_bbox_page)
                 if glyph_patch.glyph_bbox_page is not None
                 else None
+            )
+            render_layout_contract = copy.deepcopy(
+                getattr(glyph_patch, "render_layout_contract", None)
+            )
+            if not isinstance(render_layout_contract, dict):
+                render_layout_contract = copy.deepcopy(
+                    rendered_record.get("render_layout_contract")
+                )
+            if not isinstance(render_layout_contract, dict):
+                render_layout_contract = {}
+            render_layout_contract.setdefault("owner_id", owner.owner_id)
+            render_layout_contract.setdefault("coordinate_space", "logical_page")
+            render_layout_contract.setdefault("block_bbox", copy.deepcopy(render_bbox))
+            render_layout_contract.setdefault("safe_text_box", copy.deepcopy(safe_bbox))
+            render_layout_contract["fit_status"] = str(glyph_patch.fit_status)
+            render_layout_contract["owner_render_quality"] = (
+                glyph_patch.render_quality_contract.to_dict()
             )
             rendered_record.update(
                 {
@@ -11942,14 +12456,7 @@ def execute_owner_page_graph(
                     "render_safe_polygon_page": [
                         list(point) for point in glyph_patch.render_safe_polygon_page
                     ],
-                    "render_layout_contract": {
-                        "owner_id": owner.owner_id,
-                        "coordinate_space": "logical_page",
-                        "block_bbox": copy.deepcopy(render_bbox),
-                        "safe_text_box": copy.deepcopy(safe_bbox),
-                        "fit_status": str(glyph_patch.fit_status),
-                        "owner_render_quality": glyph_patch.render_quality_contract.to_dict(),
-                    },
+                    "render_layout_contract": render_layout_contract,
                     "mask_evidence": {
                         "kind": "owner_glyph_mask",
                         "raw_mask_pixels": int(np.count_nonzero(plan.action_mask)),
@@ -11996,6 +12503,8 @@ def execute_owner_page_graph(
         translation_result=translation_result,
         target_materializations=tuple(target_materializations),
         repair_requests=tuple(repair_requests),
+        repair_history=tuple(repair_history),
+        repair_budget_policy_sha256=repair_budget_policy_sha256,
     )
 
 

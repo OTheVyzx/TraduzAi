@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 from ownership.hash_contract import sha256_text
 
 
@@ -238,6 +239,66 @@ def test_final_pixel_qa_projects_logical_owner_geometry_to_frame_once():
     assert "missing_owner_glyphs" not in _reasons(report)
 
 
+def test_final_ocr_matches_legacy_frame_space_component_without_waiving_text():
+    from dataclasses import replace
+
+    from ownership.model import ComponentDisposition, PageCompositionResult
+    from qa.final_pixel_observer import FinalPixelObservation
+    from strip.page_surface_geometry import PageSurfaceGeometry
+
+    geometry = PageSurfaceGeometry.build(
+        logical_width=40,
+        logical_height=24,
+        frame_width=80,
+        frame_height=24,
+        content_origin_xy=(40, 0),
+    )
+    graph = _graph()
+    graph.components[0] = replace(
+        graph.components[0],
+        bbox_page=(45, 5, 70, 17),
+        polygon_page=((45, 5), (70, 5), (70, 17), (45, 17)),
+    )
+    graph.observations = []
+    graph.owners = []
+    graph.projections = []
+    graph.component_dispositions = [
+        ComponentDisposition(
+            component_id="component_a",
+            decision="preserve",
+            reason="policy:explicit_sfx_outside_translatable_container",
+        )
+    ]
+    final = np.full((24, 80, 3), 230, dtype=np.uint8)
+    empty_map = np.full((24, 80), "", dtype="<U16")
+    composition = PageCompositionResult(
+        final_rgb=final,
+        cleanup_owner_map=empty_map,
+        glyph_owner_map=empty_map.copy(),
+        conflicts=(),
+        write_counts={"cleanup_pixels": 0, "glyph_pixels": 0, "final_changed_pixels": 0, "owner_count": 0},
+        sha256="a" * 64,
+        page_id="page_001",
+        coordinate_space="framed_page",
+        page_surface_geometry_sha256=geometry.geometry_sha256,
+        page_surface_geometry=geometry,
+    )
+    observation = FinalPixelObservation(
+        image_path=Path("final.png"),
+        persisted_sha256="b" * 64,
+        image_rgb=final,
+        detected_blocks=(),
+        ocr_records=({"text": "HO", "bbox": [5, 5, 30, 17]},),
+        source_language="en",
+        page_surface_geometry_sha256=geometry.geometry_sha256,
+        geometry_projection_count=1,
+    )
+
+    report = _evaluate(graph, composition, observation)
+
+    assert "independently_detected_text_without_owner" not in _reasons(report)
+
+
 def test_source_payload_visible_in_final_pixels_blocks_with_empty_metadata_flags():
     report = _evaluate(
         _graph(),
@@ -247,6 +308,65 @@ def test_source_payload_visible_in_final_pixels_blocks_with_empty_metadata_flags
     assert "source_payload_visible" in _reasons(report)
 
 
+def test_source_token_shared_with_distinct_translation_is_not_residual():
+    report = _evaluate(
+        _graph(
+            source="IS THAT ALSO A HYBRID OF GURITA",
+            translated="ISSO TAMBEM E UM HIBRIDO DE GURITA",
+        ),
+        _composition(
+            source="IS THAT ALSO A HYBRID OF GURITA",
+            translated="ISSO TAMBEM E UM HIBRIDO DE GURITA",
+        ),
+        _observation(
+            {
+                "text": "Isso tambem e um hibrido de padre e gurita?",
+                "bbox": [6, 6, 28, 16],
+            }
+        ),
+    )
+
+    assert "source_payload_visible" not in _reasons(report)
+
+
+def test_accented_target_token_shared_with_source_is_not_residual():
+    from dataclasses import replace
+
+    graph = _graph(
+        source="UM DOS TRES DE SIHYUK HEAVENLY SLAUGHTER STAR",
+        translated="UM DOS TRÊS DE SIHYUK ESTRELA DO MASSACRE CELESTIAL",
+    )
+    graph.observations[0] = replace(
+        graph.observations[0],
+        text="UM DOS TRES DE SIHYUK",
+    )
+    report = _evaluate(
+        graph,
+        _composition(
+            source="UM DOS TRES DE SIHYUK HEAVENLY SLAUGHTER STAR",
+            translated="UM DOS TRÊS DE SIHYUK ESTRELA DO MASSACRE CELESTIAL",
+        ),
+        _observation(
+            {
+                "text": "UM DOS TRES DE SIHYUK ESTRELA DO MASSACRE CELESTIAL",
+                "bbox": [6, 6, 28, 16],
+            }
+        ),
+    )
+
+    assert "source_payload_visible" not in _reasons(report)
+
+
+def test_identical_verified_target_repaint_is_not_its_own_source_residual():
+    report = _evaluate(
+        _graph(source="DING", translated="DING"),
+        _composition(source="DING", translated="DING"),
+        _observation({"text": "DING", "bbox": [6, 6, 28, 16]}),
+    )
+
+    assert "source_payload_visible" not in _reasons(report)
+
+
 def test_independently_detected_text_without_owner_blocks():
     report = _evaluate(
         _graph(),
@@ -254,6 +374,141 @@ def test_independently_detected_text_without_owner_blocks():
         _observation({"text": "MYSTERY", "bbox": [32, 18, 39, 23]}),
     )
     assert "independently_detected_text_without_owner" in _reasons(report)
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        "NOVATO",
+        "O QUE...?",
+        "VICE-MESTRE DA GUILDA",
+        "000000",
+    ],
+)
+def test_independently_detected_verified_pt_br_or_neutral_text_does_not_block(observed):
+    graph = _graph()
+    graph.owners = []
+    graph.projections = []
+    report = _evaluate(
+        graph,
+        _composition(glyph=False),
+        _observation({"text": observed, "bbox": [32, 18, 39, 23]}),
+    )
+
+    assert "independently_detected_text_without_owner" not in _reasons(report)
+
+
+def test_two_unknown_words_are_not_waived_as_a_proper_name():
+    graph = _graph()
+    graph.owners = []
+    graph.projections = []
+    report = _evaluate(
+        graph,
+        _composition(glyph=False),
+        _observation({"text": "UNOWNED ENGLISH", "bbox": [32, 18, 39, 23]}),
+    )
+
+    assert "independently_detected_text_without_owner" in _reasons(report)
+
+
+def test_full_page_aggregate_is_global_language_evidence_not_local_unowned_text():
+    report = _evaluate(
+        _graph(),
+        _composition(),
+        _observation({
+            "text": "CORPO TRADUZIDO",
+            "bbox": [0, 0, 999, 999],
+            "final_probe_target_id": "full-page:full_page",
+        }),
+    )
+
+    assert "observation_bbox_outside_logical_page" not in _reasons(report)
+    assert "independently_detected_text_without_owner" not in _reasons(report)
+
+
+def test_full_page_aggregate_still_blocks_known_source_payload():
+    report = _evaluate(
+        _graph(),
+        _composition(),
+        _observation({
+            "text": "SOURCE BODY",
+            "bbox": [0, 0, 999, 999],
+            "final_probe_target_id": "full-page:full_page",
+        }),
+    )
+
+    assert "source_payload_visible" in _reasons(report)
+
+
+def test_punctuation_only_final_ocr_is_not_independent_text():
+    report = _evaluate(
+        _graph(),
+        _composition(),
+        _observation({"text": "......", "bbox": [32, 18, 39, 23]}),
+    )
+
+    assert "independently_detected_text_without_owner" not in _reasons(report)
+
+
+def test_short_noise_anchored_to_suppressed_non_text_is_not_independent_text():
+    from ownership.model import ComponentDisposition
+
+    graph = _graph()
+    graph.owners = []
+    graph.projections = []
+    graph.component_dispositions = [
+        ComponentDisposition(
+            component_id="component_a",
+            decision="suppress",
+            reason="redundant_container_without_ocr_evidence",
+        )
+    ]
+    report = _evaluate(
+        graph,
+        _composition(glyph=False),
+        _observation(
+            {
+                "text": "oe",
+                "bbox": [6, 6, 28, 16],
+                "final_probe_target_id": "component_a",
+            }
+        ),
+    )
+
+    assert "independently_detected_text_without_owner" not in _reasons(report)
+
+
+def test_unassociated_ocr_inside_explicit_scanlation_zone_is_preserved():
+    from dataclasses import replace
+    from ownership.model import ComponentDisposition
+
+    graph = _graph()
+    graph.components[0] = replace(
+        graph.components[0],
+        bbox_page=(0, 14, 12, 23),
+        polygon_page=((0, 14), (12, 14), (12, 23), (0, 23)),
+    )
+    graph.owners = []
+    graph.projections = []
+    graph.component_dispositions = [
+        ComponentDisposition(
+            component_id="component_a",
+            decision="preserve",
+            reason="policy:scanlation_apparatus",
+        )
+    ]
+    report = _evaluate(
+        graph,
+        _composition(glyph=False),
+        _observation(
+            {
+                "text": "SUPPORT OUR TRANSLATORS AT OUR SITE",
+                "bbox": [22, 16, 39, 22],
+            }
+        ),
+    )
+
+    assert "independently_detected_text_without_owner" not in _reasons(report)
 
 
 def test_translated_glyphs_moved_within_layout_are_linked_by_owner_pixel_map():
@@ -376,6 +631,28 @@ def test_review_required_owner_blocks_route_state_contract():
     assert "owner_route_not_final" in _reasons(report)
 
 
+def test_verified_target_language_owner_preserves_original_without_cleanup_or_glyphs():
+    from dataclasses import replace
+
+    source = "UAU, VOCE ME ASSUSTOU."
+    graph = _graph(source=source, translated=source, state="target_ready")
+    graph.owners[0] = replace(
+        graph.owners[0],
+        route_action="translate_inpaint_render",
+    )
+    report = _evaluate(
+        graph,
+        _composition(glyph=False, source=source, translated=source),
+        _observation({"text": source, "bbox": [6, 6, 28, 16]}),
+    )
+
+    assert "owner_route_not_final" not in _reasons(report)
+    assert "missing_owner_glyphs" not in _reasons(report)
+    assert "source_evidence_outside_cleanup" not in _reasons(report)
+    assert "source_payload_visible" not in _reasons(report)
+    assert report.passed is True
+
+
 def test_rendered_owner_with_tampered_delivery_blocks_route_and_language_contracts():
     from dataclasses import replace
 
@@ -459,6 +736,50 @@ def test_source_observation_polygon_outside_cleanup_map_blocks():
     report = _evaluate(graph, composition, _observation())
 
     assert "source_evidence_outside_cleanup" in _reasons(report)
+
+
+def test_selected_line_support_may_have_small_geometric_edge_outside_cleanup():
+    from dataclasses import replace
+
+    graph = _graph()
+    graph.owners[0] = replace(
+        graph.owners[0],
+        route_action="translate_inpaint_render",
+    )
+    graph.observations[0] = replace(
+        graph.observations[0],
+        polygons_page=(((5, 5), (30, 5), (30, 17), (5, 17)),),
+    )
+    composition = _composition()
+    cleanup = np.asarray(composition.cleanup_owner_map).copy()
+    cleanup[5:17, 5:31] = "owner_a"
+    composition = replace(composition, cleanup_owner_map=cleanup)
+
+    report = _evaluate(graph, composition, _observation())
+
+    assert "source_evidence_outside_cleanup" not in _reasons(report)
+
+
+def test_selected_line_support_accepts_material_glyph_density_cleanup():
+    from dataclasses import replace
+
+    graph = _graph()
+    graph.owners[0] = replace(
+        graph.owners[0],
+        route_action="translate_inpaint_render",
+    )
+    graph.observations[0] = replace(
+        graph.observations[0],
+        polygons_page=(((5, 5), (30, 5), (30, 17), (5, 17)),),
+    )
+    composition = _composition()
+    cleanup = np.asarray(composition.cleanup_owner_map).copy()
+    cleanup[5:18, 5:31:2] = "owner_a"
+    composition = replace(composition, cleanup_owner_map=cleanup)
+
+    report = _evaluate(graph, composition, _observation())
+
+    assert "source_evidence_outside_cleanup" not in _reasons(report)
 
 
 def test_anchored_final_ocr_blocks_200_million_residual():

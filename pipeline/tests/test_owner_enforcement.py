@@ -369,6 +369,23 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
 
             owner = owner_graph.owners[0]
             profile_record = _record["texts"][0]
+            render_layout_contract = {
+                "schema_version": 1,
+                "source": "typesetter_resolved_layout",
+                "translated_key": "fixture-target-key",
+                "font_name": "ComicNeue-Bold.ttf",
+                "font_size": 14,
+                "line_height": 16,
+                "lines": ["DESTINO"],
+                "positions": [[16, 12]],
+                "line_widths": [9],
+                "block_bbox": [16, 12, 25, 28],
+                "target_bbox": [11, 8, 40, 26],
+                "position_bbox": [11, 8, 40, 26],
+                "safe_text_box": [11, 8, 40, 26],
+                "coordinate_space": "logical_page",
+                "band_y_top": 0,
+            }
             visual_profile = profile_record["visual_profile_v2"]
             render_geometry = profile_record["owner_render_geometry"]
             calls.append(("typeset", owner.owner_id))
@@ -475,6 +492,7 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
                 text_execution_authority_sha256=authority.authority_sha256,
                 text_execution_authority=authority,
                 delivery_contract=delivery,
+                render_layout_contract=render_layout_contract,
             )
 
     execution = execute_owner_page_graph(
@@ -506,6 +524,17 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
     )
     assert execution.records[0]["safe_text_box"] == [11, 8, 40, 26]
     assert execution.records[0]["target_bbox"] == [11, 8, 40, 26]
+    assert execution.records[0]["render_layout_contract"]["source"] == (
+        "typesetter_resolved_layout"
+    )
+    assert execution.records[0]["render_layout_contract"]["font_size"] == 14
+    assert execution.records[0]["render_layout_contract"]["lines"] == ["DESTINO"]
+    assert execution.records[0]["render_layout_contract"]["positions"] == [[16, 12]]
+    assert execution.records[0]["render_layout_contract"]["owner_id"] == "owner_a"
+    assert execution.records[0]["render_layout_contract"]["fit_status"] == "ok"
+    assert execution.records[0]["render_layout_contract"]["owner_render_quality"] == (
+        execution.records[0]["owner_render_quality"]
+    )
     assert execution.records[0]["owner_mask_coverage"] == {
         "selected_observation_ids": ["observation_a"],
         "expected_line_ids": [["observation_a", 0]],
@@ -519,7 +548,6 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
     assert "fast_fill_no_glyph_evidence" not in execution.records[0].get("qa_flags", [])
     assert execution.records[0]["mask_evidence"]["kind"] == "owner_glyph_mask"
     assert execution.records[0]["mask_evidence"]["raw_mask_pixels"] > 0
-
     from main import _drop_stale_final_render_geometry
 
     normalized = _drop_stale_final_render_geometry(dict(execution.records[0]))
@@ -581,6 +609,119 @@ def test_owner_source_glyph_raster_includes_bounded_cleanup_halo():
     assert not raster[10, 14]
     assert not np.any(raster[:, :14])
     assert not np.any(raster[:, 22:])
+
+
+def test_owner_source_effect_support_extends_past_tight_ocr_geometry():
+    from strip.process_bands import _owner_source_effect_support
+
+    core = np.zeros((50, 100), dtype=np.uint8)
+    core[18:31, 30:70] = 255
+
+    support, bbox = _owner_source_effect_support(
+        core,
+        component_bbox_page=(30, 18, 70, 31),
+    )
+
+    assert bbox[0] < 30
+    assert bbox[2] > 70
+    assert np.any(support[18:31, 24:30])
+    assert np.any(support[18:31, 70:76])
+    assert not np.any(support[:, : bbox[0]])
+    assert not np.any(support[:, bbox[2] :])
+
+
+def test_style_off_clips_source_effect_cleanup_to_authoritative_component():
+    from strip.process_bands import _owner_cleanup_effect_support_for_mode
+
+    effect_support = np.zeros((60, 120), dtype=np.uint8)
+    effect_support[10:50, 12:108] = 255
+
+    cleanup_support = _owner_cleanup_effect_support_for_mode(
+        effect_support,
+        style_copy_mode="off",
+        component_bbox_page=(30, 20, 90, 40),
+    )
+
+    assert np.any(cleanup_support[20:40, 30:90])
+    assert not np.any(cleanup_support[:20])
+    assert not np.any(cleanup_support[40:])
+    assert not np.any(cleanup_support[:, :30])
+    assert not np.any(cleanup_support[:, 90:])
+
+
+def test_style_mode_keeps_full_source_effect_cleanup_support():
+    from strip.process_bands import _owner_cleanup_effect_support_for_mode
+
+    effect_support = np.zeros((60, 120), dtype=np.uint8)
+    effect_support[10:50, 12:108] = 255
+
+    assert _owner_cleanup_effect_support_for_mode(
+        effect_support,
+        style_copy_mode="shadow",
+        component_bbox_page=(30, 20, 90, 40),
+    ) is effect_support
+
+
+def test_style_off_allows_effect_cleanup_inside_verified_container_only():
+    from strip.process_bands import _owner_cleanup_effect_support_for_mode
+
+    effect_support = np.zeros((60, 120), dtype=np.uint8)
+    effect_support[8:52, 10:110] = 255
+    container = np.zeros_like(effect_support)
+    container[15:45, 20:100] = 255
+
+    cleanup_support = _owner_cleanup_effect_support_for_mode(
+        effect_support,
+        style_copy_mode="off",
+        component_bbox_page=(30, 20, 90, 40),
+        verified_container_mask=container,
+    )
+
+    assert cleanup_support[17, 22] == 255
+    assert cleanup_support[42, 98] == 255
+    assert not np.any(cleanup_support[:15])
+    assert not np.any(cleanup_support[45:])
+    assert not np.any(cleanup_support[:, :20])
+    assert not np.any(cleanup_support[:, 100:])
+
+
+def test_dialogue_safe_chord_is_anchored_to_source_body_not_balloon_tail():
+    from strip.process_bands import _owner_dialogue_container_safe_bbox
+
+    safe = _owner_dialogue_container_safe_bbox(
+        (100, 1000, 340, 1160),
+        anchor_bbox=(130, 1000, 310, 1086),
+    )
+
+    assert safe == (136, 1000, 304, 1099)
+    assert safe[3] < 1100
+
+
+def test_owner_source_glyph_raster_recovers_punctuation_next_to_tight_ocr_support():
+    from ownership.model import SourceTextComponent
+    from strip.process_bands import _owner_component_glyph_raster
+
+    page = np.full((50, 120, 3), 220, dtype=np.uint8)
+    page[18:30, 30:62] = 8
+    page[23:27, 70:74] = 8
+    component = SourceTextComponent(
+        component_id="component_a",
+        page_id="page_001",
+        bbox_page=(20, 10, 90, 38),
+        polygon_page=((20, 10), (90, 10), (90, 38), (20, 38)),
+        detector_sources=("fixture",),
+    )
+
+    raster = _owner_component_glyph_raster(
+        page,
+        component=component,
+        support_polygons=(((26, 14), (64, 14), (64, 34), (26, 34)),),
+    )
+
+    assert np.any(raster[18:30, 30:62])
+    assert np.any(raster[23:27, 70:74])
+    assert not np.any(raster[:, :20])
+    assert not np.any(raster[:, 90:])
 
 
 def test_tight_white_text_polygon_uses_minority_ink_not_colored_background():

@@ -101,10 +101,13 @@ def detect_residual_text(
     ).astype(bool)
     region_before = before_gray[region]
     dark_background_context = False
+    source_region_median = 255.0
     if region_before.size:
+        source_region_median = float(np.median(region_before))
         non_light = region_before[region_before < float(light_threshold)]
         dark_background_context = bool(
             non_light.size >= max(16, int(region_pixels * 0.12))
+            and source_region_median <= float(dark_threshold + 64)
             and float(np.median(non_light)) <= float(dark_threshold + 64)
         )
     expected_dark_fill = (
@@ -132,6 +135,16 @@ def detect_residual_text(
     if source_light_text_on_dark:
         dark_residual = np.zeros_like(region, dtype=bool)
     dark_residual_pixels = int(np.count_nonzero(dark_residual))
+    faded_dark_residual = (
+        region
+        & (source_region_median >= float(dark_threshold + 16))
+        & dark_before
+        & ~dark_after
+        & (after_gray <= float(light_threshold - 12))
+        & changed_dark
+        & dark_text_like
+    )
+    faded_dark_residual_pixels = int(np.count_nonzero(faded_dark_residual))
 
     if include_light_residual:
         before_light_contrast = _local_light_contrast(before_gray)
@@ -140,6 +153,7 @@ def detect_residual_text(
         light_after = after_gray >= float(light_threshold)
         light_residual = (
             region
+            & dark_background_context
             & light_before
             & light_after
             & (before_light_contrast >= float(min_light_contrast))
@@ -163,18 +177,29 @@ def detect_residual_text(
         colored_residual = np.zeros_like(region, dtype=bool)
         colored_residual_pixels = 0
 
-    positive_residual = dark_residual | light_residual | colored_residual
+    positive_residual = (
+        dark_residual
+        | faded_dark_residual
+        | light_residual
+        | colored_residual
+    )
     residual_pixels = int(np.count_nonzero(positive_residual))
     score = round(float(residual_pixels) / float(region_pixels), 6)
 
     flags: list[str] = []
-    absolute_pixel_gate = max(int(min_pixels), 32)
+    # A few dozen anti-aliased or texture pixels can survive inside a large
+    # authenticated source support without forming a readable glyph.  Keep the
+    # ratio gate for small regions, but require at least one modest glyph worth
+    # of evidence before the ratio-independent gate becomes fatal.
+    absolute_pixel_gate = max(int(min_pixels), 64)
     has_residual = residual_pixels >= int(min_pixels) and (
         score >= float(min_ratio) or residual_pixels >= absolute_pixel_gate
     )
     if has_residual:
         if dark_residual_pixels:
             flags.append("dark_residual_pixels")
+        if faded_dark_residual_pixels:
+            flags.append("faded_dark_residual_pixels")
         if light_residual_pixels:
             flags.append("light_residual_pixels")
         if colored_residual_pixels:
@@ -187,6 +212,7 @@ def detect_residual_text(
         "score": score,
         "flags": flags,
         "dark_residual_pixels": dark_residual_pixels,
+        "faded_dark_residual_pixels": faded_dark_residual_pixels,
         "light_residual_pixels": light_residual_pixels,
         "colored_residual_pixels": colored_residual_pixels,
         "light_residual_on_dark_context": bool(source_light_text_on_dark),

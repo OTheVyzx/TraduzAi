@@ -247,6 +247,145 @@ def test_translation_response_is_joined_by_owner_id_not_list_position() -> None:
     assert not merged.violations
 
 
+def test_large_single_token_noop_display_sfx_is_preserved_without_execution() -> None:
+    _owners_to_translation_page, merge_owner_translations = _translation_api()
+    observation = replace(
+        _observation("ding", 0, "DING"),
+        bbox_page=(25, 20, 95, 70),
+    )
+    graph = _graph(
+        [("ding", "DING")],
+        observations_by_owner={"ding": [observation]},
+    )
+    compact_bbox = (20, 10, 100, 80)
+    graph.components[0] = replace(
+        graph.components[0],
+        bbox_page=compact_bbox,
+        polygon_page=((20, 10), (100, 10), (100, 80), (20, 80)),
+    )
+    graph.projections[0] = replace(
+        graph.projections[0],
+        bbox_page=compact_bbox,
+        bbox_tile=compact_bbox,
+    )
+
+    merged = merge_owner_translations(
+        graph,
+        {"texts": [{"owner_id": "owner_ding", "translated": "DING"}]},
+    )
+
+    assert merged.owners == []
+    assert merged.projections == []
+    assert merged.component_dispositions == [
+        ComponentDisposition(
+            component_id="component_ding",
+            decision="preserve",
+            owner_id=None,
+            reason="policy:short_noop_display_sfx",
+        )
+    ]
+    merged.require_valid()
+
+
+def test_emphatic_noop_display_token_without_container_is_preserved() -> None:
+    _owners_to_translation_page, merge_owner_translations = _translation_api()
+    observation = replace(
+        _observation("display", 0, "JACKPOT!!"),
+        bbox_page=(30, 20, 190, 90),
+        layout_bbox_page=None,
+    )
+    graph = _graph(
+        [("display", "JACKPOT!!")],
+        observations_by_owner={"display": [observation]},
+    )
+    display_bbox = (20, 10, 200, 100)
+    graph.components[0] = replace(
+        graph.components[0],
+        bbox_page=display_bbox,
+        polygon_page=((20, 10), (200, 10), (200, 100), (20, 100)),
+    )
+    graph.projections[0] = replace(
+        graph.projections[0],
+        bbox_page=display_bbox,
+        bbox_tile=display_bbox,
+    )
+
+    merged = merge_owner_translations(
+        graph,
+        {"texts": [{"owner_id": "owner_display", "translated": "JACKPOT!!"}]},
+    )
+
+    assert merged.owners == []
+    assert merged.component_dispositions[0].decision == "preserve"
+    assert merged.component_dispositions[0].reason == "policy:short_noop_display_sfx"
+    merged.require_valid()
+
+
+def test_emphatic_noop_inside_verified_dialogue_container_remains_executable() -> None:
+    _owners_to_translation_page, merge_owner_translations = _translation_api()
+    observation = replace(
+        _observation("dialogue", 0, "WAIT!!"),
+        bbox_page=(45, 30, 155, 80),
+        layout_bbox_page=(20, 10, 180, 100),
+    )
+    graph = _graph(
+        [("dialogue", "WAIT!!")],
+        observations_by_owner={"dialogue": [observation]},
+    )
+    dialogue_bbox = (20, 10, 180, 100)
+    graph.components[0] = replace(
+        graph.components[0],
+        bbox_page=dialogue_bbox,
+        polygon_page=((20, 10), (180, 10), (180, 100), (20, 100)),
+    )
+    graph.projections[0] = replace(
+        graph.projections[0],
+        bbox_page=dialogue_bbox,
+        bbox_tile=dialogue_bbox,
+    )
+
+    merged = merge_owner_translations(
+        graph,
+        {"texts": [{"owner_id": "owner_dialogue", "translated": "WAIT!!"}]},
+    )
+
+    assert [owner.owner_id for owner in merged.owners] == ["owner_dialogue"]
+    assert merged.component_dispositions[0].decision == "owned"
+    merged.require_valid()
+
+
+@pytest.mark.parametrize(
+    ("source", "bbox"),
+    [
+        ("WAIT", (20, 10, 180, 80)),
+        ("HURRY HURRY", (20, 10, 180, 120)),
+    ],
+)
+def test_noop_dialogue_or_non_display_text_remains_executable(
+    source: str,
+    bbox: tuple[int, int, int, int],
+) -> None:
+    _owners_to_translation_page, merge_owner_translations = _translation_api()
+    observation = replace(
+        _observation("body", 0, source),
+        bbox_page=bbox,
+    )
+    graph = _graph(
+        [("body", source)],
+        observations_by_owner={"body": [observation]},
+    )
+
+    merged = merge_owner_translations(
+        graph,
+        {"texts": [{"owner_id": "owner_body", "translated": source}]},
+    )
+
+    assert [owner.owner_id for owner in merged.owners] == ["owner_body"]
+    assert merged.owners[0].state == "translated"
+    assert merged.component_dispositions[0].decision == "owned"
+    merged.require_valid()
+
+
 def test_locale_blocker_prevents_owner_translation_ready() -> None:
     _owners_to_translation_page, merge_owner_translations = _translation_api()
     graph = _graph([("a", "The reward is 2 billion coins.")])
@@ -620,6 +759,101 @@ def test_complete_ptbr_owner_short_circuits_before_provider_rewrites_spacing() -
     assert result.bindings[0].target_text == source
     assert result.bindings[0].language_verdict.policy_id == "already_target_language"
     assert result.bindings[0].preserves_original_pixels
+
+
+def test_repaint_already_target_text_keeps_ptbr_but_requires_pixel_replacement() -> None:
+    from ownership.translation import OwnerTranslationRequest, translate_owner_page
+    from translator.language_policy import PageLanguageEvidence
+
+    source = "ENTAO, EM QUE VOELAPOSTOL?"
+    graph = _graph([("ptbr_overlay", source)])
+    request = OwnerTranslationRequest.from_graph(graph, "owner_ptbr_overlay")
+    provider_calls = []
+
+    def provider_must_not_run(_owner_request, _variant):
+        provider_calls.append(True)
+        return "PROVEDOR NAO DEVERIA SER CHAMADO"
+
+    provider_must_not_run.backend_name = "fixture"
+    result = translate_owner_page(
+        (request,),
+        backends=(provider_must_not_run,),
+        page_language_evidence_by_owner={
+            request.owner_id: PageLanguageEvidence.build(
+                coverage_complete=True,
+                source_only_tokens=(),
+            )
+        },
+        repaint_already_target_pixels=True,
+    )
+
+    binding = result.bindings[0]
+    assert provider_calls == []
+    assert binding.target_text == source
+    assert binding.language_verdict.policy_id == "already_target_language_repaint"
+    assert binding.language_verdict.reason == (
+        "already_target_language_requires_source_replacement"
+    )
+    assert not binding.preserves_original_pixels
+    assert result.attempts[0].provider_called is False
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "OLHA ESSE GAROTO SORRINDO SO PORQUE EU ESTOU NA FRENTE DAS CAMERAS",
+        "CLARO, SEU",
+        "ARVENCOMICS.COM",
+        "TODOS ESPERAVAM!",
+        "TUDOBEM!! O",
+        "UAU, VOCE ME ASSUSTOU.",
+        "ELE TERMINOU COM UM UNICO GOLPE...!",
+        "OQUE ACONTECEU COMMINHA BARRA SEM SOMBRAS?",
+        "MARCIAIS A VARIAS TECNICAS E ATE",
+    ],
+)
+def test_repaint_mode_preserves_coherent_ptbr_and_scan_identifiers(source: str) -> None:
+    from ownership.translation import OwnerTranslationRequest, translate_owner_page
+    from translator.language_policy import build_page_language_evidence
+
+    graph = _graph([("verified_target", source)])
+    request = OwnerTranslationRequest.from_graph(graph, "owner_verified_target")
+    result = translate_owner_page(
+        (request,),
+        page_language_evidence_by_owner={
+            request.owner_id: build_page_language_evidence(
+                texts=(source,),
+                coverage_complete=True,
+            )
+        },
+        repaint_already_target_pixels=True,
+    )
+
+    binding = result.bindings[0]
+    assert binding.language_verdict.policy_id == "already_target_language"
+    assert binding.preserves_original_pixels
+
+
+def test_structured_scan_identifier_is_a_verified_pixel_noop() -> None:
+    from ownership.translation import OwnerTranslationRequest, translate_owner_page
+    from translator.language_policy import build_page_language_evidence
+
+    source = "TL:ROK2343 PR:KILLSWITCH2315 RD:MOV TS:MOV CL:MOV"
+    graph = _graph([("scan_identifier", source)])
+    request = OwnerTranslationRequest.from_graph(graph, "owner_scan_identifier")
+
+    binding = translate_owner_page(
+        (request,),
+        page_language_evidence_by_owner={
+            request.owner_id: build_page_language_evidence(
+                texts=(source,),
+                coverage_complete=True,
+            )
+        },
+    ).bindings[0]
+
+    assert binding.language_verdict.policy_id == "source_neutral_structured_identifiers"
+    assert binding.preserves_original_pixels
 
 
 def test_fresh_complete_owner_evidence_still_rejects_english_provider_noop() -> None:

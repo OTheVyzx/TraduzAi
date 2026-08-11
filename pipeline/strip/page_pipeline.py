@@ -662,6 +662,12 @@ class PageExecutionResult:
             request.page_id,
             request.page_source_sha256,
         )
+        expected_terminal = (
+            request.run_id,
+            request.execution_id,
+            request.page_id,
+            request.page_source_sha256,
+        )
         coverage_identity = (
             coverage.run_id,
             coverage.origin_execution_id,
@@ -795,7 +801,7 @@ class PageExecutionResult:
                 qa_request.origin_execution_id,
                 qa_request.page_id,
                 qa_request.page_source_sha256,
-            ) != expected_content:
+            ) != expected_terminal:
                 raise PagePipelineIdentityError("final QA request crossed page execution")
             if qa_request.invocation_id in request_by_invocation:
                 raise PagePipelineIdentityError("final QA request invocation is duplicated")
@@ -827,7 +833,7 @@ class PageExecutionResult:
                 issue.execution_id,
                 issue.page_id,
                 issue.page_source_sha256,
-            ) != expected_content:
+            ) != expected_terminal:
                 raise PagePipelineIdentityError("final language issue crossed page execution")
             if issue.issue_id in issue_by_id:
                 raise PagePipelineIdentityError("final language issue is duplicated")
@@ -856,7 +862,7 @@ class PageExecutionResult:
                 probe.execution_id,
                 probe.page_id,
                 probe.page_source_sha256,
-            ) != expected_content:
+            ) != expected_terminal:
                 raise PagePipelineIdentityError("final QA probe crossed page execution")
             if probe.ocr_invocation_id in probe_invocation_ids:
                 raise PagePipelineIdentityError("final QA invocation has multiple probes")
@@ -896,7 +902,7 @@ class PageExecutionResult:
                 verdict.execution_id,
                 verdict.page_id,
                 verdict.page_source_sha256,
-            ) != expected_content:
+            ) != expected_terminal:
                 raise PagePipelineIdentityError("replacement verdict crossed page execution")
             binding = binding_by_owner.get(verdict.owner_id)
             materialization = materialization_by_owner.get(verdict.owner_id)
@@ -1377,11 +1383,87 @@ def _bbox_overlap(left: Sequence[int], right: Sequence[int]) -> int:
     )
 
 
+def _material_post_cleanup_residual_mask(
+    original_pixels: np.ndarray,
+    cleanup_pixels: np.ndarray,
+    source_support_mask: np.ndarray,
+    *,
+    page_surface_geometry: Any = None,
+) -> np.ndarray:
+    """Measure material source-like pixels after cleanup for terminal proof."""
+
+    from qa.inpaint_residual import detect_residual_text
+
+    support = np.asarray(source_support_mask)
+    if support.ndim == 3:
+        support = support[:, :, 0]
+    if support.ndim != 2:
+        raise PagePipelineStateError("terminal source support mask must be two-dimensional")
+    original = np.asarray(original_pixels)
+    cleanup = np.asarray(cleanup_pixels)
+    if original.shape[:2] != support.shape:
+        raise PagePipelineStateError(
+            "terminal source support mask differs from logical original pixels"
+        )
+    if cleanup.shape[:2] != original.shape[:2]:
+        if page_surface_geometry is None:
+            raise PagePipelineStateError(
+                "terminal cleanup differs from logical page without frame geometry"
+            )
+        try:
+            cleanup = page_surface_geometry.frame_array_to_logical(cleanup)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise PagePipelineStateError(
+                "terminal cleanup cannot be projected into logical page space"
+            ) from exc
+    if cleanup.shape[:2] != original.shape[:2]:
+        raise PagePipelineStateError(
+            "terminal cleanup projection differs from logical original pixels"
+        )
+    residual = detect_residual_text(
+        original,
+        cleanup,
+        support,
+        include_unchanged_dark=True,
+        include_light_residual=True,
+        return_mask=True,
+    )
+    measured = np.asarray(residual.get("positive_residual_mask"))
+    if measured.shape != support.shape:
+        raise PagePipelineStateError("terminal residual detector returned an invalid mask")
+    if not bool(residual.get("has_residual")):
+        measured = np.zeros_like(support, dtype=np.uint8)
+    else:
+        measured = np.where(measured > 0, 255, 0).astype(np.uint8)
+    measured = np.ascontiguousarray(measured)
+    measured.setflags(write=False)
+    return measured
+
+
+def _terminal_source_support_mask(mutation: Any) -> np.ndarray:
+    """Return source-glyph support, falling back only for legacy mutations."""
+
+    support = getattr(mutation, "source_support_mask", None)
+    if support is None:
+        support = getattr(mutation, "action_mask", None)
+    measured = np.asarray(support)
+    if measured.ndim == 3:
+        measured = measured[:, :, 0]
+    if measured.ndim != 2 or not np.any(measured > 0):
+        raise PagePipelineStateError("terminal source support mask is empty or invalid")
+    measured = np.where(measured > 0, 255, 0).astype(np.uint8)
+    measured = np.ascontiguousarray(measured)
+    measured.setflags(write=False)
+    return measured
+
+
 def finalize_and_persist_page_result(
     result: PageExecutionResult,
     *,
     candidate_pixels: np.ndarray,
+    original_pixels: np.ndarray,
     cleanup_pixels: np.ndarray,
+    page_surface_geometry: Any = None,
     generation_root: str | Path,
     observer: Any,
     source_language: str,
@@ -1409,6 +1491,15 @@ def finalize_and_persist_page_result(
 
     if result.status != "candidate_ready":
         raise PagePipelineStateError("page finalization requires a candidate result")
+    candidate_pixels = _canonical_rgb(candidate_pixels)
+    original_pixels = _canonical_rgb(original_pixels)
+    cleanup_pixels = _canonical_rgb(cleanup_pixels)
+    if not (
+        candidate_pixels.shape == original_pixels.shape == cleanup_pixels.shape
+    ):
+        raise PagePipelineStateError(
+            "canonical visual page stages have incompatible dimensions"
+        )
     root = Path(generation_root).resolve(strict=True)
     marker = ArtifactGenerationMarker.read_verified(root)
     if (marker.run_id, marker.execution_id) != (
@@ -1432,10 +1523,14 @@ def finalize_and_persist_page_result(
         page_generation_id=f"page-generation-{uuid.uuid4().hex}",
         transaction_id=f"transaction-{uuid.uuid4().hex}",
     )
-    candidate = transaction.persist_candidate(
-        _canonical_rgb(candidate_pixels), attempt_id="terminal-r0"
-    )
+    candidate = transaction.persist_candidate(candidate_pixels, attempt_id="terminal-r0")
     candidate_path = root.joinpath(*Path(candidate.artifact_ref.relative_path).parts)
+    if page_surface_geometry is None:
+        page_surface_geometry = getattr(
+            result.page_composition,
+            "page_surface_geometry",
+            None,
+        )
     source_challenges = [
         {
             "component_id": entry.component_id,
@@ -1458,6 +1553,7 @@ def finalize_and_persist_page_result(
         page_id=result.page_id,
         page_number=page_number,
         source_challenges=source_challenges,
+        page_surface_geometry=page_surface_geometry,
         run_id=result.request.run_id,
         execution_id=result.request.execution_id,
         page_source_sha256=result.request.page_source_sha256,
@@ -1527,13 +1623,19 @@ def finalize_and_persist_page_result(
         if glyph_mask is None:
             glyph_mask = commit.glyph_patch.glyph_mask
         glyph_mask = np.asarray(glyph_mask)
+        source_support_mask = _terminal_source_support_mask(commit.mutation)
         verdicts.append(
             build_final_replacement_verdict(
                 binding=binding,
                 materialization=materialization,
                 execution_id=result.request.execution_id,
-                source_support_mask=commit.mutation.action_mask,
-                post_cleanup_residual_mask=np.zeros_like(commit.mutation.action_mask),
+                source_support_mask=source_support_mask,
+                post_cleanup_residual_mask=_material_post_cleanup_residual_mask(
+                    result.request.original_page.read_only_rgb(),
+                    cleanup_pixels,
+                    source_support_mask,
+                    page_surface_geometry=page_surface_geometry,
+                ),
                 target_delta_mask=glyph_mask,
                 target_alpha_mask=glyph_mask,
                 target_contrast_score=1.0,
@@ -1589,7 +1691,12 @@ def finalize_and_persist_page_result(
         unowned_material_text_absent=True,
     )
 
-    original_ref = result.request.original_page.artifact_ref
+    original_ref = _write_stage_rgb(
+        root,
+        f"stages/{result.page_id}/original.png",
+        original_pixels,
+        page_id=result.page_id,
+    )
     inpaint_ref = _write_stage_rgb(
         root,
         f"stages/{result.page_id}/inpaint.png",
@@ -1715,6 +1822,7 @@ def run_page_owner_pipeline(
             attempt_controls=services.translation_attempt_controls,
             attempt_kwargs=services.translation_attempt_kwargs,
             page_language_evidence_by_owner=language_evidence_by_owner,
+            repaint_already_target_pixels=True,
         )
         translated_graph = apply_owner_translation_result(graph, translation_result)
     else:
@@ -1726,6 +1834,8 @@ def run_page_owner_pipeline(
         else ()
     )
     repair_requests = ()
+    repair_history = ()
+    repair_budget_policy_sha256 = None
     target_materializations = ()
     text_layers_view = None
     page_composition = None
@@ -1739,6 +1849,14 @@ def run_page_owner_pipeline(
         commits = tuple(execution_output.commits)
         repair_requests = tuple(
             getattr(execution_output, "repair_requests", ()) or ()
+        )
+        repair_history = tuple(
+            getattr(execution_output, "repair_history", ()) or ()
+        )
+        repair_budget_policy_sha256 = getattr(
+            execution_output,
+            "repair_budget_policy_sha256",
+            None,
         )
         target_materializations = tuple(
             getattr(execution_output, "target_materializations", ()) or ()
@@ -1773,6 +1891,8 @@ def run_page_owner_pipeline(
         translations=(translation_result.bindings if translation_result else ()),
         page_commits=commits,
         repair_requests=repair_requests,
+        repair_history=repair_history,
+        repair_budget_policy_sha256=repair_budget_policy_sha256,
         owner_target_materializations=target_materializations,
         text_layers_view=text_layers_view,
         page_composition=page_composition,
@@ -1794,6 +1914,23 @@ def adapt_page_execution_result_to_output_page(
     else:
         image = result.request.original_page.mutable_attempt_copy()
     graph = result.owner_graph.read()
+    text_layers = None
+    if result.text_layers_view is not None:
+        snapshot = result.text_layers_view.read()
+        if isinstance(snapshot, dict) and isinstance(snapshot.get("texts"), list):
+            text_layers = copy.deepcopy(snapshot)
+    if text_layers is None:
+        text_layers = {
+            "texts": [
+                {
+                    "owner_id": binding.owner_id,
+                    "original": binding.source_text,
+                    "translated": binding.target_text,
+                    "target_locale": binding.target_locale,
+                }
+                for binding in result.translations
+            ]
+        }
     return OutputPage(
         y_top=0,
         y_bottom=int(image.shape[0]),
@@ -1807,17 +1944,7 @@ def adapt_page_execution_result_to_output_page(
             "_owner_graph_mode": "enforce",
             "_owner_graph_snapshot": graph.to_dict(),
         },
-        text_layers={
-            "texts": [
-                {
-                    "owner_id": binding.owner_id,
-                    "original": binding.source_text,
-                    "translated": binding.target_text,
-                    "target_locale": binding.target_locale,
-                }
-                for binding in result.translations
-            ]
-        },
+        text_layers=text_layers,
     )
 
 

@@ -252,6 +252,60 @@ def test_joined_ptbr_marker_and_nonlexical_text_do_not_exhaust_translation() -> 
     assert numeric.policy_id == "source_neutral_nonlexical"
 
 
+def test_unit_glyph_fragment_is_nonlexical_but_english_pronoun_still_retries() -> None:
+    fragment = "t!"
+    fragment_verdict = validate_target_language(
+        source=fragment,
+        target=fragment,
+        role="dialogue_body",
+        page_language_evidence=build_page_language_evidence(
+            texts=(fragment,),
+            coverage_complete=True,
+        ),
+    )
+    pronoun = "I!"
+    pronoun_verdict = validate_target_language(
+        source=pronoun,
+        target=pronoun,
+        role="dialogue_body",
+        page_language_evidence=build_page_language_evidence(
+            texts=(pronoun,),
+            coverage_complete=True,
+        ),
+    )
+
+    assert fragment_verdict.accepted
+    assert fragment_verdict.policy_id == "source_neutral_nonlexical"
+    assert not pronoun_verdict.accepted
+
+
+def test_structured_identifier_list_is_neutral_but_labelled_prose_still_retries() -> None:
+    identifiers = "TL:ROK2343 PR:KILLSWITCH2315 RD:MOV TS:MOV CL:MOV"
+    identifier_verdict = validate_target_language(
+        source=identifiers,
+        target=identifiers,
+        role="dialogue_body",
+        page_language_evidence=build_page_language_evidence(
+            texts=(identifiers,),
+            coverage_complete=True,
+        ),
+    )
+    prose = "NOTE: THIS SHOULD BE TRANSLATED"
+    prose_verdict = validate_target_language(
+        source=prose,
+        target=prose,
+        role="dialogue_body",
+        page_language_evidence=build_page_language_evidence(
+            texts=(prose,),
+            coverage_complete=True,
+        ),
+    )
+
+    assert identifier_verdict.accepted
+    assert identifier_verdict.policy_id == "source_neutral_structured_identifiers"
+    assert not prose_verdict.accepted
+
+
 def test_page_language_evidence_tracks_material_english_but_not_ptbr() -> None:
     english = build_page_language_evidence(
         texts=("THE PLAYER HAS 10 KILLS",),
