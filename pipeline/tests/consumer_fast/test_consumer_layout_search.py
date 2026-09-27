@@ -56,6 +56,36 @@ def test_no_safe_candidate_is_explicit_and_bounded(monkeypatch):
     assert all(row["reason"] == "contour collision" for row in result["attempts"])
 
 
+def test_deadline_discards_partial_valid_group_instead_of_publishing(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(search.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(search, "prepare_source_white_comfort", lambda *_:
+                        {"source_sha256": "s", "ideal_px": 9})
+    monkeypatch.setattr(search, "_visual_core_height", lambda *_: 30)
+    monkeypatch.setattr(search, "wrap_lines", lambda *_: ["TEXTO COMPLETO"])
+    monkeypatch.setattr(search, "line_advance", lambda *_: 33)
+    monkeypatch.setattr(search, "rasterize", lambda *_:
+                        np.zeros((10, 20), np.uint8))
+
+    def render(*_args, **_kwargs):
+        now[0] = 2.0
+        return object(), dict(
+            visual_comfort=dict(minimum_actual_px=12), center_error_px=[0, 0])
+
+    monkeypatch.setattr(search, "render_reviewed_text", render)
+    result = search.search_source_centered_layout(
+        np.zeros((1, 1, 3), np.uint8), _recipe(),
+        source_visual_height_px=30, preferred_font_size=30,
+        minimum_font_size=30, maximum_font_size=30,
+        width_ratios=(1.0,), maximum_candidates=2, maximum_seconds=1)
+
+    assert result["status"] == "review_required"
+    assert result["reason"] == "search_time_budget_exhausted"
+    assert result["accepted_candidate_count"] == 1
+    assert result["discarded_due_to_deadline"] is True
+    assert "recipe" not in result and "layer" not in result
+
+
 def test_budget_reaches_minimum_scale_before_no_solution(monkeypatch):
     monkeypatch.setattr(search, "prepare_source_white_comfort", lambda *_: {"source_sha256": "s", "ideal_px": 9})
     monkeypatch.setattr(search, "_visual_core_height", lambda _font, size, _sample: size)

@@ -343,11 +343,20 @@ def search_source_centered_layout(clean: np.ndarray, base_recipe: dict,
                 attempts.append(entry)
         if len(attempts) >= maximum_candidates:
             break
+    time_budget_exhausted = (
+        maximum_seconds is not None
+        and time.monotonic() - started >= maximum_seconds
+    )
+    if time_budget_exhausted:
+        return {"status": "review_required", "policy": POLICY,
+                "reason": "search_time_budget_exhausted",
+                "attempts": attempts, "candidate_count": len(attempts),
+                "accepted_candidate_count": len(accepted),
+                "discarded_due_to_deadline": bool(accepted),
+                "metric_cache": metrics.evidence()}
     if not accepted:
         return {"status": "review_required", "policy": POLICY,
-                "reason": ("search_time_budget_exhausted" if maximum_seconds is not None and
-                           time.monotonic()-started >= maximum_seconds else
-                           "no_candidate_satisfies_source_contour_scale_and_center"),
+                "reason": "no_candidate_satisfies_source_contour_scale_and_center",
                 "attempts": attempts, "candidate_count": len(attempts),
                 "metric_cache": metrics.evidence()}
     selected = min(accepted, key=lambda item: (item[0], -item[1]["font_size"],
@@ -365,8 +374,7 @@ def search_source_centered_layout(clean: np.ndarray, base_recipe: dict,
                                "chosen_score": score,
                                "chosen_lines": choice["lines"],
                                "alternative_breaks": alternative_breaks,
-                               "time_budget_exhausted": (maximum_seconds is not None and
-                                                         time.monotonic()-started >= maximum_seconds),
+                               "time_budget_exhausted": False,
                                "candidate_count": len(attempts),
                                "attempts": attempts}
     return {"status": "rendered_candidate", "policy": POLICY,
