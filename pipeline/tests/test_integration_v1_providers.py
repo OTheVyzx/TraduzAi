@@ -46,7 +46,7 @@ def test_cold_ocr_uses_hash_bound_physical_attempt_and_keeps_context_private():
         origin_execution_id="cold-execution", invocation=invoke,
         context={"characters": ["PRIVATE CONTEXT"]})
     assert len(calls) == 1
-    assert calls[0]["stop_on_first_text"] is True
+    assert calls[0]["stop_on_first_text"] is False
     assert recovered["source"] == "MY THOUGHTS ARE DIFFERENT"
     assert recovered["selected_observation_ids"] == ["observation-1", "observation-2"]
     assert recovered["provider_called"] is True and recovered["cache_hit"] is False

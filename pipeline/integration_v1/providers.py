@@ -182,10 +182,7 @@ def recover_source_with_ocr(
             bbox_page=tuple(int(value) for value in bbox_page),
             request=request,
             variants=("anchored_crop", "gray", "inverted", "scale_2x"),
-            # Variants are ordered fallbacks, not independent text fragments.
-            # Combining successful variants duplicates the same source unit and
-            # can turn a short balloon into a pathological repeated translation.
-            stop_on_first_text=True,
+            stop_on_first_text=False,
         )
     except Exception as exc:
         raise ProviderUnavailable(f"local OCR provider unavailable: {exc.__class__.__name__}") from exc
@@ -194,11 +191,22 @@ def recover_source_with_ocr(
     fresh = [attempt for attempt in attempts if getattr(attempt, "qualifies_as_fresh_physical_inference", False)]
     if not fresh:
         raise ProviderUnavailable("fresh physical OCR evidence is required")
-    observations = [row for row in tuple(getattr(result, "observations", ()) or ())
-                    if str(getattr(row, "text", "")).strip()]
+    observations = tuple(row for row in tuple(getattr(result, "observations", ()) or ())
+                         if str(getattr(row, "text", "")).strip())
     if not observations:
         raise ProviderUnavailable("fresh physical OCR returned no text")
-    observations.sort(key=lambda row: (
+    from vision_runtime.ocr_selection import select_ocr_invocation
+
+    selection = select_ocr_invocation(result)
+    if selection.selected_source is None or not selection.selected_observation_ids:
+        reasons = ",".join(selection.uncertainty_reasons) or "unresolved"
+        raise ProviderUnavailable(f"fresh physical OCR selection requires review: {reasons}")
+    selected_ids = set(selection.selected_observation_ids)
+    selected_observations = [row for row in observations
+                             if str(row.observation_id) in selected_ids]
+    if len(selected_observations) != len(selected_ids):
+        raise ProviderUnavailable("fresh physical OCR selection lost observation identity")
+    selected_observations.sort(key=lambda row: (
         int(getattr(row, "bbox_page", (0, 0, 0, 0))[1]),
         int(getattr(row, "bbox_page", (0, 0, 0, 0))[0]),
         str(getattr(row, "observation_id", "")),
@@ -210,12 +218,15 @@ def recover_source_with_ocr(
         "confidence": float(row.confidence),
         "bbox_page": [int(value) for value in row.bbox_page],
         "payload_sha256": str(row.payload_sha256),
-    } for row in observations]
-    source = " ".join(row["text"] for row in selected).strip()
+    } for row in selected_observations]
+    source = str(selection.selected_source).strip()
     review = {
         "schema": "traduzai.cold-ocr-selection.v1",
         "source": source,
         "selected_observation_ids": [row["observation_id"] for row in selected],
+        "selection_status": selection.status,
+        "selection_provenance": selection.provenance,
+        "uncertainty_reasons": list(selection.uncertainty_reasons),
         "attempt_chain_sha256": str(getattr(result, "attempt_chain_sha256", "")),
         "root_input_pixel_sha256": root_hash,
         "page_source_sha256": str(page_source_sha256),
