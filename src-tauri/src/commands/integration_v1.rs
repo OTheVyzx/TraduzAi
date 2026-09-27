@@ -1,15 +1,20 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 
 use crate::commands::project_schema;
 
 const REVISION_CONFLICT: &str = "PROJECT_REVISION_CONFLICT";
+
+static ACTIVE_CONSUMER_JOBS: once_cell::sync::Lazy<Mutex<HashSet<String>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReviewDecisionInput {
@@ -519,8 +524,8 @@ fn project_identity(project: &Value, project_path: &str) -> Result<String, Strin
     Ok(format!("project:{}", &digest[..32]))
 }
 
-fn project_unit_ids(project: &Value) -> Vec<String> {
-    let mut result = Vec::new();
+fn project_page_unit_ids(project: &Value) -> Vec<Vec<String>> {
+    let mut pages = Vec::new();
     for (page_index, page) in project
         .get("paginas")
         .and_then(Value::as_array)
@@ -528,7 +533,7 @@ fn project_unit_ids(project: &Value) -> Vec<String> {
         .flatten()
         .enumerate()
     {
-        let before = result.len();
+        let mut result = Vec::new();
         for layer in page
             .get("text_layers")
             .and_then(Value::as_array)
@@ -546,15 +551,16 @@ fn project_unit_ids(project: &Value) -> Vec<String> {
                 }
             }
         }
-        if result.len() == before {
+        if result.is_empty() {
             let number = page
                 .get("numero")
                 .and_then(Value::as_u64)
                 .unwrap_or(page_index as u64 + 1);
             result.push(format!("page:{number:04}"));
         }
+        pages.push(result);
     }
-    result
+    pages
 }
 
 fn append_project_event(project: &mut Value, event: Value) -> Result<(), String> {
@@ -606,7 +612,11 @@ fn start_job_in_project(
     }))?;
     let job_id = format!("consumer-fast:{}", &job_digest[..32]);
     let next_revision = expected_revision + 1;
-    let units = project_unit_ids(project)
+    let page_units = project_page_unit_ids(project);
+    let units = page_units
+        .iter()
+        .flatten()
+        .cloned()
         .into_iter()
         .map(|unit_id| {
             (
@@ -628,6 +638,7 @@ fn start_job_in_project(
         "status": "queued",
         "reason_code": "job_queued",
         "units": units,
+        "page_units": page_units,
     });
     project
         .as_object_mut()
@@ -669,7 +680,12 @@ fn start_job_in_project(
 fn is_terminal_job_status(status: &str) -> bool {
     matches!(
         status,
-        "cancelled" | "failed" | "completed" | "complete" | "complete_with_review"
+        "cancelled"
+            | "failed"
+            | "awaiting_review"
+            | "completed"
+            | "complete"
+            | "complete_with_review"
     )
 }
 
@@ -1001,6 +1017,415 @@ fn emit_latest_job_event(app: &AppHandle, project_file: &Path, job_id: &str) -> 
             .map_err(|error| format!("falha ao emitir ProjectEvent: {error}"))?;
     }
     Ok(())
+}
+
+fn job_runtime_dir(app: &AppHandle, job_id: &str) -> Result<PathBuf, String> {
+    let digest = format!("{:x}", Sha256::digest(job_id.as_bytes()));
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("falha ao localizar dados locais: {error}"))?
+        .join("integration_v1")
+        .join("jobs")
+        .join(digest))
+}
+
+fn set_job_marker(
+    app: &AppHandle,
+    job_id: &str,
+    marker: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let directory = job_runtime_dir(app, job_id)?;
+    let path = directory.join(format!("{marker}.flag"));
+    if enabled {
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("falha ao criar diretório do job: {error}"))?;
+        fs::write(&path, marker)
+            .map_err(|error| format!("falha ao gravar marcador {marker}: {error}"))
+    } else if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|error| format!("falha ao remover marcador {marker}: {error}"))
+    } else {
+        Ok(())
+    }
+}
+
+fn job_marker_exists(app: &AppHandle, job_id: &str, marker: &str) -> Result<bool, String> {
+    Ok(job_runtime_dir(app, job_id)?
+        .join(format!("{marker}.flag"))
+        .is_file())
+}
+
+fn persist_runtime_transition(
+    app: &AppHandle,
+    project_file: &Path,
+    job_id: &str,
+    stage: &str,
+    status: &str,
+    reason_code: &str,
+    page_index: Option<usize>,
+    terminal_page_status: Option<&str>,
+    detail: Value,
+) -> Result<Value, String> {
+    let result = project_schema::edit_project_value(project_file, |project| {
+        let expected_revision = project_revision(project);
+        let next_revision = expected_revision + 1;
+        let (project_id, next_sequence) = {
+            let job = project
+                .pointer_mut(&format!(
+                    "/integration_v1/jobs/{}",
+                    escape_json_pointer(job_id)
+                ))
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| format!("job desconhecido: {job_id}"))?;
+            let current_status = job
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("failed");
+            if is_terminal_job_status(current_status) && current_status != status {
+                return Err(format!(
+                    "job terminal não aceita transição de runtime: {current_status}"
+                ));
+            }
+            let next_sequence = job.get("sequence").and_then(Value::as_u64).unwrap_or(0) + 1;
+            let project_id = job
+                .get("project_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            job.insert("project_revision".into(), Value::from(next_revision));
+            job.insert("sequence".into(), Value::from(next_sequence));
+            job.insert("stage".into(), Value::String(stage.to_string()));
+            job.insert("status".into(), Value::String(status.to_string()));
+            job.insert("reason_code".into(), Value::String(reason_code.to_string()));
+
+            if let (Some(page_index), Some(unit_status)) = (page_index, terminal_page_status) {
+                let unit_ids = job
+                    .get("page_units")
+                    .and_then(Value::as_array)
+                    .and_then(|pages| pages.get(page_index))
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(units) = job.get_mut("units").and_then(Value::as_object_mut) {
+                    for unit_id in unit_ids.iter().filter_map(Value::as_str) {
+                        if let Some(unit) = units.get_mut(unit_id).and_then(Value::as_object_mut) {
+                            unit.insert("status".into(), Value::String(unit_status.to_string()));
+                            unit.insert("terminal".into(), Value::Bool(true));
+                            unit.insert(
+                                "reason_code".into(),
+                                Value::String(reason_code.to_string()),
+                            );
+                        }
+                    }
+                }
+            }
+            if status == "failed" {
+                if let Some(units) = job.get_mut("units").and_then(Value::as_object_mut) {
+                    for unit in units.values_mut().filter_map(Value::as_object_mut) {
+                        if unit.get("terminal").and_then(Value::as_bool) != Some(true) {
+                            unit.insert("status".into(), Value::String("failed".into()));
+                            unit.insert("terminal".into(), Value::Bool(true));
+                            unit.insert(
+                                "reason_code".into(),
+                                Value::String(reason_code.to_string()),
+                            );
+                        }
+                    }
+                }
+            }
+            (project_id, next_sequence)
+        };
+        project["project_revision"] = Value::from(next_revision);
+        let payload = json!({"page_index": page_index, "detail": detail});
+        let event_body = json!({
+            "job_id": job_id,
+            "project_id": project_id,
+            "expected_revision": expected_revision,
+            "project_revision": next_revision,
+            "sequence": next_sequence,
+            "stage": stage,
+            "status": status,
+            "reason_code": reason_code,
+            "payload_sha256": canonical_json_sha256(&payload)?,
+        });
+        let event_id = format!(
+            "project-event:{}",
+            &canonical_json_sha256(&event_body)?[..32]
+        );
+        let mut event = event_body;
+        event["event_id"] = Value::String(event_id.clone());
+        event["payload"] = payload;
+        append_project_event(project, event)?;
+        Ok(json!({
+            "event_id": event_id,
+            "project_revision": next_revision,
+            "sequence": next_sequence,
+            "status": status,
+        }))
+    })?;
+    emit_latest_job_event(app, project_file, job_id)?;
+    Ok(result)
+}
+
+fn pending_job_pages(project_file: &Path, job_id: &str) -> Result<Vec<usize>, String> {
+    let project = project_schema::load_project_value(project_file)?;
+    let job = project
+        .pointer(&format!(
+            "/integration_v1/jobs/{}",
+            escape_json_pointer(job_id)
+        ))
+        .ok_or_else(|| format!("job desconhecido: {job_id}"))?;
+    let units = job
+        .get("units")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "job sem unidades persistidas".to_string())?;
+    let pages = job
+        .get("page_units")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "job sem mapa página/unidade".to_string())?;
+    Ok(pages
+        .iter()
+        .enumerate()
+        .filter_map(|(page_index, unit_ids)| {
+            unit_ids
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|unit_id| {
+                    units
+                        .get(unit_id)
+                        .and_then(|unit| unit.get("terminal"))
+                        .and_then(Value::as_bool)
+                        != Some(true)
+                })
+                .then_some(page_index)
+        })
+        .collect())
+}
+
+async fn wait_for_job_boundary(
+    app: &AppHandle,
+    project_file: &Path,
+    job_id: &str,
+) -> Result<(), String> {
+    loop {
+        let project = project_schema::load_project_value(project_file)?;
+        let status = project
+            .pointer(&format!(
+                "/integration_v1/jobs/{}/status",
+                escape_json_pointer(job_id)
+            ))
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("job desconhecido: {job_id}"))?;
+        if status == "cancelled" || job_marker_exists(app, job_id, "cancel")? {
+            return Err("JOB_CANCELLED".into());
+        }
+        if is_terminal_job_status(status) {
+            return Err("JOB_TERMINAL".into());
+        }
+        if status != "paused" && !job_marker_exists(app, job_id, "pause")? {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn execute_consumer_job(app: AppHandle, project_file: PathBuf, job_id: String) {
+    let outcome = async {
+        wait_for_job_boundary(&app, &project_file, &job_id).await?;
+        persist_runtime_transition(
+            &app,
+            &project_file,
+            &job_id,
+            "import",
+            "running",
+            "worker_started",
+            None,
+            None,
+            json!({}),
+        )?;
+
+        let page_indices = pending_job_pages(&project_file, &job_id)?;
+        for page_index in page_indices {
+            let project = project_schema::load_project_value(&project_file)?;
+            let source_language = project
+                .get("idioma_origem")
+                .and_then(Value::as_str)
+                .unwrap_or("en")
+                .to_string();
+            let target_language = project
+                .get("idioma_destino")
+                .and_then(Value::as_str)
+                .unwrap_or("pt-BR")
+                .to_string();
+            let engine_preset = project
+                .get("engine_preset_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let project_path = project_file.to_string_lossy().into_owned();
+
+            wait_for_job_boundary(&app, &project_file, &job_id).await?;
+            persist_runtime_transition(
+                &app,
+                &project_file,
+                &job_id,
+                "analysis",
+                "running",
+                "page_analysis_started",
+                Some(page_index),
+                None,
+                json!({}),
+            )?;
+            crate::commands::pipeline::detect_boxes_page(
+                app.clone(),
+                project_path.clone(),
+                page_index as u32,
+                Some(source_language.clone()),
+                engine_preset.clone(),
+            )
+            .await?;
+
+            wait_for_job_boundary(&app, &project_file, &job_id).await?;
+            persist_runtime_transition(
+                &app,
+                &project_file,
+                &job_id,
+                "ocr",
+                "running",
+                "page_ocr_started",
+                Some(page_index),
+                None,
+                json!({}),
+            )?;
+            crate::commands::pipeline::ocr_page(
+                app.clone(),
+                project_path.clone(),
+                page_index as u32,
+                Some(source_language.clone()),
+            )
+            .await?;
+
+            wait_for_job_boundary(&app, &project_file, &job_id).await?;
+            persist_runtime_transition(
+                &app,
+                &project_file,
+                &job_id,
+                "translate",
+                "running",
+                "page_translation_started",
+                Some(page_index),
+                None,
+                json!({}),
+            )?;
+            crate::commands::pipeline::translate_page(
+                app.clone(),
+                project_path.clone(),
+                page_index as u32,
+                Some(source_language),
+                Some(target_language),
+            )
+            .await?;
+
+            wait_for_job_boundary(&app, &project_file, &job_id).await?;
+            persist_runtime_transition(
+                &app,
+                &project_file,
+                &job_id,
+                "restore",
+                "running",
+                "page_restoration_started",
+                Some(page_index),
+                None,
+                json!({}),
+            )?;
+            crate::commands::pipeline::reinpaint_page(
+                app.clone(),
+                crate::commands::pipeline::ReinpaintConfig {
+                    project_path: project_path.clone(),
+                    page_index: page_index as u32,
+                    bbox: None,
+                    mask_path: None,
+                },
+            )
+            .await?;
+
+            wait_for_job_boundary(&app, &project_file, &job_id).await?;
+            persist_runtime_transition(
+                &app,
+                &project_file,
+                &job_id,
+                "layout",
+                "running",
+                "page_layout_started",
+                Some(page_index),
+                None,
+                json!({}),
+            )?;
+            let output_path = crate::commands::pipeline::retypeset_page(
+                app.clone(),
+                crate::commands::pipeline::RetypesetConfig {
+                    project_path: project_path.clone(),
+                    page_index: page_index as u32,
+                },
+            )
+            .await?;
+            persist_runtime_transition(
+                &app,
+                &project_file,
+                &job_id,
+                "persist",
+                "running",
+                "page_completed",
+                Some(page_index),
+                Some("complete"),
+                json!({"output_path": output_path}),
+            )?;
+        }
+
+        persist_runtime_transition(
+            &app,
+            &project_file,
+            &job_id,
+            "review",
+            "awaiting_review",
+            "human_review_required",
+            None,
+            None,
+            json!({"final_export_allowed": false}),
+        )?;
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Err(error) = outcome {
+        if !matches!(error.as_str(), "JOB_CANCELLED" | "JOB_TERMINAL") {
+            let _ = persist_runtime_transition(
+                &app,
+                &project_file,
+                &job_id,
+                "persist",
+                "failed",
+                "worker_stage_failed",
+                None,
+                None,
+                json!({"error": error}),
+            );
+        }
+    }
+    ACTIVE_CONSUMER_JOBS.lock().await.remove(&job_id);
+}
+
+async fn spawn_consumer_job(app: AppHandle, project_file: PathBuf, job_id: String) -> bool {
+    let mut active = ACTIVE_CONSUMER_JOBS.lock().await;
+    if !active.insert(job_id.clone()) {
+        return false;
+    }
+    drop(active);
+    tokio::spawn(execute_consumer_job(app, project_file, job_id));
+    true
 }
 
 fn control_registered_job(
@@ -1554,7 +1979,7 @@ fn persist_retypeset_in_project(
 }
 
 #[tauri::command]
-pub fn start_consumer_fast(
+pub async fn start_consumer_fast(
     app: AppHandle,
     project_path: String,
     chapter_id: String,
@@ -1580,76 +2005,94 @@ pub fn start_consumer_fast(
         .ok_or_else(|| "start_consumer_fast não produziu job_id".to_string())?;
     register_job(&app, job_id, &canonical_project_file)?;
     emit_latest_job_event(&app, &canonical_project_file, job_id)?;
+    set_job_marker(&app, job_id, "pause", false)?;
+    set_job_marker(&app, job_id, "cancel", false)?;
+    spawn_consumer_job(app, canonical_project_file, job_id.to_string()).await;
     Ok(result)
 }
 
 #[tauri::command]
-pub fn cancel_consumer_fast(
+pub async fn cancel_consumer_fast(
     app: AppHandle,
     job_id: String,
     expected_revision: u64,
     idempotency_key: String,
 ) -> Result<Value, String> {
-    control_registered_job(
+    let result = control_registered_job(
         &app,
         &job_id,
         "cancel",
         &[],
         expected_revision,
         &idempotency_key,
-    )
+    )?;
+    set_job_marker(&app, &job_id, "cancel", true)?;
+    set_job_marker(&app, &job_id, "pause", false)?;
+    Ok(result)
 }
 
 #[tauri::command]
-pub fn pause_consumer_fast(
+pub async fn pause_consumer_fast(
     app: AppHandle,
     job_id: String,
     expected_revision: u64,
     idempotency_key: String,
 ) -> Result<Value, String> {
-    control_registered_job(
+    let result = control_registered_job(
         &app,
         &job_id,
         "pause",
         &[],
         expected_revision,
         &idempotency_key,
-    )
+    )?;
+    set_job_marker(&app, &job_id, "pause", true)?;
+    Ok(result)
 }
 
 #[tauri::command]
-pub fn resume_consumer_fast(
+pub async fn resume_consumer_fast(
     app: AppHandle,
     job_id: String,
     expected_revision: u64,
     idempotency_key: String,
 ) -> Result<Value, String> {
-    control_registered_job(
+    let result = control_registered_job(
         &app,
         &job_id,
         "resume",
         &[],
         expected_revision,
         &idempotency_key,
-    )
+    )?;
+    set_job_marker(&app, &job_id, "pause", false)?;
+    set_job_marker(&app, &job_id, "cancel", false)?;
+    let project_file = resolve_registered_job(&app, &job_id)?;
+    spawn_consumer_job(app, project_file, job_id).await;
+    Ok(result)
 }
 
 #[tauri::command]
-pub fn retry_consumer_fast(
+pub async fn retry_consumer_fast(
     app: AppHandle,
     job_id: String,
     terminal_unit_ids: Vec<String>,
     expected_revision: u64,
     idempotency_key: String,
 ) -> Result<Value, String> {
-    control_registered_job(
+    let result = control_registered_job(
         &app,
         &job_id,
         "retry",
         &terminal_unit_ids,
         expected_revision,
         &idempotency_key,
-    )
+    )?;
+    set_job_marker(&app, &job_id, "pause", false)?;
+    set_job_marker(&app, &job_id, "cancel", false)?;
+    let project_file = resolve_registered_job(&app, &job_id)?;
+    spawn_consumer_job(app, project_file, job_id).await;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -2286,6 +2729,10 @@ mod tests {
         assert_eq!(duplicate, started);
 
         let job_id = started["job_id"].as_str().unwrap();
+        assert_eq!(
+            project["integration_v1"]["jobs"][job_id]["page_units"],
+            json!([["owner-001", "owner-002"]])
+        );
         let paused =
             control_job_in_project(&mut project, job_id, "pause", &[], 5, "pause-r5").unwrap();
         assert_eq!(paused["status"], "paused");
@@ -2305,6 +2752,33 @@ mod tests {
         )
         .unwrap_err()
         .contains("terminal"));
+    }
+
+    #[test]
+    fn dispatcher_selects_only_pages_with_nonterminal_units() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_file = temp.path().join("project.json");
+        let mut value = project(4);
+        value["project_id"] = Value::String("project-001".into());
+        value["capitulo"] = Value::from(57);
+        value["paginas"] = json!([
+            {"numero": 1, "text_layers": [{"id": "owner-001"}]},
+            {"numero": 2, "text_layers": [{"id": "owner-002"}]}
+        ]);
+        let started = start_job_in_project(
+            &mut value,
+            &project_file.to_string_lossy(),
+            "57",
+            4,
+            "start-r4",
+        )
+        .unwrap();
+        let job_id = started["job_id"].as_str().unwrap();
+        value["integration_v1"]["jobs"][job_id]["units"]["owner-001"]["terminal"] =
+            Value::Bool(true);
+        fs::write(&project_file, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        assert_eq!(pending_job_pages(&project_file, job_id).unwrap(), vec![1]);
     }
 
     #[test]
