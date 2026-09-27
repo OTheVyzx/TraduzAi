@@ -536,15 +536,27 @@ def log_editor_action(phase: str, action: str, **fields):
         pass
 
 
+class PipelineCancelled(RuntimeError):
+    """Raised at a cooperative boundary after the active job is cancelled."""
+
+
 def wait_if_paused(config: dict):
-    """Block cooperatively while the Tauri pause marker exists."""
+    """Block cooperatively while paused and fail at a cancellation boundary."""
+    cancel_file = config.get("cancel_file")
+    cancel_path = Path(cancel_file) if cancel_file else None
+    if cancel_path is not None and cancel_path.exists():
+        raise PipelineCancelled("pipeline_cancelled")
     pause_file = config.get("pause_file")
     if not pause_file:
         return
 
     pause_path = Path(pause_file)
     while pause_path.exists():
+        if cancel_path is not None and cancel_path.exists():
+            raise PipelineCancelled("pipeline_cancelled")
         time.sleep(0.25)
+    if cancel_path is not None and cancel_path.exists():
+        raise PipelineCancelled("pipeline_cancelled")
 
 
 def _parse_runner_cli_args(args: list[str]) -> dict:
@@ -9528,6 +9540,7 @@ def _run_pipeline(config_path: str):
                 )
         
         def progress_cb(stage, current, total, message=""):
+            wait_if_paused(config)
             # Mapeamento de estágios para o progresso global (Tauri UI)
             p = current / max(1, total)
             if stage == "concat":

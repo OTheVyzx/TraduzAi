@@ -68,6 +68,8 @@ def test_contract_registry_reuses_existing_runtime_types() -> None:
     assert snapshot["studio_ipc"]["argument_envelope"] == "direct_fields"
     assert snapshot["studio_ipc"]["event"]["channel"] == "consumer-fast-project-event"
     assert "start_consumer_fast" in snapshot["studio_ipc"]["commands"]
+    assert snapshot["studio_ipc"]["commands"]["submit_review_decision"]["arguments"] == [
+        "decision", "expected_revision", "idempotency_key"]
     assert snapshot["orchestration"]["stage_order"][:5] == [
         "import", "analysis", "ocr", "logical_units", "translate"]
     assert "ocr" not in snapshot["orchestration"]["invalidation"]["target"]
@@ -197,6 +199,7 @@ def test_studio_ipc_contract_lists_real_job_and_export_commands() -> None:
         "resume_consumer_fast",
         "retry_consumer_fast",
         "persist_project_event",
+            "submit_review_decision",
         "retypeset_owner",
         "decide_export",
         "export_final",
