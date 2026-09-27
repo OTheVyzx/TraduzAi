@@ -10446,8 +10446,20 @@ def _owner_cleanup_effect_support_for_mode(
     return effect_support
 
 
-def _transition_owner_to_review(graph: OwnerGraph, owner_id: str) -> OwnerGraph:
-    """Revoke every write capability after an atomic owner-chain rejection."""
+def _transition_owner_to_review(
+    graph: OwnerGraph,
+    owner_id: str,
+    *,
+    enforce_graph: bool = False,
+) -> OwnerGraph:
+    """Revoke every write capability after an atomic owner-chain rejection.
+
+    Enforced graphs cannot persist the legacy review-owner lifecycle. In that
+    mode the rejected owner is retired and each of its source components is
+    retained as an audited uncertain disposition. The non-rendering project
+    record still carries ``review_required`` so the UI and export gate expose
+    the unresolved work while the canonical graph remains enforce-valid.
+    """
 
     owner = next((item for item in graph.owners if item.owner_id == owner_id), None)
     if owner is None:
@@ -10462,14 +10474,55 @@ def _transition_owner_to_review(graph: OwnerGraph, owner_id: str) -> OwnerGraph:
         for projection in graph.projections
         if projection.owner_id != owner_id
     ]
-    graph.component_dispositions = [
-        (
-            replace(disposition, decision="review", owner_id=owner_id)
-            if disposition.component_id in set(owner.component_ids)
-            else disposition
-        )
-        for disposition in graph.component_dispositions
-    ]
+    owner_component_ids = set(owner.component_ids)
+    if enforce_graph:
+        components_by_id = {
+            component.component_id: component for component in graph.components
+        }
+        evidence_by_component = {
+            component_id: tuple(
+                sorted(
+                    {
+                        observation.observation_id
+                        for observation in graph.observations
+                        if component_id in observation.component_ids
+                    }
+                )
+            )
+            for component_id in owner_component_ids
+        }
+        graph.component_dispositions = [
+            (
+                replace(
+                    disposition,
+                    decision="uncertain",
+                    owner_id=None,
+                    reason="owner_execution_rejected",
+                    policy_id="coverage_ambiguous_candidate",
+                    policy_bbox_page=components_by_id[disposition.component_id].bbox_page,
+                    policy_evidence_ids=(
+                        evidence_by_component[disposition.component_id]
+                        or (disposition.component_id,)
+                    ),
+                    policy_reason=(
+                        "source pixels preserved after owner execution rejection"
+                    ),
+                )
+                if disposition.component_id in owner_component_ids
+                else disposition
+            )
+            for disposition in graph.component_dispositions
+        ]
+        graph.owners = [item for item in graph.owners if item.owner_id != owner_id]
+    else:
+        graph.component_dispositions = [
+            (
+                replace(disposition, decision="review", owner_id=owner_id)
+                if disposition.component_id in owner_component_ids
+                else disposition
+            )
+            for disposition in graph.component_dispositions
+        ]
     return graph
 
 
@@ -11795,7 +11848,11 @@ def execute_owner_page_graph(
                 owner.owner_id,
                 exc,
             )
-            _transition_owner_to_review(executed_graph, owner.owner_id)
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
+            )
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = str(exc)
             review_seed["qa_flags"] = sorted(
@@ -11865,7 +11922,11 @@ def execute_owner_page_graph(
                 owner.owner_id,
                 owner_render_geometry.reason,
             )
-            _transition_owner_to_review(executed_graph, owner.owner_id)
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
+            )
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = owner_render_geometry.reason
             review_seed["qa_flags"] = sorted(
@@ -11977,7 +12038,11 @@ def execute_owner_page_graph(
                 owner.owner_id,
                 exc,
             )
-            _transition_owner_to_review(executed_graph, owner.owner_id)
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
+            )
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = str(exc)
             review_seed["qa_flags"] = sorted(
@@ -12002,7 +12067,11 @@ def execute_owner_page_graph(
                 owner.owner_id,
                 plan.uncovered_source_ink_pixels,
             )
-            _transition_owner_to_review(executed_graph, owner.owner_id)
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
+            )
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = (
                 "owner mask coverage is incomplete"
@@ -12475,7 +12544,11 @@ def execute_owner_page_graph(
             ]
             final_records.append(rendered_record)
         else:
-            _transition_owner_to_review(executed_graph, owner.owner_id)
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
+            )
             review_seed = _owner_execution_review_seed(
                 record,
                 commit.reason,

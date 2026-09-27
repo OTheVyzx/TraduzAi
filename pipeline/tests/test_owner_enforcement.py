@@ -799,6 +799,34 @@ def test_atomic_rejection_revokes_all_owner_write_authority():
     assert reviewed.validate() == ()
 
 
+def test_atomic_rejection_retires_owner_from_enforced_graph_for_review():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import _transition_owner_to_review
+
+    graph = _graph(state="owned")
+    owner = graph.owners[0]
+    owner_id = owner.owner_id
+    component_id = owner.component_ids[0]
+
+    reviewed = _transition_owner_to_review(
+        graph,
+        owner_id,
+        enforce_graph=True,
+    )
+
+    assert reviewed.owners == []
+    assert reviewed.projections == []
+    disposition = reviewed.component_dispositions[0]
+    assert disposition.component_id == component_id
+    assert disposition.decision == "uncertain"
+    assert disposition.owner_id is None
+    assert disposition.policy_id == "coverage_ambiguous_candidate"
+    assert disposition.policy_bbox_page == reviewed.components[0].bbox_page
+    assert disposition.policy_evidence_ids
+    assert "preserved" in disposition.policy_reason
+    reviewed.require_valid(mode="enforce")
+
+
 def test_owner_layout_safe_polygon_uses_raster_coordinates_at_page_edges():
     from test_final_pixel_qa import _graph
     from strip.process_bands import _owner_layout_regions
@@ -1123,6 +1151,54 @@ def test_unsafe_owner_mask_fails_closed_as_review_without_crashing_page(monkeypa
     assert execution.records[0]["visible"] is False
     assert execution.records[0]["route_action"] == "review_required"
     assert "style_v2_raster_contract" not in execution.records[0]
+
+
+def test_unsafe_owner_mask_preserves_source_and_keeps_enforced_graph_valid(monkeypatch):
+    from inpainter.owner_mask import UnsafeOwnerMaskError
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import execute_owner_page_graph
+
+    graph = _graph(state="owned")
+    owner = graph.owners[0]
+    owner.route_action = "translate_inpaint_render"
+    owner.translated_payload = None
+    graph.observations[0] = replace(
+        graph.observations[0],
+        layout_bbox_page=(0, 0, 40, 24),
+    )
+    page = np.full((24, 40, 3), 230, dtype=np.uint8)
+    page[7:12, 9:24] = 12
+
+    class Translator:
+        @staticmethod
+        def translate_pages(_pages, **_kwargs):
+            return [{"texts": [{"owner_id": owner.owner_id, "translated": "DESTINO"}]}]
+
+    monkeypatch.setattr(
+        "inpainter.owner_mask.build_owner_mask_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            UnsafeOwnerMaskError("fixture overbroad mask")
+        ),
+    )
+
+    execution = execute_owner_page_graph(
+        page,
+        graph,
+        translator=Translator(),
+        inpainter=object(),
+        typesetter=object(),
+        enforce_graph=True,
+    )
+
+    assert execution.commits == ()
+    assert execution.graph.owners == []
+    assert execution.graph.component_dispositions[0].decision == "uncertain"
+    execution.graph.require_valid(mode="enforce")
+    assert execution.records[0]["state"] == "review_required"
+    assert execution.records[0]["visible"] is False
+    assert execution.records[0]["owner_execution_rejection_reason"] == (
+        "fixture overbroad mask"
+    )
 
 
 def test_dialogue_without_independent_container_stops_before_inpaint():
