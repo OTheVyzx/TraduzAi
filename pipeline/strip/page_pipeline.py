@@ -939,8 +939,16 @@ class PageExecutionResult:
             item for item in commits
             if bool(getattr(item, "translation_binding_sha256", ""))
         )
+        bound_commit_owner_ids = {
+            str(getattr(item, "owner_id", "")) for item in bound_commits
+        }
         execution_bindings = tuple(
-            item for item in bindings if not item.preserves_original_pixels
+            item
+            for item in bindings
+            if (
+                not item.preserves_original_pixels
+                and item.owner_id in bound_commit_owner_ids
+            )
         )
         if bound_commits:
             ordered_bindings = tuple(
