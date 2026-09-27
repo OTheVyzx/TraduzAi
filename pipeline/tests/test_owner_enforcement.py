@@ -1201,6 +1201,77 @@ def test_unsafe_owner_mask_preserves_source_and_keeps_enforced_graph_valid(monke
     )
 
 
+def test_layout_chord_escape_fails_closed_without_crashing_page(monkeypatch):
+    from inpainter.owner_mask import execute_owner_inpaint
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import execute_owner_page_graph
+
+    graph = _graph(state="owned")
+    owner = graph.owners[0]
+    owner.route_action = "translate_inpaint_render"
+    owner.translated_payload = None
+    graph.observations[0] = replace(
+        graph.observations[0],
+        layout_bbox_page=(0, 0, 40, 24),
+    )
+    page = np.full((24, 40, 3), 230, dtype=np.uint8)
+    page[7:12, 9:24] = 12
+
+    class Translator:
+        @staticmethod
+        def translate_pages(_pages, **_kwargs):
+            return [{"texts": [{"owner_id": owner.owner_id, "translated": "DESTINO"}]}]
+
+    class Engine:
+        engine_name = "fixture"
+
+        @staticmethod
+        def inpaint(image, mask, **_kwargs):
+            result = image.copy()
+            result[mask > 0] = 230
+            return result
+
+    class Inpainter:
+        @staticmethod
+        def inpaint_band_image(image, _page, *, owner_mask_plan):
+            return execute_owner_inpaint(image, owner_mask_plan, Engine())
+
+    class MustNotTypeset:
+        @staticmethod
+        def render_band_image(*_args, **_kwargs):
+            raise AssertionError("typeset must not run after unsafe layout")
+
+    monkeypatch.setattr(
+        "layout.balloon_layout.enrich_page_layout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError(
+                f"owner {owner.owner_id} layout chord escapes "
+                "paint_safe_polygon_page"
+            )
+        ),
+    )
+
+    execution = execute_owner_page_graph(
+        page,
+        graph,
+        translator=Translator(),
+        inpainter=Inpainter(),
+        typesetter=MustNotTypeset(),
+        enforce_graph=True,
+    )
+
+    assert execution.commits == ()
+    assert execution.graph.owners == []
+    assert execution.graph.component_dispositions[0].decision == "uncertain"
+    execution.graph.require_valid(mode="enforce")
+    assert execution.records[0]["visible"] is False
+    assert execution.records[0]["route_action"] == "review_required"
+    assert execution.records[0]["owner_execution_rejection_reason"].endswith(
+        "layout chord escapes paint_safe_polygon_page"
+    )
+    assert "owner_layout_unsafe" in execution.records[0]["qa_flags"]
+
+
 def test_dialogue_without_independent_container_stops_before_inpaint():
     from test_final_pixel_qa import _graph
     from strip.process_bands import execute_owner_page_graph

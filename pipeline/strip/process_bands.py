@@ -12159,16 +12159,50 @@ def execute_owner_page_graph(
         single_owner.state = "inpainted"
         owner.state = "inpainted"
         record.update({"state": "inpainted", "action_mask_ref": plan.action_mask_ref})
-        layout_page = enrich_page_layout(
-            {
-                "page_id": owner.page_id,
-                "width": int(source.shape[1]),
-                "height": int(source.shape[0]),
-                "texts": [record],
-            },
-            owner_graph=single,
-            layout_regions=owner_layout_regions,
-        )
+        try:
+            layout_page = enrich_page_layout(
+                {
+                    "page_id": owner.page_id,
+                    "width": int(source.shape[1]),
+                    "height": int(source.shape[0]),
+                    "texts": [record],
+                },
+                owner_graph=single,
+                layout_regions=owner_layout_regions,
+            )
+        except ValueError as exc:
+            rejection_reason = str(exc)
+            if not rejection_reason.endswith(
+                "layout chord escapes paint_safe_polygon_page"
+            ):
+                raise
+            logger.warning(
+                "owner layout rejected: page_id=%s owner_id=%s reason=%s",
+                owner.page_id,
+                owner.owner_id,
+                rejection_reason,
+            )
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
+            )
+            review_seed = copy.deepcopy(record)
+            review_seed["owner_execution_rejection_reason"] = rejection_reason
+            review_seed["qa_flags"] = sorted(
+                {
+                    *list(review_seed.get("qa_flags") or []),
+                    "owner_layout_unsafe",
+                }
+            )
+            final_records.append(
+                _owner_non_rendering_record(
+                    executed_graph,
+                    owner,
+                    seed=review_seed,
+                )
+            )
+            continue
         layout_page["texts"][0]["_owner_component_bboxes_page"] = {
             key: list(value) for key, value in component_bboxes.items()
         }
