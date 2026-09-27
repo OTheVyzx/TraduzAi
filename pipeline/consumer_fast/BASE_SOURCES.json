@@ -17,13 +17,15 @@
   ],
   "materialized_hash_semantics": "Entradas ausentes em materialized_overrides preservam exatamente o hash de files. Entradas presentes foram adaptadas no worktree e seu SHA-256 atual e autenticado e revisado no diff.",
   "materialized_overrides": {
-    "pipeline/consumer_fast/run_operational_closure.py": "65c04934aa869d26ab07ad3f799d4171a0041e3161323f5596aa1d02c7a9d378",
+    "pipeline/consumer_fast/runtime/consumer_operational_recovery.py": "e4a20d0c7ff3b5972486da2d502b461bbb63879f8e56ed022b43eecb2df448c6",
+    "pipeline/consumer_fast/run_operational_closure.py": "a1c98ca092b05b0ce3421ede84bede2698676db64a46154696000d262a978328",
     "pipeline/consumer_fast/runtime/consumer_recipe_runtime.py": "31c1689196ede576d9495d8779d24f23911ab824c8aac38d6924e1485901ce6d",
     "pipeline/typesetter/renderer.py": "b5b60f31c8d03b6d97db32ed924880885aba72dc4e69b23d0ae50da57d47dceb",
     "pipeline/typesetter/font-policy.json": "e79d4e3bec049c73e1511c963f4dc4c2edcd6c899c2ef368212823f501e26162"
   },
   "integration_added_files": [
-    "pipeline/consumer_fast/runtime/consumer_historical_child.py"
+    "pipeline/consumer_fast/runtime/consumer_historical_child.py",
+    "pipeline/integration_v1/providers.py"
   ],
   "files": {
     "pipeline/consumer_fast/run_operational_closure.py": "0de5c1a1099add1bc5a9a1f17bfd284ed86d20be99c35ea44f7bfb3eed5a658b",

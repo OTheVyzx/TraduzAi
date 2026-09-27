@@ -21,6 +21,7 @@ from consumer_visual_comfort import (build_source_white_policy_adaptive,
                                      build_source_white_policy_across_previous,
                                      prepare_source_white_comfort)
 from consumer_white_glyph_cleanup import clear_residual_white_glyphs
+from integration_v1.providers import ProviderUnavailable, recover_source_with_ocr, translate_complete_unit
 
 
 def sha(value: bytes) -> str:
@@ -80,6 +81,55 @@ def _cached_ocr(crop: np.ndarray, bbox: list[int], member: str,
                      source_review_sha256=sha((cache_root / "source_review_model_r001.json").read_bytes()))
 
 
+def _cached_or_fresh_ocr(*, page_rgb: np.ndarray, crop: np.ndarray, bbox: list[int],
+                         member: str, page_id: str, source_sha256: str,
+                         cache_root: Path | None, run_id: str,
+                         origin_execution_id: str, ocr_invocation=None,
+                         context: dict | None = None) -> tuple[dict, dict]:
+    """Reuse authenticated observations or execute the hash-bound Vision interface."""
+    if cache_root is not None and (cache_root / "ocr_evidence.json").is_file() and (
+            cache_root / "source_review_model_r001.json").is_file():
+        try:
+            return _cached_ocr(crop, bbox, member, source_sha256, cache_root)
+        except ValueError as exc:
+            if str(exc) != "authenticated local OCR observation cache missing or ambiguous":
+                raise
+            evidence = read(cache_root / "ocr_evidence.json")
+            candidates = [row for row in evidence.get("jobs") or []
+                          if row.get("source_member") == member]
+            if len(candidates) > 1:
+                raise
+    recovered = recover_source_with_ocr(
+        page_rgb=page_rgb, bbox_page=tuple(bbox), page_id=page_id,
+        page_source_sha256=source_sha256, run_id=run_id,
+        origin_execution_id=origin_execution_id, invocation=ocr_invocation,
+        context=context,
+    )
+    job = {
+        "schema": "traduzai.cold-ocr-job.v1",
+        "source_member": member,
+        "source_sha256": source_sha256,
+        "crop_bbox_page": bbox,
+        "crop_source_pixel_sha256": sha(crop.tobytes()),
+        "provider_called": True,
+        "cache_hit": False,
+        "attempt_chain_sha256": recovered["attempt_chain_sha256"],
+        "observations": recovered["selected"],
+    }
+    review = {
+        "schema": "traduzai.cold-ocr-selection.v1",
+        "selected_source": recovered["source"],
+        "selected_observation_ids": recovered["selected_observation_ids"],
+        "human_review": False,
+        "provenance": "fresh_physical_ocr",
+    }
+    return job, {
+        "review": review,
+        "selected": recovered["selected"],
+        "source_review_sha256": recovered["source_review_sha256"],
+    }
+
+
 def _accepted_translation(control_root: Path, control: dict, member: str,
                           source_sha256: str, source: str, owners: list[str]) -> dict:
     matches = []
@@ -101,6 +151,29 @@ def _accepted_translation(control_root: Path, control: dict, member: str,
     if len(matches) != 1:
         raise ValueError("accepted translation absent or ambiguous")
     return matches[0]
+
+
+def _accepted_or_fresh_translation(*, control_root: Path, control: dict,
+                                   member: str, source_sha256: str, source: str,
+                                   owners: list[str], page_id: str,
+                                   context: dict, glossary: dict,
+                                   translation_invocation=None,
+                                   allow_accepted: bool = True) -> dict:
+    if allow_accepted:
+        try:
+            return _accepted_translation(control_root, control, member, source_sha256, source, owners)
+        except ValueError as exc:
+            if str(exc) != "accepted translation absent or ambiguous":
+                raise
+    fresh = translate_complete_unit(
+        source=source, owner_id=owners[0], page_id=page_id, context=context,
+        glossary=glossary, invoke=translation_invocation,
+    )
+    return {
+        **fresh,
+        "group_path": None,
+        "group_sha256": fresh["provider_metadata_sha256"],
+    }
 
 
 def _reviewed_translation(binding: dict, review_path: Path | None,
@@ -155,7 +228,11 @@ def _accepted_split(control_root: Path, control: dict, member: str,
 
 def _prepare_split(*, source_root: Path, control_root: Path, control: dict,
                    page: dict, meta: dict, control_meta: dict, proposal: dict, original: np.ndarray,
-                   member: str, cache_root: Path | None, font_path: Path) -> dict:
+                   member: str, cache_root: Path | None, font_path: Path,
+                   run_id: str, origin_execution_id: str, context: dict,
+                   glossary: dict, ocr_invocation=None,
+                   translation_invocation=None,
+                   allow_prepared_responses: bool = True) -> dict:
     parent = proposal["owner_ids"][0]
     units = proposal["plan"]["units"]
     observations = []
@@ -163,11 +240,40 @@ def _prepare_split(*, source_root: Path, control_root: Path, control: dict,
         bbox = unit["ocr_crop_bbox_page"]
         x1, y1, x2, y2 = bbox
         crop = original[y1:y2, x1:x2]
-        job, adjudicated = _cached_ocr(crop, bbox, member, page["source_sha256"], cache_root)
+        job, adjudicated = _cached_or_fresh_ocr(
+            page_rgb=original, crop=crop, bbox=bbox, member=member,
+            page_id=page["page_id"], source_sha256=page["source_sha256"],
+            cache_root=cache_root, run_id=run_id,
+            origin_execution_id=origin_execution_id,
+            ocr_invocation=ocr_invocation, context=context)
         observations.append(dict(unit=unit, bbox=bbox, job=job, adjudicated=adjudicated,
                                  source=adjudicated["review"]["selected_source"]))
-    binding = _accepted_split(control_root, control, member, page["source_sha256"],
-                              parent, [row["source"] for row in observations])
+    sources = [row["source"] for row in observations]
+    binding = None
+    if allow_prepared_responses:
+        try:
+            binding = _accepted_split(control_root, control, member, page["source_sha256"],
+                                      parent, sources)
+        except ValueError as exc:
+            if str(exc) != "accepted subblock translation absent or ambiguous":
+                raise
+    if binding is None:
+        members = []
+        for order, source in enumerate(sources):
+            fresh = translate_complete_unit(
+                source=source, owner_id=f"{parent}:subblock:{order}",
+                page_id=page["page_id"], context=context, glossary=glossary,
+                invoke=translation_invocation)
+            members.append({"owner_id": f"{parent}:subblock:{order}",
+                            "source": source, "target": fresh["target"],
+                            "translation_provenance": fresh["provenance"],
+                            "provider_metadata_sha256": fresh["provider_metadata_sha256"]})
+        group = {"schema": "traduzai.cold-subblock-translation.v1",
+                 "source_member": member, "source_sha256": page["source_sha256"],
+                 "original_owner_id": parent, "members": members}
+        binding = {"group": group, "group_path": None,
+                   "group_sha256": sha(json.dumps(group, sort_keys=True,
+                                                   ensure_ascii=False).encode())}
     if binding["group"].get("source_recovery_kind") == "operational_source_observations_v1":
         records = {row["owner_id"]: row for row in control_meta["texts"]}
         if all((row := records.get(item["owner_id"])) is not None and
@@ -248,7 +354,11 @@ def _prepare_split(*, source_root: Path, control_root: Path, control: dict,
 
 def prepare_member(*, source_root: Path, control_root: Path, member: str,
                    graph_observations: dict[str, dict], cache_root: Path | None,
-                   font_path: Path, translation_review: Path | None = None) -> list[dict]:
+                   font_path: Path, translation_review: Path | None = None,
+                   run_id: str | None = None,
+                   origin_execution_id: str | None = None,
+                   ocr_invocation=None, translation_invocation=None,
+                   allow_prepared_responses: bool = True) -> list[dict]:
     """Discover and execute merge candidates through source/OCR/target/layout."""
     source_project, control = read(source_root / "project.json"), read(control_root / "project.json")
     pages = [row for row in source_project["pages"] if row.get("source_member") == member]
@@ -265,16 +375,30 @@ def prepare_member(*, source_root: Path, control_root: Path, member: str,
     if not np.array_equal(original, pixels(source_root / "source_members" / member)):
         raise ValueError("original/source pixel mismatch")
     meta = read(source_root / page["text_layers"])
+    run_id = run_id or f"consumer-fast-{page['source_sha256'][:16]}"
+    origin_execution_id = origin_execution_id or f"consumer-fast-{member}"
+    context = source_project.get("context") or {}
+    glossary = source_project.get("glossary") or source_project.get("glossario") or {}
     proposals = discover_recovery_proposals(meta["texts"], page["width"], page["height"],
                                              source_observations=graph_observations)
     outcomes = []
     for proposal in proposals:
         if proposal["kind"] == "split_connected_bodies":
-            outcomes.append(_prepare_split(source_root=source_root,
-                control_root=control_root, control=control, page=page, meta=meta,
-                control_meta=control_meta,
-                proposal=proposal, original=original, member=member,
-                cache_root=cache_root, font_path=font_path))
+            try:
+                outcomes.append(_prepare_split(source_root=source_root,
+                    control_root=control_root, control=control, page=page, meta=meta,
+                    control_meta=control_meta,
+                    proposal=proposal, original=original, member=member,
+                    cache_root=cache_root if allow_prepared_responses else None,
+                    font_path=font_path, run_id=run_id,
+                    origin_execution_id=origin_execution_id, context=context,
+                    glossary=glossary, ocr_invocation=ocr_invocation,
+                    translation_invocation=translation_invocation,
+                    allow_prepared_responses=allow_prepared_responses))
+            except ProviderUnavailable as error:
+                outcomes.append(dict(status="review_required", reason=str(error),
+                                     proposal=proposal, source_member=member,
+                                     source_preserved=True))
             continue
         if proposal["kind"] != "possible_fragmented_body":
             continue
@@ -286,17 +410,40 @@ def prepare_member(*, source_root: Path, control_root: Path, member: str,
         crop_bbox = crop_for_observations(rough_boxes, page["width"], page["height"])
         x1, y1, x2, y2 = crop_bbox
         crop = original[y1:y2, x1:x2]
-        job, adjudicated = _cached_ocr(crop, crop_bbox, member, page["source_sha256"], cache_root)
+        try:
+            job, adjudicated = _cached_or_fresh_ocr(
+                page_rgb=original, crop=crop, bbox=crop_bbox, member=member,
+                page_id=page["page_id"], source_sha256=page["source_sha256"],
+                cache_root=cache_root if allow_prepared_responses else None, run_id=run_id,
+                origin_execution_id=origin_execution_id,
+                ocr_invocation=ocr_invocation, context=context)
+        except ProviderUnavailable as error:
+            outcomes.append(dict(status="review_required", reason=str(error),
+                                 proposal=proposal, source_member=member,
+                                 source_preserved=True))
+            continue
         selected = adjudicated["selected"]
         boxes = [item["bbox_page"] for item in selected]
         source = adjudicated["review"]["selected_source"]
-        target_binding = _accepted_translation(control_root, control, member,
-                                                page["source_sha256"], source,
-                                                proposal["owner_ids"])
+        try:
+            target_binding = _accepted_or_fresh_translation(
+                control_root=control_root, control=control, member=member,
+                source_sha256=page["source_sha256"], source=source,
+                owners=proposal["owner_ids"], page_id=page["page_id"],
+                context=context, glossary=glossary,
+                translation_invocation=translation_invocation,
+                allow_accepted=allow_prepared_responses)
+        except ProviderUnavailable as error:
+            outcomes.append(dict(status="review_required", reason=str(error),
+                                 proposal=proposal, source_member=member,
+                                 source=source, source_preserved=True,
+                                 selected_observation_ids=adjudicated["review"]["selected_observation_ids"]))
+            continue
         target_binding = _reviewed_translation(target_binding, translation_review,
                                                member, page["source_sha256"], source)
         target, case = apply_source_case(source, target_binding["target"])
-        active_group = read(control_root / target_binding["group_path"])
+        active_group = (read(control_root / target_binding["group_path"])
+                        if target_binding.get("group_path") else {})
         current_record = next((row for row in control_meta["texts"] if row["owner_id"] ==
                                proposal["owner_ids"][0]), None)
         if (active_group.get("source_recovery_kind") == "operational_source_observations_v1" and

@@ -27,10 +27,11 @@ from consumer_operational_publish import publish
 
 
 def run(*, source_project: Path, control_project: Path, frontier: Path,
-        ocr_cache: Path, members: list[str], output: Path,
+        ocr_cache: Path | None, members: list[str], output: Path,
         font_path: Path,
         publish_to: Path | None = None,
-        translation_review: Path | None = None) -> dict:
+        translation_review: Path | None = None,
+        cold: bool = False) -> dict:
     if output.exists():
         raise FileExistsError(output)
     source = read(source_project / "project.json")
@@ -53,7 +54,8 @@ def run(*, source_project: Path, control_project: Path, frontier: Path,
             control_root=control_project, member=member,
             graph_observations=observations, cache_root=ocr_cache,
             font_path=font_path,
-            translation_review=translation_review)
+            translation_review=translation_review,
+            allow_prepared_responses=not cold)
         for ordinal, outcome in enumerate(outcomes):
             if outcome["status"] == "rendered_candidate":
                 candidates.append(outcome)
@@ -87,7 +89,8 @@ def run(*, source_project: Path, control_project: Path, frontier: Path,
     report = dict(schema="consumer_operational_closure_run_v1",
         source_project_sha256=sha((source_project/"project.json").read_bytes()),
         control_project_sha256=sha((control_project/"project.json").read_bytes()),
-        source_frontier=str(frontier), ocr_cache=str(ocr_cache),
+        source_frontier=str(frontier), ocr_cache=str(ocr_cache) if ocr_cache else None,
+        cold=bool(cold), prepared_responses_allowed=not cold,
         members=members, outcomes=audits, publication_status="candidate_only")
     (output / "audit.json").write_text(json.dumps(report, ensure_ascii=False,
         indent=2, default=str)+"\n", encoding="utf-8")
@@ -117,7 +120,8 @@ def main() -> None:
     parser.add_argument("--source-project", type=Path, required=True)
     parser.add_argument("--control-project", type=Path, required=True)
     parser.add_argument("--frontier", type=Path, required=True)
-    parser.add_argument("--ocr-cache", type=Path, required=True)
+    parser.add_argument("--ocr-cache", type=Path)
+    parser.add_argument("--cold", action="store_true")
     parser.add_argument("--member", action="append", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--font-path", type=Path, required=True)
@@ -129,7 +133,7 @@ def main() -> None:
         frontier=args.frontier, ocr_cache=args.ocr_cache,
         members=args.member, output=args.output, font_path=args.font_path,
         publish_to=args.publish_to,
-        translation_review=args.translation_review)
+        translation_review=args.translation_review, cold=args.cold)
 
 
 if __name__ == "__main__":

@@ -65,6 +65,9 @@ def test_contract_registry_reuses_existing_runtime_types() -> None:
         for channel in record.payload["mask_channels"].values()
     ) <= {"confirmed_present", "confirmed_empty", "unknown", "unavailable"}
     assert snapshot["examples"]["SourceRef"]["manifest_entry"]["page_id"] == "page_001"
+    assert snapshot["studio_ipc"]["argument_envelope"] == "direct_fields"
+    assert snapshot["studio_ipc"]["event"]["channel"] == "consumer-fast-project-event"
+    assert "start_consumer_fast" in snapshot["studio_ipc"]["commands"]
 
 
 def test_project_event_is_deterministic_and_revision_bound() -> None:

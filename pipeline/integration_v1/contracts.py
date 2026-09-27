@@ -361,6 +361,7 @@ def contract_snapshot() -> dict[str, Any]:
             "project_json": "v12 aliases remain adapter-only; no second project writer",
             "consumer_fast": "runtime modules resolve from pipeline/consumer_fast/runtime",
         },
+        "studio_ipc": studio_ipc_contract(),
     }
 
 
@@ -614,6 +615,7 @@ def studio_ipc_contract() -> dict[str, Any]:
         "contract_owner": "integration",
         "transport_adapter_owner": "studio",
         "implementation_state": "awaiting_specialist_handoff",
+        "argument_envelope": "direct_fields",
         "commands": {
             "start_consumer_fast": {
                 "arguments": ["project_path", "chapter_id", *mutation_fields],
@@ -660,6 +662,7 @@ def studio_ipc_contract() -> dict[str, Any]:
         },
         "event": {
             "type": "ProjectEvent",
+            "channel": "consumer-fast-project-event",
             "monotonic_fields": ["job_id", "project_revision", "sequence"],
             "stale_event_policy": "discard_and_refresh",
         },
