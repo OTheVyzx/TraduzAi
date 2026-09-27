@@ -1,0 +1,13 @@
+{
+  "schema": "traduzai.integration.coordination-ref.v1",
+  "coordination_root": "N:/TraduzAI/.coordination/v1",
+  "bootstrap": "N:/TraduzAI/.coordination/v1/BOOTSTRAP.json",
+  "contract_schema": "traduzai.integration.v1",
+  "contract_snapshot_directory": "N:/TraduzAI/.coordination/v1/contracts/traduzai.integration.v1",
+  "rules": {
+    "inbox": "immutable messages; one file per request",
+    "outbox": "immutable handoff directory; include commit and evidence",
+    "status": "one atomic status file written only by its owning front",
+    "resources": "one heavy GPU inference at a time; no stale-lock stealing"
+  }
+}
