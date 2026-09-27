@@ -1667,18 +1667,16 @@ def classify_empty_primary_candidate(
 ) -> bool:
     """Return whether an unsupported primary hypothesis needs human review.
 
-    This does not assert non-text. A valid OCR observation, glyph/script support,
-    or an audited preservation policy takes precedence over the uncertainty rule.
-    Detector confidence remains evidence for diagnostics, but cannot establish
-    translatable materiality without independent semantic corroboration.
+    This does not assert non-text. A valid OCR observation or an audited
+    preservation policy takes precedence over the uncertainty rule. Detector
+    and script hints remain evidence for diagnostics, but cannot establish a
+    translatable payload after bounded OCR produced no observation.
     """
 
     return (
         not has_coverage_observation
         and not has_explicit_preserve_policy
-        and frozenset(component.detector_sources)
-        == frozenset(("primary_region_detector",))
-        and not component.script_evidence
+        and bool(component.detector_sources)
     )
 
 

@@ -720,7 +720,16 @@ def test_ocr_empty_detector_region_with_visual_sfx_support_is_preserved_as_sfx()
     coverage.require_ready_for_ownership()
 
 
-def test_ocr_empty_plain_detector_region_without_sfx_support_requires_review() -> None:
+@pytest.mark.parametrize(
+    "detector_sources",
+    [
+        ("primary_region_detector",),
+        ("glyph_scan", "white_balloon_band_scan"),
+    ],
+)
+def test_ocr_empty_plain_detector_region_without_sfx_support_requires_review(
+    detector_sources,
+) -> None:
     import cv2
     import numpy as np
 
@@ -731,7 +740,7 @@ def test_ocr_empty_plain_detector_region_without_sfx_support_requires_review() -
         page_id=PAGE_ID,
         bbox_page=(55, 35, 265, 145),
         polygon_page=((55, 35), (265, 35), (265, 145), (55, 145)),
-        detector_sources=("primary_region_detector",),
+        detector_sources=detector_sources,
         confidence=0.91,
         evidence_ids=("detector-region-dialogue",),
     )
