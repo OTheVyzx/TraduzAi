@@ -651,7 +651,7 @@ def studio_ipc_contract() -> dict[str, Any]:
                 "returns": ["event_id", "project_revision"],
             },
             "submit_review_decision": {
-                "arguments": ["decision", *mutation_fields],
+                "arguments": ["project_path", "decision", *mutation_fields],
                 "returns": ["decision_id", "project_revision", "owner_status"],
                 "precondition": "server_validates_actor_revision_and_evidence",
             },

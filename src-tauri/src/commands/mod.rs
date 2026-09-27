@@ -1,5 +1,6 @@
 pub mod credits;
 pub mod glossary;
+pub mod integration_v1;
 pub mod lab;
 pub mod local_memory;
 pub mod pipeline;

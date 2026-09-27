@@ -69,7 +69,7 @@ def test_contract_registry_reuses_existing_runtime_types() -> None:
     assert snapshot["studio_ipc"]["event"]["channel"] == "consumer-fast-project-event"
     assert "start_consumer_fast" in snapshot["studio_ipc"]["commands"]
     assert snapshot["studio_ipc"]["commands"]["submit_review_decision"]["arguments"] == [
-        "decision", "expected_revision", "idempotency_key"]
+        "project_path", "decision", "expected_revision", "idempotency_key"]
     assert snapshot["orchestration"]["stage_order"][:5] == [
         "import", "analysis", "ocr", "logical_units", "translate"]
     assert "ocr" not in snapshot["orchestration"]["invalidation"]["target"]

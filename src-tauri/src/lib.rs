@@ -84,6 +84,8 @@ pub fn run() {
             commands::pipeline::detect_boxes_page,
             commands::pipeline::ocr_page,
             commands::pipeline::translate_page,
+            commands::integration_v1::submit_review_decision,
+            commands::integration_v1::decide_export,
             commands::studio_lite::studio_lite_model_status,
             commands::studio_lite::studio_lite_build_mask,
             commands::studio_lite::studio_lite_inpaint_region,
