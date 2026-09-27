@@ -7,6 +7,7 @@ reimplementing OCR, restoration, layout, or rendering behavior.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import json
 from typing import Any, Literal, Mapping
 
@@ -108,10 +109,12 @@ _CONTRACTS: dict[str, dict[str, Any]] = {
     },
     "ReviewDecision": {
         "owner": "studio",
-        "schema_version": 1,
+        "schema_version": 2,
         "python_type": "integration_v1.contracts.adapt_contract_payload",
         "runtime_type": "integration_v1.contracts.ReviewDecision",
         "required_fields": ["project_id", "owner_id", "expected_revision", "actor_kind", "actor_id", "decision", "reason_code", "evidence_sha256s", "idempotency_key"],
+        "optional_fields": ["preference_response"],
+        "preference_response_schema": "traduzai.renderer-preference-response.v1",
     },
     "ProjectEvent": {
         "owner": "integration",
@@ -339,6 +342,7 @@ def adapt_contract_payload(name: str, payload: Mapping[str, Any]) -> dict[str, A
             actor_id=copied["actor_id"], decision=copied["decision"],
             reason_code=copied["reason_code"], evidence_sha256s=tuple(copied["evidence_sha256s"]),
             idempotency_key=copied["idempotency_key"],
+            preference_response=copied.get("preference_response"),
         )
     elif name == "ProjectEvent":
         ProjectEvent.build(
@@ -486,6 +490,60 @@ class JobCommand:
 
 
 @dataclass(frozen=True)
+class RendererPreferenceResponse:
+    payload: dict[str, Any]
+    response_sha256: str
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "RendererPreferenceResponse":
+        payload = _canonical_copy(value)
+        required = {
+            "schema", "comparison_sha256", "choice", "selected_candidate_id",
+            "displayed_candidate_ids", "candidate_recipe_sha256s",
+            "candidate_output_sha256s", "target_sha256", "randomization_sha256",
+            "actor_kind", "actor_id", "recorded_at", "training_eligible",
+        }
+        if set(payload) != required or payload.get("schema") != "traduzai.renderer-preference-response.v1":
+            raise ValueError("renderer preference response schema is incomplete")
+        choice = payload.get("choice")
+        if choice not in {"A", "B", "equivalent", "neither", "unsure"}:
+            raise ValueError("renderer preference choice is invalid")
+        positions = payload.get("displayed_candidate_ids")
+        if not isinstance(positions, Mapping) or set(positions) != {"A", "B"}:
+            raise ValueError("renderer preference positions are invalid")
+        if any(not str(item).startswith("renderer-candidate:") for item in positions.values()) or len(set(positions.values())) != 2:
+            raise ValueError("renderer preference candidate identities are invalid")
+        selected = payload.get("selected_candidate_id")
+        expected_selected = positions[choice] if choice in {"A", "B"} else None
+        if selected != expected_selected:
+            raise ValueError("renderer preference selected candidate disagrees with choice")
+        for field in ("candidate_recipe_sha256s", "candidate_output_sha256s"):
+            hashes = payload.get(field)
+            if not isinstance(hashes, list) or len(hashes) != 2:
+                raise ValueError(f"renderer preference {field} must bind A and B")
+            for index, digest in enumerate(hashes):
+                _require_sha256(digest, f"RendererPreferenceResponse.{field}[{index}]")
+        for field in ("comparison_sha256", "target_sha256", "randomization_sha256"):
+            _require_sha256(payload.get(field), f"RendererPreferenceResponse.{field}")
+        if payload.get("actor_kind") not in {"human", "model", "system"} or not str(payload.get("actor_id") or "").strip():
+            raise ValueError("renderer preference actor is invalid")
+        try:
+            recorded_at = datetime.fromisoformat(str(payload.get("recorded_at") or "").replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("renderer preference recorded_at is invalid") from exc
+        if recorded_at.tzinfo is None:
+            raise ValueError("renderer preference recorded_at requires timezone")
+        if type(payload.get("training_eligible")) is not bool:
+            raise ValueError("renderer preference training_eligible must be boolean")
+        if payload["training_eligible"] and payload["actor_kind"] != "human":
+            raise ValueError("only explicit human preference may be training eligible")
+        return cls(payload=payload, response_sha256=canonical_json_sha256(payload))
+
+    def to_dict(self) -> dict[str, Any]:
+        return _canonical_copy(self.payload) | {"response_sha256": self.response_sha256}
+
+
+@dataclass(frozen=True)
 class ReviewDecision:
     project_id: str
     owner_id: str
@@ -496,6 +554,7 @@ class ReviewDecision:
     reason_code: str
     evidence_sha256s: tuple[str, ...]
     idempotency_key: str
+    preference_response: dict[str, Any] | None
     decision_id: str
 
     @property
@@ -515,6 +574,7 @@ class ReviewDecision:
         reason_code: str,
         evidence_sha256s: tuple[str, ...],
         idempotency_key: str,
+        preference_response: Mapping[str, Any] | None = None,
     ) -> "ReviewDecision":
         if actor_kind not in {"human", "model", "system"}:
             raise ValueError("review actor kind is invalid")
@@ -524,6 +584,21 @@ class ReviewDecision:
             raise ValueError("review decision requires revision and evidence")
         if any(len(value) != 64 for value in evidence_sha256s):
             raise ValueError("review decision evidence hash is invalid")
+        validated_preference = None
+        if preference_response is not None:
+            response = RendererPreferenceResponse.from_mapping(preference_response)
+            if response.payload["actor_kind"] != actor_kind or response.payload["actor_id"] != actor_id:
+                raise ValueError("renderer preference actor diverges from review decision")
+            bound_hashes = {
+                response.payload["comparison_sha256"],
+                response.payload["target_sha256"],
+                response.payload["randomization_sha256"],
+                *response.payload["candidate_recipe_sha256s"],
+                *response.payload["candidate_output_sha256s"],
+            }
+            if not bound_hashes <= set(evidence_sha256s):
+                raise ValueError("review decision evidence does not bind renderer preference")
+            validated_preference = response.payload
         body = {
             "project_id": project_id,
             "owner_id": owner_id,
@@ -534,6 +609,7 @@ class ReviewDecision:
             "reason_code": reason_code,
             "evidence_sha256s": list(evidence_sha256s),
             "idempotency_key": idempotency_key,
+            "preference_response": validated_preference,
         }
         return cls(
             project_id=project_id,
@@ -545,6 +621,7 @@ class ReviewDecision:
             reason_code=reason_code,
             evidence_sha256s=tuple(evidence_sha256s),
             idempotency_key=idempotency_key,
+            preference_response=validated_preference,
             decision_id=f"review-decision:{canonical_json_sha256(body)[:32]}",
         )
 

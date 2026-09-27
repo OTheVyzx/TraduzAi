@@ -18,6 +18,8 @@ pub struct ReviewDecisionInput {
     pub reason_code: String,
     pub evidence_sha256s: Vec<String>,
     pub idempotency_key: String,
+    #[serde(default)]
+    pub preference_response: Option<Value>,
 }
 
 fn resolve_project_file(raw_path: &str) -> Result<PathBuf, String> {
@@ -68,6 +70,116 @@ fn validate_review_decision(decision: &ReviewDecisionInput) -> Result<(), String
             .any(|hash| hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
     {
         return Err("decisão de revisão exige evidência SHA-256 válida".into());
+    }
+    if let Some(response) = &decision.preference_response {
+        validate_preference_response(response, decision)?;
+    }
+    Ok(())
+}
+
+fn require_sha256_field(value: &Value, field: &str) -> Result<String, String> {
+    let digest = value
+        .as_str()
+        .ok_or_else(|| format!("{field} exige SHA-256"))?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("{field} exige SHA-256 minúsculo"));
+    }
+    Ok(digest.to_string())
+}
+
+fn validate_preference_response(
+    response: &Value,
+    decision: &ReviewDecisionInput,
+) -> Result<(), String> {
+    let object = response
+        .as_object()
+        .ok_or_else(|| "preference_response precisa ser um objeto".to_string())?;
+    let required = [
+        "schema",
+        "comparison_sha256",
+        "choice",
+        "selected_candidate_id",
+        "displayed_candidate_ids",
+        "candidate_recipe_sha256s",
+        "candidate_output_sha256s",
+        "target_sha256",
+        "randomization_sha256",
+        "actor_kind",
+        "actor_id",
+        "recorded_at",
+        "training_eligible",
+    ];
+    if object.len() != required.len() || required.iter().any(|field| !object.contains_key(*field)) {
+        return Err("renderer preference response schema incompleto".into());
+    }
+    if response["schema"] != "traduzai.renderer-preference-response.v1" {
+        return Err("renderer preference response schema incompatível".into());
+    }
+    let choice = response["choice"]
+        .as_str()
+        .filter(|choice| matches!(*choice, "A" | "B" | "equivalent" | "neither" | "unsure"))
+        .ok_or_else(|| "renderer preference choice inválido".to_string())?;
+    let positions = response["displayed_candidate_ids"]
+        .as_object()
+        .filter(|positions| {
+            positions.len() == 2 && positions.contains_key("A") && positions.contains_key("B")
+        })
+        .ok_or_else(|| "renderer preference positions inválidas".to_string())?;
+    let candidate_a = positions["A"]
+        .as_str()
+        .filter(|value| value.starts_with("renderer-candidate:"))
+        .ok_or_else(|| "renderer candidate A inválida".to_string())?;
+    let candidate_b = positions["B"]
+        .as_str()
+        .filter(|value| value.starts_with("renderer-candidate:"))
+        .ok_or_else(|| "renderer candidate B inválida".to_string())?;
+    if candidate_a == candidate_b {
+        return Err("renderer preference exige candidatas distintas".into());
+    }
+    let expected_selected = match choice {
+        "A" => Some(candidate_a),
+        "B" => Some(candidate_b),
+        _ => None,
+    };
+    if response["selected_candidate_id"].as_str() != expected_selected
+        || (expected_selected.is_none() && !response["selected_candidate_id"].is_null())
+    {
+        return Err("renderer preference selected candidate diverge da escolha".into());
+    }
+    let mut bound_hashes = Vec::new();
+    for field in ["comparison_sha256", "target_sha256", "randomization_sha256"] {
+        bound_hashes.push(require_sha256_field(&response[field], field)?);
+    }
+    for field in ["candidate_recipe_sha256s", "candidate_output_sha256s"] {
+        let hashes = response[field]
+            .as_array()
+            .filter(|hashes| hashes.len() == 2)
+            .ok_or_else(|| format!("{field} precisa vincular A e B"))?;
+        for digest in hashes {
+            bound_hashes.push(require_sha256_field(digest, field)?);
+        }
+    }
+    if bound_hashes
+        .iter()
+        .any(|digest| !decision.evidence_sha256s.contains(digest))
+    {
+        return Err("ReviewDecision não vincula toda evidência de preferência".into());
+    }
+    if response["actor_kind"].as_str() != Some(decision.actor_kind.as_str())
+        || response["actor_id"].as_str() != Some(decision.actor_id.as_str())
+    {
+        return Err("ator da preferência diverge da ReviewDecision".into());
+    }
+    let recorded_at = response["recorded_at"]
+        .as_str()
+        .ok_or_else(|| "renderer preference recorded_at inválido".to_string())?;
+    chrono::DateTime::parse_from_rfc3339(recorded_at)
+        .map_err(|_| "renderer preference recorded_at inválido".to_string())?;
+    let training_eligible = response["training_eligible"]
+        .as_bool()
+        .ok_or_else(|| "training_eligible precisa ser booleano".to_string())?;
+    if training_eligible && decision.actor_kind != "human" {
+        return Err("somente preferência humana pode ser elegível para treino".into());
     }
     Ok(())
 }
@@ -293,6 +405,7 @@ mod tests {
             reason_code: "visual_review_passed".into(),
             evidence_sha256s: vec!["a".repeat(64)],
             idempotency_key: "review-owner-001-r4".into(),
+            preference_response: None,
         }
     }
 
@@ -321,6 +434,47 @@ mod tests {
         let mut project = project(4);
         let result = append_review_decision(&mut project, &decision("model", 4)).unwrap();
         assert_eq!(result["owner_status"], "review_required");
+    }
+
+    #[test]
+    fn preference_response_is_persisted_only_when_fully_evidence_bound() {
+        let mut decision = decision("human", 4);
+        let hashes = "abcdef1"
+            .chars()
+            .map(|value| value.to_string().repeat(64))
+            .collect::<Vec<_>>();
+        decision.evidence_sha256s = hashes.clone();
+        decision.preference_response = Some(json!({
+            "schema": "traduzai.renderer-preference-response.v1",
+            "comparison_sha256": hashes[0],
+            "choice": "B",
+            "selected_candidate_id": format!("renderer-candidate:{}", "2".repeat(32)),
+            "displayed_candidate_ids": {
+                "A": format!("renderer-candidate:{}", "1".repeat(32)),
+                "B": format!("renderer-candidate:{}", "2".repeat(32)),
+            },
+            "candidate_recipe_sha256s": [hashes[3], hashes[4]],
+            "candidate_output_sha256s": [hashes[5], hashes[6]],
+            "target_sha256": hashes[1],
+            "randomization_sha256": hashes[2],
+            "actor_kind": "human",
+            "actor_id": "reviewer-001",
+            "recorded_at": "2026-09-27T14:30:00-03:00",
+            "training_eligible": false,
+        }));
+
+        let mut project = project(4);
+        append_review_decision(&mut project, &decision).unwrap();
+        assert_eq!(
+            project["integration_v1"]["review_decisions"][0]["preference_response"]
+                ["selected_candidate_id"],
+            format!("renderer-candidate:{}", "2".repeat(32))
+        );
+
+        decision.evidence_sha256s.pop();
+        assert!(validate_review_decision(&decision)
+            .unwrap_err()
+            .contains("evidência"));
     }
 
     #[test]

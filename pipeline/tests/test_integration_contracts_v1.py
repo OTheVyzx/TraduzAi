@@ -146,6 +146,67 @@ def test_review_decision_never_promotes_model_to_human() -> None:
     assert decision.to_dict()["actor_kind"] == "model"
 
 
+def test_review_decision_persists_canonical_renderer_preference_response() -> None:
+    from integration_v1.contracts import ReviewDecision
+
+    hashes = tuple(character * 64 for character in "abcdef1")
+    comparison, target, randomization, recipe_a, recipe_b, output_a, output_b = hashes
+    response = {
+        "schema": "traduzai.renderer-preference-response.v1",
+        "comparison_sha256": comparison,
+        "choice": "B",
+        "selected_candidate_id": "renderer-candidate:" + "2" * 32,
+        "displayed_candidate_ids": {
+            "A": "renderer-candidate:" + "1" * 32,
+            "B": "renderer-candidate:" + "2" * 32,
+        },
+        "candidate_recipe_sha256s": [recipe_a, recipe_b],
+        "candidate_output_sha256s": [output_a, output_b],
+        "target_sha256": target,
+        "randomization_sha256": randomization,
+        "actor_kind": "human",
+        "actor_id": "local-user",
+        "recorded_at": "2026-09-27T14:30:00-03:00",
+        "training_eligible": False,
+    }
+    decision = ReviewDecision.build(
+        project_id="project-001", owner_id="owner-001", expected_revision=8,
+        actor_kind="human", actor_id="local-user", decision="accept_candidate",
+        reason_code="renderer_preference", evidence_sha256s=hashes,
+        idempotency_key="review-owner-001-r8", preference_response=response)
+
+    assert decision.preference_response == response
+    assert decision.to_dict()["preference_response"]["displayed_candidate_ids"]["B"] == response["selected_candidate_id"]
+
+
+def test_renderer_preference_response_fails_closed_on_tampering_or_synthetic_training() -> None:
+    from integration_v1.contracts import RendererPreferenceResponse
+
+    response = {
+        "schema": "traduzai.renderer-preference-response.v1",
+        "comparison_sha256": "a" * 64,
+        "choice": "A",
+        "selected_candidate_id": "renderer-candidate:" + "2" * 32,
+        "displayed_candidate_ids": {
+            "A": "renderer-candidate:" + "1" * 32,
+            "B": "renderer-candidate:" + "2" * 32,
+        },
+        "candidate_recipe_sha256s": ["b" * 64, "c" * 64],
+        "candidate_output_sha256s": ["d" * 64, "e" * 64],
+        "target_sha256": "f" * 64,
+        "randomization_sha256": "1" * 64,
+        "actor_kind": "system",
+        "actor_id": "test/synthetic",
+        "recorded_at": "2026-09-27T17:30:00Z",
+        "training_eligible": True,
+    }
+    with pytest.raises(ValueError, match="selected candidate"):
+        RendererPreferenceResponse.from_mapping(response)
+    response["selected_candidate_id"] = response["displayed_candidate_ids"]["A"]
+    with pytest.raises(ValueError, match="human preference"):
+        RendererPreferenceResponse.from_mapping(response)
+
+
 def test_export_decision_is_fail_closed() -> None:
     from integration_v1.contracts import ExportDecision
 
