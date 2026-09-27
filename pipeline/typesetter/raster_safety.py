@@ -13,7 +13,9 @@ from ownership.hash_contract import canonical_json_sha256
 RASTER_SAFETY_SCHEMA = "traduzai.raster-safety.v1"
 
 
-def _mask_sha256(mask: np.ndarray) -> str:
+def raster_mask_sha256(mask: np.ndarray) -> str:
+    """Return the canonical hash used by persisted raster-safety masks."""
+
     normalized = np.ascontiguousarray(np.asarray(mask, dtype=np.uint8) > 0, dtype=np.uint8)
     header = f"mask-v1:{normalized.shape[0]}x{normalized.shape[1]}:".encode("ascii")
     return sha256(header + normalized.tobytes()).hexdigest()
@@ -63,9 +65,9 @@ def assess_raster_safety(
         "status": "pass" if outside == 0 and overlap == 0 else "review_required",
         "bbox": [x1, y1, x2, y2],
         "ink_pixel_count": int(np.count_nonzero(ink)),
-        "alpha_sha256": _mask_sha256(ink),
-        "authorized_body_sha256": _mask_sha256(authorized),
-        "protected_art_sha256": _mask_sha256(protected),
+        "alpha_sha256": raster_mask_sha256(ink),
+        "authorized_body_sha256": raster_mask_sha256(authorized),
+        "protected_art_sha256": raster_mask_sha256(protected),
         "outside_authorized_body_px": outside,
         "protected_art_overlap_px": overlap,
     }
