@@ -920,6 +920,18 @@ async fn run_pipeline_with_fast_worker(
     }
 }
 
+pub(crate) async fn run_pipeline_config_file(
+    app: &AppHandle,
+    config_path: &std::path::Path,
+) -> Result<String, String> {
+    let sidecar = get_sidecar_info(app)?;
+    if persistent_pipeline_worker_enabled() {
+        run_pipeline_with_fast_worker(app, config_path).await
+    } else {
+        run_sidecar(app, &sidecar, config_path).await
+    }
+}
+
 #[tauri::command]
 pub async fn cancel_pipeline() -> Result<(), String> {
     *PIPELINE_CANCEL.lock().await = true;

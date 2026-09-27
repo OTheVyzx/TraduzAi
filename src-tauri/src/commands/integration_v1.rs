@@ -1169,43 +1169,6 @@ fn persist_runtime_transition(
     Ok(result)
 }
 
-fn pending_job_pages(project_file: &Path, job_id: &str) -> Result<Vec<usize>, String> {
-    let project = project_schema::load_project_value(project_file)?;
-    let job = project
-        .pointer(&format!(
-            "/integration_v1/jobs/{}",
-            escape_json_pointer(job_id)
-        ))
-        .ok_or_else(|| format!("job desconhecido: {job_id}"))?;
-    let units = job
-        .get("units")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "job sem unidades persistidas".to_string())?;
-    let pages = job
-        .get("page_units")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "job sem mapa página/unidade".to_string())?;
-    Ok(pages
-        .iter()
-        .enumerate()
-        .filter_map(|(page_index, unit_ids)| {
-            unit_ids
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .any(|unit_id| {
-                    units
-                        .get(unit_id)
-                        .and_then(|unit| unit.get("terminal"))
-                        .and_then(Value::as_bool)
-                        != Some(true)
-                })
-                .then_some(page_index)
-        })
-        .collect())
-}
-
 async fn wait_for_job_boundary(
     app: &AppHandle,
     project_file: &Path,
@@ -1233,6 +1196,124 @@ async fn wait_for_job_boundary(
     }
 }
 
+fn physical_pipeline_config(
+    project: &Value,
+    job_id: &str,
+    work_dir: &Path,
+    models_dir: &Path,
+    logs_dir: &Path,
+    pause_file: &Path,
+    cancel_file: &Path,
+) -> Result<Value, String> {
+    let source_path = project
+        .get("source_path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "SOURCE_PATH_REQUIRED: projeto não referencia a fonte original".to_string()
+        })?;
+    let obra = project
+        .get("obra")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Obra sem título");
+    let capitulo = project.get("capitulo").and_then(Value::as_u64).unwrap_or(1);
+    Ok(json!({
+        "job_id": job_id,
+        "source_path": source_path,
+        "work_dir": work_dir.to_string_lossy(),
+        "obra": obra,
+        "work_title_user_provided": project
+            .get("work_title_user_provided")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "capitulo": capitulo,
+        "idioma_origem": project
+            .get("idioma_origem")
+            .and_then(Value::as_str)
+            .unwrap_or("en"),
+        "idioma_destino": project
+            .get("idioma_destino")
+            .and_then(Value::as_str)
+            .unwrap_or("pt-BR"),
+        "qualidade": project
+            .get("qualidade")
+            .and_then(Value::as_str)
+            .unwrap_or("alta"),
+        "glossario": project.get("glossario").cloned().unwrap_or_else(|| json!({})),
+        "engine_preset_id": project.get("engine_preset_id").cloned().unwrap_or(Value::Null),
+        "mode": project.get("mode").and_then(Value::as_str).unwrap_or("real"),
+        "contexto": project.get("contexto").cloned().unwrap_or_else(|| json!({
+            "sinopse": "", "genero": [], "personagens": [], "aliases": [],
+            "termos": [], "relacoes": [], "faccoes": [], "resumo_por_arco": [],
+            "memoria_lexical": {}, "fontes_usadas": []
+        })),
+        "models_dir": models_dir.to_string_lossy(),
+        "logs_dir": logs_dir.to_string_lossy(),
+        "pause_file": pause_file.to_string_lossy(),
+        "cancel_file": cancel_file.to_string_lossy(),
+        "owner_graph_mode": "enforce",
+        "style_copy_mode": "shadow"
+    }))
+}
+
+fn resolve_physical_output_project(work_dir: &Path, output_path: &str) -> Result<PathBuf, String> {
+    let candidate = if output_path.trim().is_empty() {
+        work_dir.join("project.json")
+    } else {
+        project_schema::resolve_project_file(Path::new(output_path))
+    };
+    if !candidate.is_file() {
+        return Err(format!(
+            "PHYSICAL_OUTPUT_MISSING: project.json não encontrado em {}",
+            candidate.display()
+        ));
+    }
+    Ok(candidate)
+}
+
+fn attach_job_ledger_to_physical_output(
+    seed_project_file: &Path,
+    output_project_file: &Path,
+    job_id: &str,
+) -> Result<(), String> {
+    let seed = project_schema::load_project_value(seed_project_file)?;
+    let integration = seed
+        .get("integration_v1")
+        .cloned()
+        .ok_or_else(|| "projeto de origem não contém ledger integration_v1".to_string())?;
+    let seed_project_id = seed.get("project_id").cloned();
+    let seed_revision = project_revision(&seed);
+    project_schema::edit_project_value(output_project_file, |output| {
+        let root = output
+            .as_object_mut()
+            .ok_or_else(|| "project.json físico precisa ser um objeto".to_string())?;
+        root.insert("integration_v1".into(), integration);
+        if let Some(project_id) = seed_project_id {
+            root.insert("project_id".into(), project_id);
+        }
+        root.insert("project_revision".into(), Value::from(seed_revision + 1));
+        let job = output
+            .pointer_mut(&format!(
+                "/integration_v1/jobs/{}",
+                escape_json_pointer(job_id)
+            ))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| format!("job ausente após promoção física: {job_id}"))?;
+        if let Some(units) = job.get_mut("units").and_then(Value::as_object_mut) {
+            for unit in units.values_mut().filter_map(Value::as_object_mut) {
+                unit.insert("status".into(), Value::String("complete".into()));
+                unit.insert("terminal".into(), Value::Bool(true));
+                unit.insert(
+                    "reason_code".into(),
+                    Value::String("physical_pipeline_completed".into()),
+                );
+            }
+        }
+        Ok(())
+    })
+}
+
 async fn execute_consumer_job(app: AppHandle, project_file: PathBuf, job_id: String) {
     let outcome = async {
         wait_for_job_boundary(&app, &project_file, &job_id).await?;
@@ -1248,153 +1329,50 @@ async fn execute_consumer_job(app: AppHandle, project_file: PathBuf, job_id: Str
             json!({}),
         )?;
 
-        let page_indices = pending_job_pages(&project_file, &job_id)?;
-        for page_index in page_indices {
-            let project = project_schema::load_project_value(&project_file)?;
-            let source_language = project
-                .get("idioma_origem")
-                .and_then(Value::as_str)
-                .unwrap_or("en")
-                .to_string();
-            let target_language = project
-                .get("idioma_destino")
-                .and_then(Value::as_str)
-                .unwrap_or("pt-BR")
-                .to_string();
-            let engine_preset = project
-                .get("engine_preset_id")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let project_path = project_file.to_string_lossy().into_owned();
-
-            wait_for_job_boundary(&app, &project_file, &job_id).await?;
-            persist_runtime_transition(
-                &app,
-                &project_file,
-                &job_id,
-                "analysis",
-                "running",
-                "page_analysis_started",
-                Some(page_index),
-                None,
-                json!({}),
-            )?;
-            crate::commands::pipeline::detect_boxes_page(
-                app.clone(),
-                project_path.clone(),
-                page_index as u32,
-                Some(source_language.clone()),
-                engine_preset.clone(),
-            )
-            .await?;
-
-            wait_for_job_boundary(&app, &project_file, &job_id).await?;
-            persist_runtime_transition(
-                &app,
-                &project_file,
-                &job_id,
-                "ocr",
-                "running",
-                "page_ocr_started",
-                Some(page_index),
-                None,
-                json!({}),
-            )?;
-            crate::commands::pipeline::ocr_page(
-                app.clone(),
-                project_path.clone(),
-                page_index as u32,
-                Some(source_language.clone()),
-            )
-            .await?;
-
-            wait_for_job_boundary(&app, &project_file, &job_id).await?;
-            persist_runtime_transition(
-                &app,
-                &project_file,
-                &job_id,
-                "translate",
-                "running",
-                "page_translation_started",
-                Some(page_index),
-                None,
-                json!({}),
-            )?;
-            crate::commands::pipeline::translate_page(
-                app.clone(),
-                project_path.clone(),
-                page_index as u32,
-                Some(source_language),
-                Some(target_language),
-            )
-            .await?;
-
-            wait_for_job_boundary(&app, &project_file, &job_id).await?;
-            persist_runtime_transition(
-                &app,
-                &project_file,
-                &job_id,
-                "restore",
-                "running",
-                "page_restoration_started",
-                Some(page_index),
-                None,
-                json!({}),
-            )?;
-            crate::commands::pipeline::reinpaint_page(
-                app.clone(),
-                crate::commands::pipeline::ReinpaintConfig {
-                    project_path: project_path.clone(),
-                    page_index: page_index as u32,
-                    bbox: None,
-                    mask_path: None,
-                },
-            )
-            .await?;
-
-            wait_for_job_boundary(&app, &project_file, &job_id).await?;
-            persist_runtime_transition(
-                &app,
-                &project_file,
-                &job_id,
-                "layout",
-                "running",
-                "page_layout_started",
-                Some(page_index),
-                None,
-                json!({}),
-            )?;
-            let output_path = crate::commands::pipeline::retypeset_page(
-                app.clone(),
-                crate::commands::pipeline::RetypesetConfig {
-                    project_path: project_path.clone(),
-                    page_index: page_index as u32,
-                },
-            )
-            .await?;
-            persist_runtime_transition(
-                &app,
-                &project_file,
-                &job_id,
-                "persist",
-                "running",
-                "page_completed",
-                Some(page_index),
-                Some("complete"),
-                json!({"output_path": output_path}),
-            )?;
-        }
-
+        let project = project_schema::load_project_value(&project_file)?;
+        let runtime_dir = job_runtime_dir(&app, &job_id)?;
+        let work_dir = runtime_dir.join("pipeline-staging");
+        fs::create_dir_all(&work_dir)
+            .map_err(|error| format!("falha ao preparar staging físico: {error}"))?;
+        let storage = crate::storage::service_for_app(&app)?;
+        let storage_paths = storage.ensure_base_dirs()?;
+        let pause_file = runtime_dir.join("pause.flag");
+        let cancel_file = runtime_dir.join("cancel.flag");
+        let config = physical_pipeline_config(
+            &project,
+            &job_id,
+            &work_dir,
+            &storage_paths.models,
+            &storage_paths.logs,
+            &pause_file,
+            &cancel_file,
+        )?;
+        let config_file = runtime_dir.join("pipeline_config.json");
+        fs::write(
+            &config_file,
+            serde_json::to_vec_pretty(&config)
+                .map_err(|error| format!("falha ao serializar config física: {error}"))?,
+        )
+        .map_err(|error| format!("falha ao persistir config física: {error}"))?;
+        let output_path =
+            crate::commands::pipeline::run_pipeline_config_file(&app, &config_file).await?;
+        let output_project = resolve_physical_output_project(&work_dir, &output_path)?;
+        attach_job_ledger_to_physical_output(&project_file, &output_project, &job_id)?;
+        register_job(&app, &job_id, &output_project)?;
         persist_runtime_transition(
             &app,
-            &project_file,
+            &output_project,
             &job_id,
             "review",
             "awaiting_review",
-            "human_review_required",
+            "physical_pipeline_completed",
             None,
             None,
-            json!({"final_export_allowed": false}),
+            json!({
+                "final_export_allowed": false,
+                "output_project_path": output_project,
+                "staging_work_dir": work_dir,
+            }),
         )?;
         Ok::<(), String>(())
     }
@@ -2755,30 +2733,84 @@ mod tests {
     }
 
     #[test]
-    fn dispatcher_selects_only_pages_with_nonterminal_units() {
-        let temp = tempfile::tempdir().unwrap();
-        let project_file = temp.path().join("project.json");
+    fn physical_dispatch_reuses_one_pipeline_config_and_requires_original_source() {
         let mut value = project(4);
-        value["project_id"] = Value::String("project-001".into());
+        let missing = physical_pipeline_config(
+            &value,
+            "job-001",
+            Path::new("N:/staging"),
+            Path::new("N:/models"),
+            Path::new("N:/logs"),
+            Path::new("N:/runtime/pause.flag"),
+            Path::new("N:/runtime/cancel.flag"),
+        )
+        .unwrap_err();
+        assert!(missing.contains("SOURCE_PATH_REQUIRED"));
+
+        value["source_path"] = Value::String("N:/source/chapter.cbz".into());
+        value["obra"] = Value::String("Obra".into());
         value["capitulo"] = Value::from(57);
-        value["paginas"] = json!([
-            {"numero": 1, "text_layers": [{"id": "owner-001"}]},
-            {"numero": 2, "text_layers": [{"id": "owner-002"}]}
-        ]);
+        value["idioma_origem"] = Value::String("en".into());
+        value["idioma_destino"] = Value::String("pt-BR".into());
+        let config = physical_pipeline_config(
+            &value,
+            "job-001",
+            Path::new("N:/staging"),
+            Path::new("N:/models"),
+            Path::new("N:/logs"),
+            Path::new("N:/runtime/pause.flag"),
+            Path::new("N:/runtime/cancel.flag"),
+        )
+        .unwrap();
+
+        assert_eq!(config["source_path"], "N:/source/chapter.cbz");
+        assert_eq!(config["owner_graph_mode"], "enforce");
+        assert_eq!(config["style_copy_mode"], "shadow");
+        assert_eq!(config["pause_file"], "N:/runtime/pause.flag");
+        assert_eq!(config["cancel_file"], "N:/runtime/cancel.flag");
+    }
+
+    #[test]
+    fn physical_output_promotion_carries_job_ledger_and_marks_units_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let seed_file = temp.path().join("seed").join("project.json");
+        let output_file = temp.path().join("staging").join("project.json");
+        fs::create_dir_all(seed_file.parent().unwrap()).unwrap();
+        fs::create_dir_all(output_file.parent().unwrap()).unwrap();
+        let mut seed = project(4);
+        seed["project_id"] = Value::String("project-001".into());
+        seed["capitulo"] = Value::from(57);
+        seed["paginas"] = json!([{
+            "numero": 1,
+            "text_layers": [{"id": "owner-001"}]
+        }]);
         let started = start_job_in_project(
-            &mut value,
-            &project_file.to_string_lossy(),
+            &mut seed,
+            &seed_file.to_string_lossy(),
             "57",
             4,
             "start-r4",
         )
         .unwrap();
         let job_id = started["job_id"].as_str().unwrap();
-        value["integration_v1"]["jobs"][job_id]["units"]["owner-001"]["terminal"] =
-            Value::Bool(true);
-        fs::write(&project_file, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        project_schema::save_project_value(&seed_file, &mut seed).unwrap();
+        let mut output = project(0);
+        output["paginas"] = json!([{"numero": 1, "text_layers": []}]);
+        project_schema::save_project_value(&output_file, &mut output).unwrap();
 
-        assert_eq!(pending_job_pages(&project_file, job_id).unwrap(), vec![1]);
+        attach_job_ledger_to_physical_output(&seed_file, &output_file, job_id).unwrap();
+
+        let promoted = project_schema::load_project_value(&output_file).unwrap();
+        assert_eq!(promoted["project_id"], "project-001");
+        assert_eq!(promoted["project_revision"], 6);
+        assert_eq!(
+            promoted["integration_v1"]["jobs"][job_id]["units"]["owner-001"]["status"],
+            "complete"
+        );
+        assert_eq!(
+            promoted["integration_v1"]["jobs"][job_id]["units"]["owner-001"]["terminal"],
+            true
+        );
     }
 
     #[test]
