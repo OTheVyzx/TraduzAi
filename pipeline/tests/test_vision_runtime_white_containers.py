@@ -94,3 +94,33 @@ def test_diagonal_text_clusters_corroborate_connected_lobes() -> None:
     ]
 
     assert corroborate_lobes(lobes, observations, [0, 0, 300, 280]) == lobes
+
+
+def test_spatial_text_clusters_recover_wide_neck_connected_subblocks() -> None:
+    from vision_runtime.white_containers import infer_text_cluster_lobes
+
+    observations = [
+        {"observation_id": "a1", "bbox_page": [60, 40, 170, 70]},
+        {"observation_id": "a2", "bbox_page": [50, 72, 180, 102]},
+        {"observation_id": "b1", "bbox_page": [230, 150, 340, 180]},
+        {"observation_id": "b2", "bbox_page": [210, 182, 360, 212]},
+        {"observation_id": "b3", "bbox_page": [205, 214, 365, 244]},
+    ]
+
+    lobes = infer_text_cluster_lobes([0, 0, 400, 280], observations)
+
+    assert len(lobes) == 2
+    assert lobes[0][2] < lobes[1][2]
+
+
+def test_centered_multiline_text_does_not_create_cluster_lobes() -> None:
+    from vision_runtime.white_containers import infer_text_cluster_lobes
+
+    observations = [
+        {"observation_id": "a", "bbox_page": [80, 30, 220, 60]},
+        {"observation_id": "b", "bbox_page": [70, 65, 230, 95]},
+        {"observation_id": "c", "bbox_page": [85, 100, 215, 130]},
+        {"observation_id": "d", "bbox_page": [75, 135, 225, 165]},
+    ]
+
+    assert infer_text_cluster_lobes([0, 0, 300, 200], observations) == []

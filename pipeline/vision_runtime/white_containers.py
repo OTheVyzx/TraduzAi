@@ -125,6 +125,49 @@ def corroborate_lobes(
     return boxes
 
 
+def infer_text_cluster_lobes(
+    container_bbox: Sequence[int],
+    observations: Sequence[Mapping[str, Any]],
+) -> list[list[int]]:
+    """Infer two physical text clusters inside one authenticated container."""
+
+    container = _bbox(container_bbox)
+    boxes = sorted(
+        (_bbox(row.get("bbox_page")) for row in observations),
+        key=lambda box: (box[1], box[0], box[3], box[2]),
+    )
+    if len(boxes) < 4:
+        return []
+    heights = sorted(box[3] - box[1] for box in boxes)
+    median_height = float(heights[len(heights) // 2])
+    candidates = []
+    for split in range(2, len(boxes) - 1):
+        first = boxes[:split]
+        second = boxes[split:]
+        gap = second[0][1] - first[-1][3]
+        if gap < max(16.0, median_height * 0.65):
+            continue
+        first_center_x = sum((box[0] + box[2]) / 2.0 for box in first) / len(first)
+        second_center_x = sum((box[0] + box[2]) / 2.0 for box in second) / len(second)
+        horizontal_shift = abs(first_center_x - second_center_x)
+        if horizontal_shift < max(20.0, (container[2] - container[0]) * 0.12):
+            continue
+        candidates.append((gap + horizontal_shift, first, second))
+    if not candidates:
+        return []
+    _, first, second = max(candidates, key=lambda item: item[0])
+    padding = max(8, int(round(median_height)))
+    results = []
+    for group in (first, second):
+        results.append([
+            max(container[0], min(box[0] for box in group) - padding),
+            max(container[1], min(box[1] for box in group) - padding),
+            min(container[2], max(box[2] for box in group) + padding),
+            min(container[3], max(box[3] for box in group) + padding),
+        ])
+    return results
+
+
 def discover_white_containers(
     image_rgb: np.ndarray,
     observations: Sequence[Mapping[str, Any]],
@@ -191,6 +234,11 @@ def discover_white_containers(
         bbox_page = [x, y, x + w, y + h]
         geometric_lobes = _split_lobes(local, (x, y))
         lobe_bboxes = corroborate_lobes(geometric_lobes, members, bbox_page)
+        lobe_evidence = "eroded_source_component" if lobe_bboxes else None
+        if not lobe_bboxes:
+            lobe_bboxes = infer_text_cluster_lobes(bbox_page, members)
+            if lobe_bboxes:
+                lobe_evidence = "spatial_text_clusters_within_authenticated_component"
         observation_ids = [
             row["observation_id"]
             for row in sorted(members, key=lambda row: (
@@ -207,6 +255,7 @@ def discover_white_containers(
             "polygon_page": polygon_page,
             "kind": "connected_balloon" if len(lobe_bboxes) >= 2 else "balloon",
             "lobe_bboxes": lobe_bboxes,
+            "lobe_evidence": lobe_evidence,
             "observation_ids": observation_ids,
             "evidence": "enclosed_white_source_component",
             "uncertainty_reasons": (
