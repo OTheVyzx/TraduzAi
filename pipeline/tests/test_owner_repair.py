@@ -446,6 +446,31 @@ def test_ladder_records_unsafe_mask_planning_and_reaches_support_local_fill():
     )
 
 
+def test_repeated_r3_residuals_keep_unique_parent_linked_requests():
+    case = _case(
+        lambda **_kwargs: RepairExecutionFeedback.visual_residual(
+            "UnsafeOwnerMaskError:repair action mask overlaps protected art"
+        )
+    )
+
+    result = run_repair_ladder(
+        case,
+        start_strategy="R3",
+        scheduler=lambda _seconds: None,
+    )
+
+    request_ids = [request.request_id for request in result.repair_requests]
+    assert result.status == "repair_pending"
+    assert len(result.attempts) == 3
+    assert len(request_ids) == len(set(request_ids))
+    for attempt, successor in zip(
+        result.attempts,
+        result.repair_requests[1:],
+        strict=True,
+    ):
+        assert attempt.attempt_sha256 in successor.evidence_ids
+
+
 def test_r3_deterministic_rebuild_preserves_every_pixel_outside_safe_interior():
     case = _case()
     attempt = build_repair_attempt(

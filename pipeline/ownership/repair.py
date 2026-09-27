@@ -694,7 +694,10 @@ def run_repair_ladder(
                     case,
                     failed_stage="infrastructure",
                     reason=feedback.reason,
-                    evidence_ids=(f"transient-{transient_count}",),
+                    evidence_ids=(
+                        f"transient-{transient_count}",
+                        attempts[-1].attempt_sha256,
+                    ),
                     next_strategy=selected.value,
                 )
                 requests.append(retry_request)
@@ -732,7 +735,10 @@ def run_repair_ladder(
                         case,
                         failed_stage="residual",
                         reason=feedback.reason,
-                        evidence_ids=feedback.evidence_ids,
+                        evidence_ids=(
+                            *feedback.evidence_ids,
+                            previous.attempt_sha256,
+                        ),
                         next_strategy="R3",
                     )
                     requests.append(request)
@@ -741,7 +747,10 @@ def run_repair_ladder(
                     case,
                     failed_stage="residual",
                     reason=feedback.reason,
-                    evidence_ids=feedback.evidence_ids,
+                    evidence_ids=(
+                        *feedback.evidence_ids,
+                        previous.attempt_sha256,
+                    ),
                     next_strategy="R3",
                 )
                 requests.append(request)
@@ -755,7 +764,10 @@ def run_repair_ladder(
                 case,
                 failed_stage="residual",
                 reason=feedback.reason,
-                evidence_ids=feedback.evidence_ids,
+                evidence_ids=(
+                    *feedback.evidence_ids,
+                    previous.attempt_sha256,
+                ),
                 next_strategy=next_strategy,
             )
             requests.append(request)
