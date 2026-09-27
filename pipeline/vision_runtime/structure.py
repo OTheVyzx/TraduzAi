@@ -149,9 +149,26 @@ def build_structural_analysis(
         if not lobe_bboxes:
             lobe_bboxes = (unit_bbox,)
         ordered_lobes = sorted(lobe_bboxes, key=lambda box: (box[1], box[0], box[3], box[2]))
+        lobe_assignment: dict[str, int] = {}
+        for row in ordered:
+            candidates = [
+                index for index, box in enumerate(ordered_lobes)
+                if _contains_center(box, row["bbox_page"])
+            ]
+            if candidates:
+                observation_center = _center(row["bbox_page"])
+                lobe_assignment[row["observation_id"]] = min(
+                    candidates,
+                    key=lambda index: (
+                        (_center(ordered_lobes[index])[0] - observation_center[0]) ** 2
+                        + (_center(ordered_lobes[index])[1] - observation_center[1]) ** 2,
+                        index,
+                    ),
+                )
         for order, lobe_bbox in enumerate(ordered_lobes):
             lobe_members = [
-                row for row in ordered if _contains_center(lobe_bbox, row["bbox_page"])
+                row for row in ordered
+                if lobe_assignment.get(row["observation_id"]) == order
             ]
             block_id = _stable_id("physical_subblock", {
                 "logical_unit_id": unit_id,

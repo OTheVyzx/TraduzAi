@@ -91,3 +91,22 @@ def test_observation_inside_nested_containers_uses_smallest_supported_container(
     )
 
     assert result.logical_units[0]["container_ref"] == "balloon"
+
+
+def test_overlapping_lobes_assign_each_observation_to_exactly_one_subblock() -> None:
+    from vision_runtime.structure import build_structural_analysis
+
+    result = build_structural_analysis(
+        observations=[_observation("shared", "MIDDLE", [90, 70, 130, 100])],
+        containers=[{
+            "container_id": "connected",
+            "bbox_page": [0, 0, 220, 180],
+            "lobe_bboxes": [[0, 0, 150, 120], [70, 50, 220, 180]],
+            "kind": "connected_balloon",
+        }],
+    )
+
+    assignments = sum(
+        row["observation_ids"].count("shared") for row in result.physical_subblocks
+    )
+    assert assignments == 1
