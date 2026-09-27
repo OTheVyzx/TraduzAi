@@ -970,6 +970,87 @@ def test_bulk_adapter_never_cross_assigns_owner_payloads() -> None:
     assert {attempt.owner_id for attempt in result.attempts} == {"owner_a", "owner_b"}
 
 
+def test_page_translation_can_isolate_one_rejected_owner_and_keep_other_binding() -> None:
+    from ownership.translation import translate_owner_page
+
+    requests = (_owner_request("a"), _owner_request("b"))
+
+    def backend(owner_request, _variant):
+        if owner_request.owner_id == "owner_a":
+            return "O JOGADOR TEM 10 ABATES"
+        return owner_request.source_text
+
+    backend.backend_name = "fixture"
+    result = translate_owner_page(
+        requests,
+        backends=(backend,),
+        continue_on_owner_failure=True,
+    )
+
+    assert [binding.owner_id for binding in result.bindings] == ["owner_a"]
+    assert {attempt.owner_id for attempt in result.attempts} == {
+        "owner_a",
+        "owner_b",
+    }
+    rejected = [
+        attempt
+        for attempt in result.attempts
+        if attempt.owner_id == "owner_b"
+    ]
+    assert rejected
+    assert all(attempt.status == "rejected" for attempt in rejected)
+
+
+def test_partial_translation_retires_rejected_owner_with_audited_review_disposition() -> None:
+    from ownership.translation import (
+        OwnerTranslationRequest,
+        apply_owner_translation_result,
+        translate_owner_page,
+    )
+
+    graph = _graph(
+        [
+            ("a", "THE PLAYER HAS 10 KILLS"),
+            ("b", "THE OTHER PLAYER HAS 12 KILLS"),
+        ]
+    )
+    requests = tuple(
+        OwnerTranslationRequest.from_graph(graph, owner.owner_id)
+        for owner in graph.owners
+    )
+
+    def backend(owner_request, _variant):
+        if owner_request.owner_id == "owner_a":
+            return "O JOGADOR TEM 10 ABATES"
+        return owner_request.source_text
+
+    backend.backend_name = "fixture"
+    result = translate_owner_page(
+        requests,
+        backends=(backend,),
+        continue_on_owner_failure=True,
+    )
+    merged = apply_owner_translation_result(
+        graph,
+        result,
+        review_unbound_attempts=True,
+    )
+
+    assert [owner.owner_id for owner in merged.owners] == ["owner_a"]
+    assert merged.owners[0].state == "target_ready"
+    rejected = next(
+        item
+        for item in merged.component_dispositions
+        if item.component_id == "component_b"
+    )
+    assert rejected.decision == "uncertain"
+    assert rejected.owner_id is None
+    assert rejected.policy_id == "coverage_ambiguous_candidate"
+    assert rejected.policy_evidence_ids
+    assert "translation" in rejected.policy_reason
+    merged.require_valid(mode="enforce")
+
+
 def test_translation_result_rejects_binding_from_other_execution() -> None:
     from ownership.translation import (
         OwnerPageTranslationResult,

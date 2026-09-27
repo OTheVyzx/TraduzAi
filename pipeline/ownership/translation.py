@@ -1120,6 +1120,7 @@ def translate_owner_page(
     attempt_kwargs: Mapping[str, object] | None = None,
     page_language_evidence_by_owner: Mapping[str, PageLanguageEvidence] | None = None,
     repaint_already_target_pixels: bool = False,
+    continue_on_owner_failure: bool = False,
 ) -> OwnerPageTranslationResult:
     attempts: list[TranslationAttempt] = []
     bindings: list[TranslationBinding] = []
@@ -1137,6 +1138,9 @@ def translate_owner_page(
                 repaint_already_target_pixels=repaint_already_target_pixels,
             )
         except (TranslationValidationExhausted, TranslationInfrastructureError) as exc:
+            if continue_on_owner_failure:
+                attempts.extend(exc.attempts)
+                continue
             error_type = type(exc)
             raise error_type((*attempts, *exc.attempts)) from exc
         attempts.extend(owner_attempts)
@@ -1147,6 +1151,8 @@ def translate_owner_page(
 def apply_owner_translation_result(
     graph: OwnerGraph,
     result: OwnerPageTranslationResult,
+    *,
+    review_unbound_attempts: bool = False,
 ) -> OwnerGraph:
     """Atomically attach accepted bindings to the same graph owners."""
 
@@ -1169,9 +1175,28 @@ def apply_owner_translation_result(
     owners = _translation_owners(merged)
     expected_ids = {owner.owner_id for owner in owners}
     bindings_by_owner = {binding.owner_id: binding for binding in result.bindings}
-    if set(bindings_by_owner) != expected_ids:
+    if not set(bindings_by_owner).issubset(expected_ids):
+        raise TranslationIdentityError("translation binding references an unknown owner")
+    if set(bindings_by_owner) != expected_ids and not review_unbound_attempts:
         raise TranslationIdentityError("translation bindings do not cover every owner exactly once")
+    failed_owner_ids = expected_ids - set(bindings_by_owner)
+    attempts_by_owner = {
+        owner_id: tuple(
+            attempt for attempt in result.attempts if attempt.owner_id == owner_id
+        )
+        for owner_id in failed_owner_ids
+    }
+    if review_unbound_attempts and any(
+        not owner_attempts
+        or any(attempt.status == "accepted" for attempt in owner_attempts)
+        for owner_attempts in attempts_by_owner.values()
+    ):
+        raise TranslationIdentityError(
+            "review-only translation owner lacks a rejected attempt chain"
+        )
     for owner in owners:
+        if owner.owner_id in failed_owner_ids:
+            continue
         binding = bindings_by_owner[owner.owner_id]
         if tuple(owner.component_ids) != binding.component_ids:
             raise TranslationIdentityError("translation binding component identity mismatch")
@@ -1181,6 +1206,60 @@ def apply_owner_translation_result(
             raise TranslationIdentityError("translation binding is not accepted PT-BR")
         owner.translated_payload = binding.target_text
         owner.state = "target_ready"
+    if failed_owner_ids:
+        failed_components_by_owner = {
+            owner.owner_id: set(owner.component_ids)
+            for owner in owners
+            if owner.owner_id in failed_owner_ids
+        }
+        failed_component_ids = {
+            component_id
+            for component_ids in failed_components_by_owner.values()
+            for component_id in component_ids
+        }
+        components_by_id = {
+            component.component_id: component for component in merged.components
+        }
+        failed_owner_by_component = {
+            component_id: owner_id
+            for owner_id, component_ids in failed_components_by_owner.items()
+            for component_id in component_ids
+        }
+        merged.component_dispositions = [
+            (
+                ComponentDisposition(
+                    component_id=disposition.component_id,
+                    decision="uncertain",
+                    owner_id=None,
+                    reason="owner_translation_rejected",
+                    policy_id="coverage_ambiguous_candidate",
+                    policy_bbox_page=components_by_id[
+                        disposition.component_id
+                    ].bbox_page,
+                    policy_evidence_ids=tuple(
+                        attempt.attempt_id
+                        for attempt in attempts_by_owner[
+                            failed_owner_by_component[disposition.component_id]
+                        ]
+                    ),
+                    policy_reason=(
+                        "translation validation exhausted; source pixels preserved "
+                        "for review"
+                    ),
+                )
+                if disposition.component_id in failed_component_ids
+                else disposition
+            )
+            for disposition in merged.component_dispositions
+        ]
+        merged.projections = [
+            projection
+            for projection in merged.projections
+            if projection.owner_id not in failed_owner_ids
+        ]
+        merged.owners = [
+            owner for owner in merged.owners if owner.owner_id not in failed_owner_ids
+        ]
     merged.require_valid(mode="enforce")
     return merged
 
