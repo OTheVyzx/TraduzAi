@@ -353,6 +353,8 @@ def adapt_contract_payload(name: str, payload: Mapping[str, Any]) -> dict[str, A
 def contract_snapshot() -> dict[str, Any]:
     """Return the stable registry consumed by the bootstrap publication."""
 
+    from .orchestrator import STAGE_ORDER, invalidated_stages
+
     return {
         "schema": CONTRACT_VERSION,
         "contracts": _canonical_copy(_CONTRACTS),
@@ -362,6 +364,13 @@ def contract_snapshot() -> dict[str, Any]:
             "consumer_fast": "runtime modules resolve from pipeline/consumer_fast/runtime",
         },
         "studio_ipc": studio_ipc_contract(),
+        "orchestration": {
+            "schema": "traduzai.consumer-fast-plan.v1",
+            "stage_order": list(STAGE_ORDER),
+            "invalidation": {change: list(invalidated_stages(change)) for change in (
+                "typography", "line_breaks", "target", "source_selection", "mask")},
+            "job_schema": "traduzai.consumer-fast-job.v1",
+        },
     }
 
 

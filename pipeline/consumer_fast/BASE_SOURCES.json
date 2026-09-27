@@ -25,7 +25,8 @@
   },
   "integration_added_files": [
     "pipeline/consumer_fast/runtime/consumer_historical_child.py",
-    "pipeline/integration_v1/providers.py"
+    "pipeline/integration_v1/providers.py",
+    "pipeline/integration_v1/orchestrator.py"
   ],
   "files": {
     "pipeline/consumer_fast/run_operational_closure.py": "0de5c1a1099add1bc5a9a1f17bfd284ed86d20be99c35ea44f7bfb3eed5a658b",

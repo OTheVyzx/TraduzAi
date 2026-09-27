@@ -68,6 +68,9 @@ def test_contract_registry_reuses_existing_runtime_types() -> None:
     assert snapshot["studio_ipc"]["argument_envelope"] == "direct_fields"
     assert snapshot["studio_ipc"]["event"]["channel"] == "consumer-fast-project-event"
     assert "start_consumer_fast" in snapshot["studio_ipc"]["commands"]
+    assert snapshot["orchestration"]["stage_order"][:5] == [
+        "import", "analysis", "ocr", "logical_units", "translate"]
+    assert "ocr" not in snapshot["orchestration"]["invalidation"]["target"]
 
 
 def test_project_event_is_deterministic_and_revision_bound() -> None:
