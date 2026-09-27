@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::commands::project_schema;
@@ -92,6 +93,190 @@ fn require_sha256_field(value: &Value, field: &str) -> Result<String, String> {
         return Err(format!("{field} exige SHA-256 minúsculo"));
     }
     Ok(digest.to_string())
+}
+
+fn canonical_json_sha256(value: &Value) -> Result<String, String> {
+    let encoded = serde_json::to_vec(value)
+        .map_err(|error| format!("falha ao serializar JSON canônico: {error}"))?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
+fn require_safe_relative_path(value: &Value, field: &str) -> Result<PathBuf, String> {
+    let raw = value
+        .as_str()
+        .filter(|candidate| !candidate.is_empty())
+        .ok_or_else(|| format!("{field} exige caminho relativo seguro"))?;
+    if raw.contains('\\')
+        || raw.starts_with('/')
+        || raw.contains(':')
+        || raw
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+    {
+        return Err(format!("{field} exige caminho relativo seguro"));
+    }
+    Ok(PathBuf::from(raw))
+}
+
+fn read_verified_artifact(
+    root: &Path,
+    reference: &Value,
+    field: &str,
+) -> Result<(PathBuf, Vec<u8>), String> {
+    let object = reference
+        .as_object()
+        .filter(|object| {
+            object.len() == 2
+                && object.contains_key("relative_path")
+                && object.contains_key("sha256")
+        })
+        .ok_or_else(|| format!("{field} exige relative_path e sha256"))?;
+    let relative = require_safe_relative_path(&object["relative_path"], field)?;
+    let expected = require_sha256_field(&object["sha256"], field)?;
+    let path = root.join(relative);
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("falha ao resolver raiz de {field}: {error}"))?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|error| format!("falha ao resolver {field} em {}: {error}", path.display()))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(format!("{field} escapou da raiz autorizada"));
+    }
+    let bytes = fs::read(&canonical_path).map_err(|error| {
+        format!(
+            "falha ao ler {field} em {}: {error}",
+            canonical_path.display()
+        )
+    })?;
+    let actual = format!("{:x}", Sha256::digest(&bytes));
+    if actual != expected {
+        return Err(format!("{field} falhou na verificação SHA-256"));
+    }
+    Ok((canonical_path, bytes))
+}
+
+fn validate_preference_candidate(
+    candidate: &Value,
+    owner_id: &str,
+    artifact_root: &Path,
+) -> Result<(), String> {
+    let object = candidate
+        .as_object()
+        .ok_or_else(|| "renderer candidate precisa ser um objeto".to_string())?;
+    if candidate["schema"] != "traduzai.renderer-preference.v1"
+        || candidate["preference_profile"] != "uncalibrated"
+        || candidate["owner_id"].as_str() != Some(owner_id)
+        || candidate["hard_safety_passed"].as_bool() != Some(true)
+    {
+        return Err("renderer candidate incompatível ou insegura".into());
+    }
+    for field in [
+        "target_sha256",
+        "source_sha256",
+        "style_sha256",
+        "layout_plan_sha256",
+        "recipe_sha256",
+        "output_sha256",
+    ] {
+        require_sha256_field(&candidate[field], field)?;
+    }
+    let target = candidate["target_text"]
+        .as_str()
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| "renderer candidate exige target_text".to_string())?;
+    if format!("{:x}", Sha256::digest(target.as_bytes())) != candidate["target_sha256"] {
+        return Err("target_sha256 diverge do texto exato".into());
+    }
+    let safety = candidate
+        .pointer("/metrics/raster_safety")
+        .ok_or_else(|| "renderer candidate exige raster_safety".to_string())?;
+    if safety["status"] != "pass"
+        || safety["outside_authorized_body_px"].as_u64() != Some(0)
+        || safety["protected_art_overlap_px"].as_u64() != Some(0)
+    {
+        return Err("renderer candidate falhou segurança raster".into());
+    }
+    let (preview_path, _) =
+        read_verified_artifact(artifact_root, &candidate["preview_ref"], "preview_ref")?;
+    read_verified_artifact(artifact_root, &candidate["context_ref"], "context_ref")?;
+    if candidate["preview_ref"]["sha256"] != candidate["output_sha256"] {
+        return Err(format!(
+            "preview {} diverge do output_sha256",
+            preview_path.display()
+        ));
+    }
+    let candidate_id = candidate["candidate_id"]
+        .as_str()
+        .ok_or_else(|| "renderer candidate exige candidate_id".to_string())?;
+    let mut identity = object.clone();
+    identity.remove("candidate_id");
+    let digest = canonical_json_sha256(&Value::Object(identity))?;
+    if candidate_id != format!("renderer-candidate:{}", &digest[..32]) {
+        return Err("renderer candidate hash inválido".into());
+    }
+    Ok(())
+}
+
+fn validate_preference_comparison(
+    comparison: &Value,
+    owner_id: &str,
+    artifact_root: &Path,
+    expected_comparison_sha256: &str,
+) -> Result<(), String> {
+    let object = comparison
+        .as_object()
+        .ok_or_else(|| "renderer comparison precisa ser um objeto".to_string())?;
+    if comparison["schema"] != "traduzai.renderer-preference.v1"
+        || comparison["preference_profile"] != "uncalibrated"
+    {
+        return Err("renderer comparison incompatível".into());
+    }
+    let candidates = comparison["candidates"]
+        .as_array()
+        .filter(|items| items.len() == 2)
+        .ok_or_else(|| "renderer comparison exige duas candidatas".to_string())?;
+    for candidate in candidates {
+        validate_preference_candidate(candidate, owner_id, artifact_root)?;
+    }
+    for field in ["target_sha256", "source_sha256", "style_sha256"] {
+        if candidates[0][field] != candidates[1][field] {
+            return Err(format!("renderer candidates divergem em {field}"));
+        }
+    }
+    let first_id = candidates[0]["candidate_id"]
+        .as_str()
+        .ok_or_else(|| "renderer candidate_id ausente".to_string())?;
+    let second_id = candidates[1]["candidate_id"]
+        .as_str()
+        .ok_or_else(|| "renderer candidate_id ausente".to_string())?;
+    if first_id == second_id {
+        return Err("renderer comparison exige candidatas distintas".into());
+    }
+    let positions = comparison["positions"]
+        .as_object()
+        .filter(|positions| {
+            positions.len() == 2 && positions.contains_key("A") && positions.contains_key("B")
+        })
+        .ok_or_else(|| "renderer comparison exige posições A e B".to_string())?;
+    let displayed = [positions["A"].as_str(), positions["B"].as_str()];
+    if !displayed.contains(&Some(first_id))
+        || !displayed.contains(&Some(second_id))
+        || displayed[0] == displayed[1]
+    {
+        return Err("renderer comparison positions não vinculam as candidatas".into());
+    }
+    require_sha256_field(&comparison["randomization_sha256"], "randomization_sha256")?;
+    let embedded = require_sha256_field(&comparison["comparison_sha256"], "comparison_sha256")?;
+    if embedded != expected_comparison_sha256 {
+        return Err("comparison_sha256 diverge do índice".into());
+    }
+    let mut semantic = object.clone();
+    semantic.remove("comparison_sha256");
+    if canonical_json_sha256(&Value::Object(semantic))? != embedded {
+        return Err("renderer comparison hash inválido".into());
+    }
+    Ok(())
 }
 
 fn validate_preference_response(
@@ -385,10 +570,145 @@ pub fn decide_export(project_path: String, expected_revision: u64) -> Result<Val
     Ok(json!({"export_decision": export_decision(&project)}))
 }
 
+#[tauri::command]
+pub fn read_renderer_preference_comparison(
+    project_path: String,
+    owner_id: String,
+    expected_revision: u64,
+) -> Result<Value, String> {
+    if owner_id.trim().is_empty() {
+        return Err("owner_id é obrigatório".into());
+    }
+    let project_file = resolve_project_file(&project_path)?;
+    let project = project_schema::load_project_value(&project_file)?;
+    require_revision(&project, expected_revision)?;
+    let index = project.pointer("/integration_v1/renderer_preference_index");
+    if index.is_some_and(|index| index["schema"] != "traduzai.renderer-preference-index.v1") {
+        return Err("renderer preference index incompatível".into());
+    }
+    let entry = index
+        .and_then(|index| index.get("owners"))
+        .and_then(Value::as_object)
+        .and_then(|owners| owners.get(&owner_id));
+    let Some(entry) = entry else {
+        return Ok(json!({
+            "owner_id": owner_id,
+            "project_revision": expected_revision,
+            "state": null,
+            "comparison": null,
+            "artifact_base": null,
+        }));
+    };
+    let state = entry["state"]
+        .as_str()
+        .ok_or_else(|| "renderer preference entry exige state".to_string())?;
+    if state != "pending" {
+        return Ok(json!({
+            "owner_id": owner_id,
+            "project_revision": expected_revision,
+            "state": state,
+            "comparison": null,
+            "artifact_base": null,
+        }));
+    }
+    let expected_comparison_sha256 =
+        require_sha256_field(&entry["comparison_sha256"], "comparison_sha256")?;
+    let project_root = project_file
+        .parent()
+        .ok_or_else(|| "project.json sem diretório pai".to_string())?;
+    let (comparison_file, comparison_bytes) =
+        read_verified_artifact(project_root, &entry["comparison_ref"], "comparison_ref")?;
+    let comparison: Value = serde_json::from_slice(&comparison_bytes).map_err(|error| {
+        format!(
+            "renderer comparison inválida em {}: {error}",
+            comparison_file.display()
+        )
+    })?;
+    let artifact_root = comparison_file
+        .parent()
+        .ok_or_else(|| "renderer comparison sem diretório pai".to_string())?;
+    validate_preference_comparison(
+        &comparison,
+        &owner_id,
+        artifact_root,
+        &expected_comparison_sha256,
+    )?;
+    Ok(json!({
+        "owner_id": owner_id,
+        "project_revision": expected_revision,
+        "state": state,
+        "comparison": comparison,
+        "artifact_base": artifact_root.to_string_lossy(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    fn preference_candidate(
+        owner_id: &str,
+        suffix: char,
+        preview_sha256: &str,
+        context_sha256: &str,
+    ) -> Value {
+        let digest = suffix.to_string().repeat(64);
+        let mut candidate = json!({
+            "schema": "traduzai.renderer-preference.v1",
+            "owner_id": owner_id,
+            "target_text": "AÇÃO TOTAL",
+            "target_sha256": "c4830df52d636db475295a8c2c82c9f78e084465a7f711705fdafbbdf21454aa",
+            "source_sha256": context_sha256,
+            "style_sha256": "2".repeat(64),
+            "layout_plan_sha256": digest,
+            "recipe_sha256": (if suffix == '3' { "4" } else { "5" }).repeat(64),
+            "output_sha256": preview_sha256,
+            "preview_ref": {
+                "relative_path": if suffix == '3' { "previews/a.svg" } else { "previews/b.svg" },
+                "sha256": preview_sha256
+            },
+            "context_ref": {
+                "relative_path": "previews/context.svg",
+                "sha256": context_sha256
+            },
+            "metrics": {
+                "raster_safety": {
+                    "status": "pass",
+                    "outside_authorized_body_px": 0,
+                    "protected_art_overlap_px": 0
+                }
+            },
+            "hard_safety_passed": true,
+            "preference_profile": "uncalibrated"
+        });
+        let digest = canonical_json_sha256(&candidate).unwrap();
+        candidate["candidate_id"] = Value::String(format!("renderer-candidate:{}", &digest[..32]));
+        candidate
+    }
+
+    fn preference_comparison(
+        owner_id: &str,
+        first_preview_sha256: &str,
+        second_preview_sha256: &str,
+        context_sha256: &str,
+    ) -> Value {
+        let first = preference_candidate(owner_id, '3', first_preview_sha256, context_sha256);
+        let second = preference_candidate(owner_id, '8', second_preview_sha256, context_sha256);
+        let mut comparison = json!({
+            "schema": "traduzai.renderer-preference.v1",
+            "candidates": [first.clone(), second.clone()],
+            "positions": {
+                "A": first["candidate_id"],
+                "B": second["candidate_id"]
+            },
+            "randomization_sha256": "9".repeat(64),
+            "preference_profile": "uncalibrated"
+        });
+        comparison["comparison_sha256"] =
+            Value::String(canonical_json_sha256(&comparison).unwrap());
+        comparison
+    }
 
     fn project(revision: u64) -> Value {
         json!({
@@ -551,5 +871,112 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn command_reads_pending_renderer_comparison_with_verified_file_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let owner_id = "owner-001";
+        let previews = temp.path().join("previews");
+        fs::create_dir(&previews).unwrap();
+        let first_preview = b"candidate-a";
+        let second_preview = b"candidate-b";
+        let context = b"context";
+        fs::write(previews.join("a.svg"), first_preview).unwrap();
+        fs::write(previews.join("b.svg"), second_preview).unwrap();
+        fs::write(previews.join("context.svg"), context).unwrap();
+        let comparison = preference_comparison(
+            owner_id,
+            &format!("{:x}", Sha256::digest(first_preview)),
+            &format!("{:x}", Sha256::digest(second_preview)),
+            &format!("{:x}", Sha256::digest(context)),
+        );
+        let comparison_bytes = serde_json::to_vec_pretty(&comparison).unwrap();
+        let comparison_file = temp.path().join("comparison.json");
+        fs::write(&comparison_file, &comparison_bytes).unwrap();
+
+        let mut project = project(4);
+        let entry = json!({
+            "state": "pending",
+            "comparison_ref": {
+                "relative_path": "comparison.json",
+                "sha256": format!("{:x}", Sha256::digest(&comparison_bytes))
+            },
+            "comparison_sha256": comparison["comparison_sha256"]
+        });
+        let mut owners = serde_json::Map::new();
+        owners.insert(owner_id.into(), entry);
+        project["integration_v1"] = json!({
+            "renderer_preference_index": {
+                "schema": "traduzai.renderer-preference-index.v1",
+                "owners": owners
+            }
+        });
+        fs::write(
+            temp.path().join("project.json"),
+            serde_json::to_vec_pretty(&project).unwrap(),
+        )
+        .unwrap();
+
+        let result = read_renderer_preference_comparison(
+            temp.path().to_string_lossy().into_owned(),
+            owner_id.into(),
+            4,
+        )
+        .unwrap();
+        assert_eq!(result["comparison"], comparison);
+        assert_eq!(result["state"], "pending");
+    }
+
+    #[test]
+    fn renderer_comparison_read_is_null_when_owner_has_no_pending_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("project.json"),
+            serde_json::to_vec_pretty(&project(4)).unwrap(),
+        )
+        .unwrap();
+
+        let result = read_renderer_preference_comparison(
+            temp.path().to_string_lossy().into_owned(),
+            "owner-missing".into(),
+            4,
+        )
+        .unwrap();
+        assert!(result["comparison"].is_null());
+    }
+
+    #[test]
+    fn renderer_comparison_rejects_project_escape_before_reading() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut project = project(4);
+        project["integration_v1"] = json!({
+            "renderer_preference_index": {
+                "schema": "traduzai.renderer-preference-index.v1",
+                "owners": {
+                    "owner-001": {
+                        "state": "pending",
+                        "comparison_ref": {
+                            "relative_path": "../comparison.json",
+                            "sha256": "a".repeat(64)
+                        },
+                        "comparison_sha256": "b".repeat(64)
+                    }
+                }
+            }
+        });
+        fs::write(
+            temp.path().join("project.json"),
+            serde_json::to_vec_pretty(&project).unwrap(),
+        )
+        .unwrap();
+
+        let error = read_renderer_preference_comparison(
+            temp.path().to_string_lossy().into_owned(),
+            "owner-001".into(),
+            4,
+        )
+        .unwrap_err();
+        assert!(error.contains("caminho relativo seguro"));
     }
 }

@@ -733,6 +733,13 @@ def studio_ipc_contract() -> dict[str, Any]:
                 "returns": ["decision_id", "project_revision", "owner_status"],
                 "precondition": "server_validates_actor_revision_and_evidence",
             },
+            "read_renderer_preference_comparison": {
+                "arguments": ["project_path", "owner_id", "expected_revision"],
+                "returns": [
+                    "owner_id", "project_revision", "state", "comparison", "artifact_base",
+                ],
+                "precondition": "server_verifies_revision_safe_paths_and_artifact_hashes",
+            },
             "retypeset_owner": {
                 "arguments": ["project_path", "owner_id", "layout_request", *mutation_fields],
                 "returns": ["project_revision", "recipe_receipt", "raster_artifact_ref"],
