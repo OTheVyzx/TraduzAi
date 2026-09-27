@@ -520,6 +520,36 @@ def test_ocr_empty_uncorroborated_glyph_scan_policy_roundtrips_as_preserve() -> 
     assert disposition.policy_evidence_ids == entry.ocr_attempt_ids
 
 
+def test_uncertain_ocr_empty_component_becomes_audited_review_disposition_without_aborting_page() -> None:
+    coverage = _coverage(
+        (("component-uncertain", "", (20, 20, 220, 140)),),
+        containers=(None,),
+    )
+    entry = replace(
+        coverage.entries[0],
+        materiality="uncertain",
+        container_id=None,
+        observation_ids=(),
+        semantic_role=None,
+        state="review_required",
+        preserve_policy=None,
+    )
+
+    graph = build_owner_page_graph_from_coverage(
+        _replace_entries(coverage, (entry,), observations=())
+    )
+
+    assert graph.owners == []
+    disposition = graph.component_dispositions[0]
+    assert disposition.component_id == entry.component_id
+    assert disposition.decision == "uncertain"
+    assert disposition.owner_id is None
+    assert disposition.reason == "coverage_uncertain_requires_review"
+    assert disposition.policy_id == "coverage_ambiguous_candidate"
+    assert disposition.policy_bbox_page == entry.bbox_page
+    assert disposition.policy_evidence_ids == entry.ocr_attempt_ids
+
+
 def test_unknown_preserve_policy_is_rejected() -> None:
     coverage = _coverage(
         (("component-a", "TEXT", (20, 20, 120, 50)),),

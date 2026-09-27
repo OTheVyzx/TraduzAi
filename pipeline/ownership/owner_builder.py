@@ -268,9 +268,13 @@ def build_owner_page_graph_from_coverage(
     }
     material_entries: list[CoverageEntry] = []
     preserved_entries: list[CoverageEntry] = []
+    uncertain_entries: list[CoverageEntry] = []
     for entry in coverage.entries:
         if entry.state == "explicit_non_dialogue_preserve":
             preserved_entries.append(entry)
+            continue
+        if entry.materiality == "uncertain" and entry.state == "review_required":
+            uncertain_entries.append(entry)
             continue
         if entry.materiality != "material":
             raise CoverageInvariantError(
@@ -333,6 +337,22 @@ def build_owner_page_graph_from_coverage(
                 reason=f"complete_page_coverage:{container_id}",
             )
             for entry in entries
+        )
+
+    for entry in sorted(uncertain_entries, key=_entry_page_order):
+        dispositions.append(
+            ComponentDisposition(
+                component_id=entry.component_id,
+                decision="uncertain",
+                reason="coverage_uncertain_requires_review",
+                policy_id="coverage_ambiguous_candidate",
+                policy_bbox_page=entry.bbox_page,
+                policy_evidence_ids=entry.ocr_attempt_ids,
+                policy_reason=(
+                    "OCR-empty primary candidate lacks independent semantic "
+                    "corroboration and requires human review"
+                ),
+            )
         )
 
     for entry in sorted(preserved_entries, key=_entry_page_order):
