@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import importlib.util
 import json
 import logging
 import os
@@ -19,13 +20,27 @@ import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from typing import Any, Callable, Literal, Optional
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 try:
     from utils.decision_log import record_decision
 except ImportError:
-    from ..utils.decision_log import record_decision
+    try:
+        from ..utils.decision_log import record_decision
+    except ImportError:
+        # PaddleOCR may register an unrelated top-level ``utils`` module before
+        # the lazy translator import. Load this sibling by path so a provider's
+        # global module name cannot hide TraduzAI's decision log.
+        _decision_log_path = Path(__file__).resolve().parents[1] / "utils" / "decision_log.py"
+        _decision_log_spec = importlib.util.spec_from_file_location(
+            "_traduzai_pipeline_decision_log", _decision_log_path)
+        if _decision_log_spec is None or _decision_log_spec.loader is None:
+            raise ImportError(f"decision log local indisponível: {_decision_log_path}")
+        _decision_log_module = importlib.util.module_from_spec(_decision_log_spec)
+        _decision_log_spec.loader.exec_module(_decision_log_module)
+        record_decision = _decision_log_module.record_decision
 
 try:
     from ocr.text_router import ROUTE_ACTIONS, route_action_requires_translation

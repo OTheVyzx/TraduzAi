@@ -61,6 +61,40 @@ def test_cold_ocr_rejects_non_physical_evidence():
             invocation=lambda **_kwargs: SimpleNamespace(attempts=(), observations=()))
 
 
+def test_direct_paddle_adapter_produces_hash_bound_fresh_evidence():
+    from integration_v1.providers import _paddle_contract_invocation
+
+    page = np.zeros((40, 60, 3), dtype=np.uint8)
+    request = OCRRequest(
+        "cold-run", "cold-execution", "page-042", "a" * 64,
+        canonical_page_sha256(page), "cold:page-042:direct", "vision-paddleocr")
+    calls = []
+
+    def provider(physical):
+        calls.append(physical.copy())
+        return [{
+            "text": "HELLO",
+            "confidence": 0.97,
+            "bbox_pts": [[1, 2], [19, 2], [19, 12], [1, 12]],
+            "source": "test-paddle",
+        }]
+
+    result = _paddle_contract_invocation(
+        page_rgb=page,
+        bbox_page=(10, 8, 30, 20),
+        request=request,
+        variants=("anchored_crop", "scale_2x"),
+        stop_on_first_text=False,
+        provider=provider,
+    )
+
+    assert len(calls) == 2
+    assert [call.shape[:2] for call in calls] == [(12, 20), (24, 40)]
+    assert all(attempt.qualifies_as_fresh_physical_inference for attempt in result.attempts)
+    assert {row.text for row in result.observations} == {"HELLO"}
+    assert result.observations[0].bbox_page == (11, 10, 29, 20)
+
+
 def test_operational_cache_miss_calls_vision_interface(tmp_path):
     page = np.full((80, 100, 3), 255, dtype=np.uint8)
     calls = []

@@ -11,8 +11,17 @@ from typing import Any, Callable
 
 import numpy as np
 
-from ownership.hash_contract import canonical_json_sha256, canonical_page_sha256
-from ownership.ocr_contract import OCRRequest
+from ownership.hash_contract import canonical_json_sha256, canonical_page_sha256, sha256_text
+from ownership.ocr_contract import (
+    OCRAttempt,
+    OCRDiagnostics,
+    OCRInvocationResult,
+    OCRObservationRecord,
+    OCRRequest,
+    OCRTransformOperation,
+    OCRTransformSpec,
+    normalize_ocr_payload_text,
+)
 
 
 class ProviderUnavailable(RuntimeError):
@@ -23,18 +32,123 @@ _OCR_ENGINE = None
 _OCR_ENGINE_LOCK = threading.Lock()
 
 
-def _default_ocr_invocation(**kwargs):
-    from vision_stack.ocr import OCREngine
+def _paddle_contract_invocation(*, page_rgb, bbox_page, request, variants,
+                                stop_on_first_text=False, provider=None):
+    """Run installed PaddleOCR without importing the optional Torch OCR backend."""
 
+    import cv2
+    from ownership.ocr_contract import OCRInputPixelIdentityError
+
+    root = np.ascontiguousarray(page_rgb, dtype=np.uint8)
+    if canonical_page_sha256(root) != request.root_input_pixel_sha256:
+        raise OCRInputPixelIdentityError("OCR request root hash does not match page pixels")
+    if provider is None:
+        from ocr_legacy.recognizer_paddle import run_paddle_primary_recognition
+        provider = lambda rgb: run_paddle_primary_recognition(
+            cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), use_gpu=False, lang="en")
+    x1, y1, x2, y2 = (int(value) for value in bbox_page)
+    if x1 < 0 or y1 < 0 or x2 > root.shape[1] or y2 > root.shape[0] or x2 <= x1 or y2 <= y1:
+        raise ValueError("OCR bbox is outside page pixels")
+
+    attempts = []
+    observations = []
+    for ordinal, variant in enumerate(tuple(variants), 1):
+        operations = [OCRTransformOperation(kind="crop", bbox_page=(x1, y1, x2, y2))]
+        if variant == "gray":
+            operations.append(OCRTransformOperation(kind="grayscale_to_rgb"))
+        elif variant == "inverted":
+            operations.append(OCRTransformOperation(kind="invert"))
+        elif variant == "scale_2x":
+            operations.append(OCRTransformOperation(
+                kind="resize", output_size=((x2 - x1) * 2, (y2 - y1) * 2),
+                interpolation="cubic"))
+        elif variant != "anchored_crop":
+            raise ValueError(f"unsupported cold OCR variant: {variant}")
+        transform = OCRTransformSpec.build(tuple(operations))
+        physical = transform.replay(root)
+        input_hash = canonical_page_sha256(physical)
+        attempt_id = "ocr_attempt_" + canonical_json_sha256({
+            "request": list(request.identity), "variant": variant,
+            "input_pixel_sha256": input_hash, "ordinal": ordinal,
+        })[:20]
+        attempt = OCRAttempt(
+            attempt_id=attempt_id,
+            run_id=request.run_id,
+            origin_execution_id=request.origin_execution_id,
+            page_id=request.page_id,
+            page_source_sha256=request.page_source_sha256,
+            root_input_pixel_sha256=request.root_input_pixel_sha256,
+            invocation_id=request.invocation_id,
+            provider_family=request.provider_family,
+            variant_id=str(variant),
+            input_pixel_sha256=input_hash,
+            parent_input_pixel_sha256=request.root_input_pixel_sha256,
+            input_bbox_page=(x1, y1, x2, y2),
+            input_kind=str(variant),
+            transform_spec=transform,
+            input_width=int(physical.shape[1]),
+            input_height=int(physical.shape[0]),
+            input_mode="RGB",
+            provider_called=True,
+            cache_hit=False,
+        )
+        attempts.append(attempt)
+        raw_records = provider(physical) or []
+        scale_x = (x2 - x1) / float(physical.shape[1])
+        scale_y = (y2 - y1) / float(physical.shape[0])
+        for index, row in enumerate(raw_records, 1):
+            text = normalize_ocr_payload_text(str(row.get("text") or ""))
+            if not text:
+                continue
+            raw_polygon = row.get("bbox_pts") or ()
+            polygon = tuple((
+                int(round(x1 + float(point[0]) * scale_x)),
+                int(round(y1 + float(point[1]) * scale_y)),
+            ) for point in raw_polygon if isinstance(point, (list, tuple)) and len(point) >= 2)
+            if polygon:
+                xs = [point[0] for point in polygon]
+                ys = [point[1] for point in polygon]
+                bbox = (min(xs), min(ys), max(xs), max(ys))
+            else:
+                bbox = (x1, y1, x2, y2)
+            observation_seed = sha256_text(f"{attempt_id}|{index}|{text}|{bbox}")
+            observations.append(OCRObservationRecord(
+                observation_id=f"ocr_observation_{observation_seed[:20]}",
+                attempt_id=attempt_id,
+                run_id=request.run_id,
+                origin_execution_id=request.origin_execution_id,
+                page_id=request.page_id,
+                page_source_sha256=request.page_source_sha256,
+                root_input_pixel_sha256=request.root_input_pixel_sha256,
+                input_pixel_sha256=input_hash,
+                invocation_id=request.invocation_id,
+                provider_family=request.provider_family,
+                variant_id=str(variant),
+                payload_sha256=sha256_text(text),
+                text=text,
+                confidence=max(0.0, min(1.0, float(row.get("confidence") or 0.0))),
+                bbox_page=bbox,
+                polygon_page=polygon,
+                source=str(row.get("source") or "primary-paddle"),
+            ))
+        if observations and stop_on_first_text:
+            break
+    return OCRInvocationResult.build(
+        request=request,
+        observations=tuple(observations),
+        attempts=tuple(attempts),
+        diagnostics=OCRDiagnostics("paddleocr-direct-cpu"),
+    )
+
+
+def _default_ocr_invocation(**kwargs):
     global _OCR_ENGINE
     if _OCR_ENGINE is None:
         with _OCR_ENGINE_LOCK:
             if _OCR_ENGINE is None:
-                _OCR_ENGINE = OCREngine(
-                    model="paddleocr", device="cuda", half=True, batch_size=8, lang="en"
-                )
+                _OCR_ENGINE = _paddle_contract_invocation
     engine = _OCR_ENGINE
-    return engine.recognize_region_with_evidence(**kwargs)
+    return engine(**kwargs)
 
 
 def recover_source_with_ocr(
