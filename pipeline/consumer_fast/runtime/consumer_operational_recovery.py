@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +32,43 @@ def sha(value: bytes) -> str:
 
 def read(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _canonical_sha(value: dict) -> str:
+    return sha(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":")).encode("utf-8"))
+
+
+def _runtime_cache_path(root: Path) -> Path:
+    return root / "integration_v1_runtime_cache.json"
+
+
+def _read_runtime_cache(root: Path) -> dict:
+    path = _runtime_cache_path(root)
+    if not path.is_file():
+        return {"schema": "traduzai.integration-runtime-cache.v1",
+                "ocr_entries": {}, "translation_entries": {}}
+    payload = read(path)
+    if payload.get("schema") != "traduzai.integration-runtime-cache.v1":
+        raise ValueError("integration runtime cache schema mismatch")
+    return payload
+
+
+def _write_runtime_cache(root: Path, payload: dict) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    path = _runtime_cache_path(root)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
+               + "\n").encode("utf-8")
+    with temporary.open("wb") as handle:
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def _runtime_key(kind: str, identity: dict) -> str:
+    return f"{kind}:{_canonical_sha(identity)}"
 
 
 def pixels(path: Path, mode: str = "RGB") -> np.ndarray:
@@ -85,9 +124,27 @@ def _cached_or_fresh_ocr(*, page_rgb: np.ndarray, crop: np.ndarray, bbox: list[i
                          member: str, page_id: str, source_sha256: str,
                          cache_root: Path | None, run_id: str,
                          origin_execution_id: str, ocr_invocation=None,
-                         context: dict | None = None) -> tuple[dict, dict]:
+                         context: dict | None = None,
+                         allow_cache_read: bool = True) -> tuple[dict, dict]:
     """Reuse authenticated observations or execute the hash-bound Vision interface."""
-    if cache_root is not None and (cache_root / "ocr_evidence.json").is_file() and (
+    runtime_identity = {
+        "member": member, "page_id": page_id,
+        "source_sha256": source_sha256, "bbox": list(bbox),
+        "crop_pixel_sha256": sha(crop.tobytes()),
+        "provider_policy": "vision-variant-consensus-v1",
+    }
+    runtime_key = _runtime_key("ocr", runtime_identity)
+    if cache_root is not None and allow_cache_read:
+        runtime_cache = _read_runtime_cache(cache_root)
+        cached = runtime_cache["ocr_entries"].get(runtime_key)
+        if cached is not None:
+            if cached.get("identity") != runtime_identity:
+                raise ValueError("integration OCR cache identity mismatch")
+            job = copy.deepcopy(cached["job"])
+            job.update(provider_called=False, cache_hit=True,
+                       origin_provider_called=True)
+            return job, copy.deepcopy(cached["adjudicated"])
+    if allow_cache_read and cache_root is not None and (cache_root / "ocr_evidence.json").is_file() and (
             cache_root / "source_review_model_r001.json").is_file():
         try:
             return _cached_ocr(crop, bbox, member, source_sha256, cache_root)
@@ -123,11 +180,20 @@ def _cached_or_fresh_ocr(*, page_rgb: np.ndarray, crop: np.ndarray, bbox: list[i
         "human_review": False,
         "provenance": "fresh_physical_ocr",
     }
-    return job, {
+    adjudicated = {
         "review": review,
         "selected": recovered["selected"],
-        "source_review_sha256": recovered["source_review_sha256"],
+        "source_review_sha256": _canonical_sha(review),
     }
+    if cache_root is not None:
+        runtime_cache = _read_runtime_cache(cache_root)
+        runtime_cache["ocr_entries"][runtime_key] = {
+            "identity": runtime_identity,
+            "job": job,
+            "adjudicated": adjudicated,
+        }
+        _write_runtime_cache(cache_root, runtime_cache)
+    return job, adjudicated
 
 
 def _accepted_translation(control_root: Path, control: dict, member: str,
@@ -158,7 +224,27 @@ def _accepted_or_fresh_translation(*, control_root: Path, control: dict,
                                    owners: list[str], page_id: str,
                                    context: dict, glossary: dict,
                                    translation_invocation=None,
-                                   allow_accepted: bool = True) -> dict:
+                                   allow_accepted: bool = True,
+                                   runtime_cache_root: Path | None = None,
+                                   allow_cache_read: bool = True) -> dict:
+    identity = {
+        "member": member, "page_id": page_id,
+        "source_sha256": source_sha256, "source": source,
+        "owners": list(owners), "source_language": "en",
+        "target_locale": "pt-BR", "provider_policy": "google-cold-complete-unit-v1",
+    }
+    runtime_key = _runtime_key("translation", identity)
+    if runtime_cache_root is not None and allow_cache_read:
+        runtime_cache = _read_runtime_cache(runtime_cache_root)
+        cached = runtime_cache["translation_entries"].get(runtime_key)
+        if cached is not None:
+            if cached.get("identity") != identity:
+                raise ValueError("integration translation cache identity mismatch")
+            binding = copy.deepcopy(cached["binding"])
+            binding.update(provider_called=False, cache_hit=True,
+                           origin_provider_called=True,
+                           provenance="warm_complete_unit_translation_cache")
+            return binding
     if allow_accepted:
         try:
             return _accepted_translation(control_root, control, member, source_sha256, source, owners)
@@ -169,11 +255,18 @@ def _accepted_or_fresh_translation(*, control_root: Path, control: dict,
         source=source, owner_id=owners[0], page_id=page_id, context=context,
         glossary=glossary, invoke=translation_invocation,
     )
-    return {
+    binding = {
         **fresh,
         "group_path": None,
         "group_sha256": fresh["provider_metadata_sha256"],
     }
+    if runtime_cache_root is not None:
+        runtime_cache = _read_runtime_cache(runtime_cache_root)
+        runtime_cache["translation_entries"][runtime_key] = {
+            "identity": identity, "binding": binding,
+        }
+        _write_runtime_cache(runtime_cache_root, runtime_cache)
+    return binding
 
 
 def _reviewed_translation(binding: dict, review_path: Path | None,
@@ -245,7 +338,8 @@ def _prepare_split(*, source_root: Path, control_root: Path, control: dict,
             page_id=page["page_id"], source_sha256=page["source_sha256"],
             cache_root=cache_root, run_id=run_id,
             origin_execution_id=origin_execution_id,
-            ocr_invocation=ocr_invocation, context=context)
+            ocr_invocation=ocr_invocation, context=context,
+            allow_cache_read=allow_prepared_responses)
         observations.append(dict(unit=unit, bbox=bbox, job=job, adjudicated=adjudicated,
                                  source=adjudicated["review"]["selected_source"]))
     sources = [row["source"] for row in observations]
@@ -416,7 +510,8 @@ def prepare_member(*, source_root: Path, control_root: Path, member: str,
                 page_id=page["page_id"], source_sha256=page["source_sha256"],
                 cache_root=cache_root if allow_prepared_responses else None, run_id=run_id,
                 origin_execution_id=origin_execution_id,
-                ocr_invocation=ocr_invocation, context=context)
+                ocr_invocation=ocr_invocation, context=context,
+                allow_cache_read=allow_prepared_responses)
         except ProviderUnavailable as error:
             outcomes.append(dict(status="review_required", reason=str(error),
                                  proposal=proposal, source_member=member,
@@ -432,7 +527,9 @@ def prepare_member(*, source_root: Path, control_root: Path, member: str,
                 owners=proposal["owner_ids"], page_id=page["page_id"],
                 context=context, glossary=glossary,
                 translation_invocation=translation_invocation,
-                allow_accepted=allow_prepared_responses)
+                allow_accepted=allow_prepared_responses,
+                runtime_cache_root=cache_root,
+                allow_cache_read=allow_prepared_responses)
         except ProviderUnavailable as error:
             outcomes.append(dict(status="review_required", reason=str(error),
                                  proposal=proposal, source_member=member,

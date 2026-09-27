@@ -109,6 +109,13 @@ def test_operational_cache_miss_calls_vision_interface(tmp_path):
     assert len(calls) == 1
     assert job["provider_called"] is True and job["cache_hit"] is False
     assert adjudicated["review"]["selected_source"] == "MY THOUGHTS ARE DIFFERENT"
+    warm_job, warm_adjudicated = _cached_or_fresh_ocr(
+        page_rgb=page, crop=page[10:60, 10:80], bbox=[10, 10, 80, 60],
+        member="042.webp", page_id="page-042", source_sha256="a"*64,
+        cache_root=tmp_path, run_id="warm-run", origin_execution_id="warm-execution",
+        ocr_invocation=lambda **_kwargs: pytest.fail("warm OCR called provider"))
+    assert warm_job["provider_called"] is False and warm_job["cache_hit"] is True
+    assert warm_adjudicated == adjudicated
 
 
 def _translation_result(page, target):
@@ -141,11 +148,20 @@ def test_operational_translation_miss_calls_complete_unit_provider(tmp_path):
     binding = _accepted_or_fresh_translation(control_root=tmp_path,
         control={"complete_balloon_reconciliations": []}, member="039.webp",
         source_sha256="b"*64, source="NEW SOURCE", owners=["owner-a", "owner-b"],
-        page_id="page-039", context={}, glossary={}, translation_invocation=attempt)
+        page_id="page-039", context={}, glossary={}, translation_invocation=attempt,
+        runtime_cache_root=tmp_path)
     assert len(calls) == 1
     assert binding["target"] == "ALVO NOVO"
     assert binding["group_path"] is None
     assert binding["provenance"] == "fresh_complete_unit_translation"
+    warm = _accepted_or_fresh_translation(control_root=tmp_path,
+        control={"complete_balloon_reconciliations": []}, member="039.webp",
+        source_sha256="b"*64, source="NEW SOURCE", owners=["owner-a", "owner-b"],
+        page_id="page-039", context={}, glossary={},
+        translation_invocation=lambda *_args, **_kwargs:
+            pytest.fail("warm translation called provider"), runtime_cache_root=tmp_path)
+    assert warm["provider_called"] is False and warm["cache_hit"] is True
+    assert warm["target"] == binding["target"]
 
 
 def test_cold_translation_ignores_prepared_binding(tmp_path):
