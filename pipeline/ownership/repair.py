@@ -578,6 +578,8 @@ def run_repair_ladder(
 ) -> RepairLadderResult:
     """Run the bounded R0-R3 ladder from the immutable original pixels."""
 
+    from inpainter.owner_mask import UnsafeOwnerMaskError
+
     selected_policy = policy or RepairBudgetPolicy.default()
     maximum = _strategy(max_strategy)
     start = _strategy(start_strategy)
@@ -609,14 +611,61 @@ def run_repair_ladder(
             variant = current_variant
             if transient_count:
                 variant = f"{variant}_transient_{transient_count + 1}"
-            runtime = build_repair_attempt(
-                case,
-                request=request,
-                policy=selected_policy,
-                strategy=selected,
-                variant=variant,
-                previous=previous,
-            )
+            try:
+                runtime = build_repair_attempt(
+                    case,
+                    request=request,
+                    policy=selected_policy,
+                    strategy=selected,
+                    variant=variant,
+                    previous=previous,
+                )
+            except UnsafeOwnerMaskError as exc:
+                transient_count = 0
+                reason = f"{type(exc).__name__}:{str(exc)}"
+                evidence_ids = (
+                    request.request_id,
+                    canonical_json_sha256(
+                        {
+                            "strategy": selected.value,
+                            "variant": variant,
+                            "reason": reason,
+                        }
+                    ),
+                )
+                if selected is RepairStrategy.R3_CONTAINER_INTERIOR_REBUILD:
+                    next_variant = {
+                        "contextual": "deterministic_interior_fill",
+                        "deterministic_interior_fill": (
+                            "deterministic_support_local_fill"
+                        ),
+                    }.get(current_variant)
+                    request = _request_for(
+                        case,
+                        failed_stage="mask_planning",
+                        reason=reason,
+                        evidence_ids=evidence_ids,
+                        next_strategy="R3",
+                    )
+                    requests.append(request)
+                    if next_variant is not None:
+                        current_variant = next_variant
+                        continue
+                    break
+                next_strategy = {
+                    RepairStrategy.R0_PRECISE_GLYPH: "R1",
+                    RepairStrategy.R1_EXPANDED_SUPPORT: "R2",
+                    RepairStrategy.R2_TEXT_REGION_REBUILD: "R3",
+                }[selected]
+                request = _request_for(
+                    case,
+                    failed_stage="mask_planning",
+                    reason=reason,
+                    evidence_ids=evidence_ids,
+                    next_strategy=next_strategy,
+                )
+                requests.append(request)
+                break
             controller.record(runtime.record)
             if case.attempt_executor is None:
                 feedback = RepairExecutionFeedback.visual_residual(

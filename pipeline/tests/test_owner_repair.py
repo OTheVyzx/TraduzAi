@@ -409,6 +409,43 @@ def test_r3_support_local_fill_handles_source_outside_uncertain_container():
     assert not np.any((attempt.cleanup_mask > 0) & (case.container_border_mask > 0))
 
 
+def test_ladder_records_unsafe_mask_planning_and_reaches_support_local_fill():
+    case = _case()
+    interior = np.array(case.container_interior_mask, copy=True)
+    interior[case.source_support_mask > 0] = 0
+
+    def executor(*, strategy, variant, original_rgb, cleanup_mask, **_kwargs):
+        assert strategy == "R3"
+        assert variant == "deterministic_support_local_fill"
+        final = np.array(original_rgb, copy=True)
+        final[cleanup_mask > 0] = 245
+        return RepairExecutionFeedback.committed(final)
+
+    uncertain = OwnerRepairCase.build(
+        original_rgb=case.original_rgb,
+        translation=case.translation,
+        execution_id=case.execution_id,
+        source_support_mask=case.source_support_mask,
+        container_interior_mask=interior,
+        container_border_mask=case.container_border_mask,
+        protected_art_mask=case.protected_art_mask,
+        positive_residual_mask=case.positive_residual_mask,
+        attempt_executor=executor,
+    )
+
+    result = run_repair_ladder(uncertain, scheduler=lambda _seconds: None)
+
+    assert result.status == "committed"
+    assert [attempt.variant for attempt in result.attempts] == [
+        "deterministic_support_local_fill"
+    ]
+    assert any(
+        request.failed_stage == "mask_planning"
+        and "protected geometry excludes source support" in request.reason
+        for request in result.repair_requests
+    )
+
+
 def test_r3_deterministic_rebuild_preserves_every_pixel_outside_safe_interior():
     case = _case()
     attempt = build_repair_attempt(
