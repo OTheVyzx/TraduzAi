@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::commands::project_schema;
 
@@ -21,6 +24,19 @@ pub struct ReviewDecisionInput {
     pub idempotency_key: String,
     #[serde(default)]
     pub preference_response: Option<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProjectEventInput {
+    pub job_id: String,
+    pub project_id: String,
+    pub expected_revision: u64,
+    pub project_revision: u64,
+    pub sequence: u64,
+    pub stage: String,
+    pub status: String,
+    pub reason_code: String,
+    pub payload: Value,
 }
 
 fn resolve_project_file(raw_path: &str) -> Result<PathBuf, String> {
@@ -394,17 +410,44 @@ fn owner_status(decision: &ReviewDecisionInput) -> &'static str {
     }
 }
 
-fn find_receipt(project: &Value, idempotency_key: &str) -> Option<Value> {
+fn find_receipt(project: &Value, operation: &str, idempotency_key: &str) -> Option<Value> {
     project
         .pointer("/integration_v1/idempotency_receipts")
         .and_then(Value::as_array)
         .and_then(|receipts| {
             receipts.iter().find(|receipt| {
-                receipt.get("idempotency_key").and_then(Value::as_str) == Some(idempotency_key)
+                receipt.get("operation").and_then(Value::as_str) == Some(operation)
+                    && receipt.get("idempotency_key").and_then(Value::as_str)
+                        == Some(idempotency_key)
             })
         })
         .and_then(|receipt| receipt.get("result"))
         .cloned()
+}
+
+fn append_receipt(
+    project: &mut Value,
+    operation: &str,
+    idempotency_key: &str,
+    result: &Value,
+) -> Result<(), String> {
+    project
+        .as_object_mut()
+        .ok_or_else(|| "project.json precisa ser um objeto".to_string())?
+        .entry("integration_v1")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "integration_v1 precisa ser um objeto".to_string())?
+        .entry("idempotency_receipts")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| "integration_v1.idempotency_receipts precisa ser uma lista".to_string())?
+        .push(json!({
+            "operation": operation,
+            "idempotency_key": idempotency_key,
+            "result": result,
+        }));
+    Ok(())
 }
 
 fn append_review_decision(
@@ -454,16 +497,532 @@ fn append_review_decision(
         .get_mut("integration_v1")
         .and_then(Value::as_object_mut)
         .expect("integration_v1 was initialized above");
-    integration
-        .entry("idempotency_receipts")
+    let _ = integration;
+    append_receipt(
+        project,
+        "submit_review_decision",
+        &decision.idempotency_key,
+        &result,
+    )?;
+    Ok(result)
+}
+
+fn project_identity(project: &Value, project_path: &str) -> Result<String, String> {
+    if let Some(value) = project
+        .get("project_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(value.to_string());
+    }
+    let digest = canonical_json_sha256(&Value::String(project_path.to_string()))?;
+    Ok(format!("project:{}", &digest[..32]))
+}
+
+fn project_unit_ids(project: &Value) -> Vec<String> {
+    let mut result = Vec::new();
+    for (page_index, page) in project
+        .get("paginas")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let before = result.len();
+        for layer in page
+            .get("text_layers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(identity) = layer
+                .get("owner_id")
+                .or_else(|| layer.get("id"))
+                .and_then(Value::as_str)
+                .filter(|identity| !identity.trim().is_empty())
+            {
+                if !result.iter().any(|existing| existing == identity) {
+                    result.push(identity.to_string());
+                }
+            }
+        }
+        if result.len() == before {
+            let number = page
+                .get("numero")
+                .and_then(Value::as_u64)
+                .unwrap_or(page_index as u64 + 1);
+            result.push(format!("page:{number:04}"));
+        }
+    }
+    result
+}
+
+fn append_project_event(project: &mut Value, event: Value) -> Result<(), String> {
+    project
+        .as_object_mut()
+        .ok_or_else(|| "project.json precisa ser um objeto".to_string())?
+        .entry("integration_v1")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "integration_v1 precisa ser um objeto".to_string())?
+        .entry("project_events")
         .or_insert_with(|| json!([]))
         .as_array_mut()
-        .ok_or_else(|| "integration_v1.idempotency_receipts precisa ser uma lista".to_string())?
-        .push(json!({
-            "operation": "submit_review_decision",
-            "idempotency_key": decision.idempotency_key,
-            "result": result,
-        }));
+        .ok_or_else(|| "integration_v1.project_events precisa ser uma lista".to_string())?
+        .push(event);
+    Ok(())
+}
+
+fn start_job_in_project(
+    project: &mut Value,
+    project_path: &str,
+    chapter_id: &str,
+    expected_revision: u64,
+    idempotency_key: &str,
+) -> Result<Value, String> {
+    if let Some(result) = find_receipt(project, "start_consumer_fast", idempotency_key) {
+        return Ok(result);
+    }
+    if chapter_id.trim().is_empty() || idempotency_key.trim().is_empty() {
+        return Err("identidade do start_consumer_fast incompleta".into());
+    }
+    require_revision(project, expected_revision)?;
+    if let Some(actual) = project.get("capitulo").and_then(Value::as_u64) {
+        if chapter_id
+            .parse::<u64>()
+            .ok()
+            .is_some_and(|value| value != actual)
+        {
+            return Err(format!(
+                "capítulo solicitado {chapter_id} diverge do projeto {actual}"
+            ));
+        }
+    }
+    let project_id = project_identity(project, project_path)?;
+    let job_digest = canonical_json_sha256(&json!({
+        "project_path": project_path,
+        "chapter_id": chapter_id,
+        "idempotency_key": idempotency_key,
+    }))?;
+    let job_id = format!("consumer-fast:{}", &job_digest[..32]);
+    let next_revision = expected_revision + 1;
+    let units = project_unit_ids(project)
+        .into_iter()
+        .map(|unit_id| {
+            (
+                unit_id,
+                json!({"status": "queued", "terminal": false, "reason_code": ""}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let state = json!({
+        "schema": "traduzai.consumer-fast-job.v1",
+        "job_id": job_id,
+        "project_id": project_id,
+        "project_path": project_path,
+        "chapter_id": chapter_id,
+        "expected_revision": expected_revision,
+        "project_revision": next_revision,
+        "sequence": 1,
+        "stage": "import",
+        "status": "queued",
+        "reason_code": "job_queued",
+        "units": units,
+    });
+    project
+        .as_object_mut()
+        .ok_or_else(|| "project.json precisa ser um objeto".to_string())?
+        .entry("integration_v1")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "integration_v1 precisa ser um objeto".to_string())?
+        .entry("jobs")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "integration_v1.jobs precisa ser um objeto".to_string())?
+        .insert(job_id.clone(), state.clone());
+    project["project_revision"] = Value::from(next_revision);
+    let result = json!({
+        "job_id": job_id,
+        "project_revision": next_revision,
+        "status": "queued",
+    });
+    append_project_event(
+        project,
+        json!({
+            "event_id": format!("project-event:{}", &job_digest[..32]),
+            "job_id": result["job_id"],
+            "project_id": project_id,
+            "expected_revision": expected_revision,
+            "project_revision": next_revision,
+            "sequence": 1,
+            "stage": "import",
+            "status": "queued",
+            "reason_code": "job_queued",
+            "payload": {"chapter_id": chapter_id},
+        }),
+    )?;
+    append_receipt(project, "start_consumer_fast", idempotency_key, &result)?;
+    Ok(result)
+}
+
+fn is_terminal_job_status(status: &str) -> bool {
+    matches!(
+        status,
+        "cancelled" | "failed" | "completed" | "complete" | "complete_with_review"
+    )
+}
+
+fn control_job_in_project(
+    project: &mut Value,
+    job_id: &str,
+    action: &str,
+    terminal_unit_ids: &[String],
+    expected_revision: u64,
+    idempotency_key: &str,
+) -> Result<Value, String> {
+    let operation = format!("{action}_consumer_fast");
+    if let Some(result) = find_receipt(project, &operation, idempotency_key) {
+        return Ok(result);
+    }
+    require_revision(project, expected_revision)?;
+    if !matches!(action, "pause" | "resume" | "cancel" | "retry") {
+        return Err("ação de job não suportada".into());
+    }
+    let next_revision = expected_revision + 1;
+    let (project_id, next_sequence, status, event_stage, reason_code) = {
+        let job = project
+            .pointer_mut(&format!(
+                "/integration_v1/jobs/{}",
+                escape_json_pointer(job_id)
+            ))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| format!("job desconhecido: {job_id}"))?;
+        let current_status = job
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("failed");
+        if action != "retry" && is_terminal_job_status(current_status) {
+            return Err("job terminal não pode mudar de estado".into());
+        }
+        let (status, reason_code) = match action {
+            "pause" if matches!(current_status, "queued" | "running") => {
+                ("paused", "pause_requested")
+            }
+            "resume" if current_status == "paused" => ("queued", "resume_requested"),
+            "cancel" => ("cancelled", "job_cancelled"),
+            "retry" => ("queued", "retry_requested"),
+            "pause" => return Err("somente job em execução pode ser pausado".into()),
+            "resume" => return Err("somente job pausado pode ser retomado".into()),
+            _ => unreachable!(),
+        };
+        if action == "retry" {
+            if terminal_unit_ids.is_empty() {
+                return Err("retry exige pelo menos uma unidade terminal".into());
+            }
+            let units = job
+                .get_mut("units")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| "job sem unidades persistidas".to_string())?;
+            for unit_id in terminal_unit_ids {
+                let unit = units
+                    .get_mut(unit_id)
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| format!("unidade desconhecida: {unit_id}"))?;
+                if unit.get("terminal").and_then(Value::as_bool) != Some(true) {
+                    return Err(format!("unidade não é retentável: {unit_id}"));
+                }
+                unit.insert("status".into(), Value::String("queued".into()));
+                unit.insert("terminal".into(), Value::Bool(false));
+                unit.insert(
+                    "reason_code".into(),
+                    Value::String("retry_requested".into()),
+                );
+            }
+        } else if action == "cancel" {
+            if let Some(units) = job.get_mut("units").and_then(Value::as_object_mut) {
+                for unit in units.values_mut().filter_map(Value::as_object_mut) {
+                    if unit.get("terminal").and_then(Value::as_bool) != Some(true) {
+                        unit.insert("status".into(), Value::String("cancelled".into()));
+                        unit.insert("terminal".into(), Value::Bool(true));
+                        unit.insert("reason_code".into(), Value::String("job_cancelled".into()));
+                    }
+                }
+            }
+        }
+        let next_sequence = job.get("sequence").and_then(Value::as_u64).unwrap_or(0) + 1;
+        let project_id = job
+            .get("project_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        job.insert("status".into(), Value::String(status.into()));
+        job.insert("reason_code".into(), Value::String(reason_code.into()));
+        job.insert("project_revision".into(), Value::from(next_revision));
+        job.insert("sequence".into(), Value::from(next_sequence));
+        (
+            project_id,
+            next_sequence,
+            status.to_string(),
+            job.get("stage")
+                .and_then(Value::as_str)
+                .unwrap_or("analysis")
+                .to_string(),
+            reason_code.to_string(),
+        )
+    };
+    project["project_revision"] = Value::from(next_revision);
+    let result = json!({
+        "job_id": job_id,
+        "project_revision": next_revision,
+        "status": status,
+    });
+    let event_body = json!({
+        "job_id": job_id,
+        "project_id": project_id,
+        "expected_revision": expected_revision,
+        "project_revision": next_revision,
+        "sequence": next_sequence,
+        "stage": event_stage,
+        "status": result["status"],
+        "reason_code": reason_code,
+    });
+    let event_id = format!(
+        "project-event:{}",
+        &canonical_json_sha256(&event_body)?[..32]
+    );
+    let payload = json!({"terminal_unit_ids": terminal_unit_ids});
+    let mut persisted_event = event_body;
+    persisted_event["event_id"] = Value::String(event_id);
+    persisted_event["payload_sha256"] = Value::String(canonical_json_sha256(&payload)?);
+    persisted_event["payload"] = payload;
+    append_project_event(project, persisted_event)?;
+    append_receipt(project, &operation, idempotency_key, &result)?;
+    Ok(result)
+}
+
+fn escape_json_pointer(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
+}
+
+fn persist_event_in_project(
+    project: &mut Value,
+    event: &ProjectEventInput,
+    expected_revision: u64,
+    idempotency_key: &str,
+) -> Result<Value, String> {
+    if let Some(result) = find_receipt(project, "persist_project_event", idempotency_key) {
+        return Ok(result);
+    }
+    require_revision(project, expected_revision)?;
+    if event.expected_revision != expected_revision
+        || event.project_revision != expected_revision + 1
+        || event.job_id.trim().is_empty()
+        || event.project_id.trim().is_empty()
+        || event.stage.trim().is_empty()
+        || event.reason_code.trim().is_empty()
+        || !matches!(
+            event.status.as_str(),
+            "queued"
+                | "running"
+                | "pausing"
+                | "paused"
+                | "cancelling"
+                | "cancelled"
+                | "failed"
+                | "blocked"
+                | "awaiting_review"
+                | "completed"
+        )
+    {
+        return Err("ProjectEvent possui identidade, revisão ou estado inválido".into());
+    }
+    let last_sequence = project
+        .pointer(&format!(
+            "/integration_v1/jobs/{}/sequence",
+            escape_json_pointer(&event.job_id)
+        ))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("job desconhecido: {}", event.job_id))?;
+    if event.sequence <= last_sequence {
+        return Err(format!(
+            "ProjectEvent sequence não é monotônica: {} <= {last_sequence}",
+            event.sequence
+        ));
+    }
+    let job_project_id = project
+        .pointer(&format!(
+            "/integration_v1/jobs/{}/project_id",
+            escape_json_pointer(&event.job_id)
+        ))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if job_project_id != event.project_id {
+        return Err("ProjectEvent pertence a outro projeto".into());
+    }
+    let current_status = project
+        .pointer(&format!(
+            "/integration_v1/jobs/{}/status",
+            escape_json_pointer(&event.job_id)
+        ))
+        .and_then(Value::as_str)
+        .unwrap_or("failed");
+    if is_terminal_job_status(current_status) {
+        return Err("job terminal não aceita novos eventos".into());
+    }
+    let payload_sha256 = canonical_json_sha256(&event.payload)?;
+    let body = json!({
+        "job_id": event.job_id,
+        "project_id": event.project_id,
+        "expected_revision": event.expected_revision,
+        "project_revision": event.project_revision,
+        "sequence": event.sequence,
+        "stage": event.stage,
+        "status": event.status,
+        "reason_code": event.reason_code,
+        "payload_sha256": payload_sha256,
+    });
+    let event_id = format!("project-event:{}", &canonical_json_sha256(&body)?[..32]);
+    let mut persisted = body;
+    persisted["event_id"] = Value::String(event_id.clone());
+    persisted["payload"] = event.payload.clone();
+    let job = project
+        .pointer_mut(&format!(
+            "/integration_v1/jobs/{}",
+            escape_json_pointer(&event.job_id)
+        ))
+        .and_then(Value::as_object_mut)
+        .expect("job existence was validated above");
+    job.insert(
+        "project_revision".into(),
+        Value::from(event.project_revision),
+    );
+    job.insert("sequence".into(), Value::from(event.sequence));
+    job.insert("stage".into(), Value::String(event.stage.clone()));
+    job.insert("status".into(), Value::String(event.status.clone()));
+    job.insert(
+        "reason_code".into(),
+        Value::String(event.reason_code.clone()),
+    );
+    project["project_revision"] = Value::from(event.project_revision);
+    append_project_event(project, persisted)?;
+    let result = json!({
+        "event_id": event_id,
+        "project_revision": event.project_revision,
+    });
+    append_receipt(project, "persist_project_event", idempotency_key, &result)?;
+    Ok(result)
+}
+
+fn job_registry_file(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("falha ao localizar dados locais: {error}"))?
+        .join("integration_v1")
+        .join("job_registry.json"))
+}
+
+fn load_job_registry(path: &Path) -> Result<HashMap<String, String>, String> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let bytes =
+        fs::read(path).map_err(|error| format!("falha ao ler registro de jobs: {error}"))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("registro de jobs inválido: {error}"))
+}
+
+fn save_job_registry(path: &Path, registry: &HashMap<String, String>) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "registro de jobs sem diretório pai".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("falha ao criar diretório do registro de jobs: {error}"))?;
+    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec_pretty(registry)
+        .map_err(|error| format!("falha ao serializar registro de jobs: {error}"))?;
+    fs::write(&temporary, bytes)
+        .map_err(|error| format!("falha ao gravar registro de jobs: {error}"))?;
+    if path.exists() {
+        fs::remove_file(path)
+            .map_err(|error| format!("falha ao substituir registro de jobs: {error}"))?;
+    }
+    fs::rename(&temporary, path)
+        .map_err(|error| format!("falha ao publicar registro de jobs: {error}"))
+}
+
+fn register_job(app: &AppHandle, job_id: &str, project_file: &Path) -> Result<(), String> {
+    let registry_file = job_registry_file(app)?;
+    let mut registry = load_job_registry(&registry_file)?;
+    registry.insert(
+        job_id.to_string(),
+        project_file.to_string_lossy().into_owned(),
+    );
+    save_job_registry(&registry_file, &registry)
+}
+
+fn resolve_registered_job(app: &AppHandle, job_id: &str) -> Result<PathBuf, String> {
+    let registry = load_job_registry(&job_registry_file(app)?)?;
+    let path = registry
+        .get(job_id)
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("job desconhecido no registro durável: {job_id}"))?;
+    let project_file = resolve_project_file(&path.to_string_lossy())?;
+    let project = project_schema::load_project_value(&project_file)?;
+    if project
+        .pointer(&format!(
+            "/integration_v1/jobs/{}",
+            escape_json_pointer(job_id)
+        ))
+        .is_none()
+    {
+        return Err(format!("registro de job sem estado no projeto: {job_id}"));
+    }
+    Ok(project_file)
+}
+
+fn latest_job_event(project_file: &Path, job_id: &str) -> Result<Option<Value>, String> {
+    let project = project_schema::load_project_value(project_file)?;
+    Ok(project
+        .pointer("/integration_v1/project_events")
+        .and_then(Value::as_array)
+        .and_then(|events| {
+            events
+                .iter()
+                .rev()
+                .find(|event| event["job_id"].as_str() == Some(job_id))
+        })
+        .cloned())
+}
+
+fn emit_latest_job_event(app: &AppHandle, project_file: &Path, job_id: &str) -> Result<(), String> {
+    if let Some(event) = latest_job_event(project_file, job_id)? {
+        app.emit("consumer-fast-project-event", event)
+            .map_err(|error| format!("falha ao emitir ProjectEvent: {error}"))?;
+    }
+    Ok(())
+}
+
+fn control_registered_job(
+    app: &AppHandle,
+    job_id: &str,
+    action: &str,
+    terminal_unit_ids: &[String],
+    expected_revision: u64,
+    idempotency_key: &str,
+) -> Result<Value, String> {
+    let project_file = resolve_registered_job(app, job_id)?;
+    let result = project_schema::edit_project_value(&project_file, |project| {
+        control_job_in_project(
+            project,
+            job_id,
+            action,
+            terminal_unit_ids,
+            expected_revision,
+            idempotency_key,
+        )
+    })?;
+    emit_latest_job_event(app, &project_file, job_id)?;
     Ok(result)
 }
 
@@ -540,6 +1099,638 @@ fn export_decision(project: &Value) -> Value {
     })
 }
 
+fn record_final_export_in_project(
+    project: &mut Value,
+    expected_revision: u64,
+    idempotency_key: &str,
+    destination: &str,
+    artifact_sha256: &str,
+    artifact_size: u64,
+) -> Result<Value, String> {
+    if let Some(result) = find_receipt(project, "export_final", idempotency_key) {
+        return Ok(result);
+    }
+    require_revision(project, expected_revision)?;
+    if export_decision(project)["allowed"].as_bool() != Some(true) {
+        return Err("exportação final bloqueada por pendências reais do projeto".into());
+    }
+    if !is_lower_sha256(artifact_sha256) || destination.trim().is_empty() {
+        return Err("artefato final exige destino e SHA-256 válidos".into());
+    }
+    let next_revision = expected_revision + 1;
+    let export_manifest = json!({
+        "schema": "traduzai.final-export-manifest.v1",
+        "destination": destination,
+        "artifact_sha256": artifact_sha256,
+        "artifact_size": artifact_size,
+        "source_project_revision": expected_revision,
+    });
+    let publication_receipt = json!({
+        "schema": "traduzai.publication-receipt.v1",
+        "export_manifest_sha256": canonical_json_sha256(&export_manifest)?,
+        "artifact_sha256": artifact_sha256,
+        "published_at": chrono::Utc::now().to_rfc3339(),
+        "gate": export_decision(project),
+        "human_review_claimed": false,
+    });
+    let result = json!({
+        "project_revision": next_revision,
+        "export_manifest": export_manifest,
+        "publication_receipt": publication_receipt,
+    });
+    project
+        .as_object_mut()
+        .ok_or_else(|| "project.json precisa ser um objeto".to_string())?
+        .entry("integration_v1")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "integration_v1 precisa ser um objeto".to_string())?
+        .entry("final_exports")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| "integration_v1.final_exports precisa ser uma lista".to_string())?
+        .push(result.clone());
+    project["project_revision"] = Value::from(next_revision);
+    append_receipt(project, "export_final", idempotency_key, &result)?;
+    Ok(result)
+}
+
+fn file_sha256(path: &Path) -> Result<(String, u64), String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("falha ao abrir artefato {}: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("falha ao ler artefato {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    Ok((format!("{:x}", hasher.finalize()), size))
+}
+
+fn write_diagnostic_archive(destination: &Path, manifest: &Value) -> Result<(), String> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("falha ao preparar diagnóstico: {error}"))?;
+    }
+    let file = fs::File::create(destination)
+        .map_err(|error| format!("falha ao criar diagnóstico: {error}"))?;
+    let mut archive = zip::ZipWriter::new(file);
+    archive
+        .start_file(
+            "diagnostic_manifest.json",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated),
+        )
+        .map_err(|error| format!("falha ao iniciar diagnóstico: {error}"))?;
+    archive
+        .write_all(
+            &serde_json::to_vec_pretty(manifest)
+                .map_err(|error| format!("falha ao serializar diagnóstico: {error}"))?,
+        )
+        .map_err(|error| format!("falha ao gravar diagnóstico: {error}"))?;
+    archive
+        .finish()
+        .map_err(|error| format!("falha ao finalizar diagnóstico: {error}"))?;
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct PreparedOwnerLayout {
+    page_index: usize,
+    layer_index: usize,
+    page: Value,
+    target_text: String,
+    request_sha256: String,
+    page_sha256: String,
+    invalidated_stages: [&'static str; 5],
+}
+
+fn merge_json_object(target: &mut Value, patch: &Value, field: &str) -> Result<(), String> {
+    let patch = patch
+        .as_object()
+        .ok_or_else(|| format!("{field} precisa ser um objeto"))?;
+    let target = target
+        .as_object_mut()
+        .ok_or_else(|| format!("{field} persistido precisa ser um objeto"))?;
+    for (key, value) in patch {
+        target.insert(key.clone(), value.clone());
+    }
+    Ok(())
+}
+
+fn require_layout_bbox(value: &Value) -> Result<(), String> {
+    let values = value
+        .as_array()
+        .filter(|values| values.len() == 4)
+        .ok_or_else(|| "layout_bbox exige quatro coordenadas".to_string())?;
+    let coords = values
+        .iter()
+        .map(Value::as_i64)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "layout_bbox exige coordenadas inteiras".to_string())?;
+    if coords[2] <= coords[0] || coords[3] <= coords[1] {
+        return Err("layout_bbox precisa ter área positiva".into());
+    }
+    Ok(())
+}
+
+fn prepare_owner_layout(
+    project: &Value,
+    owner_id: &str,
+    layout_request: &Value,
+) -> Result<PreparedOwnerLayout, String> {
+    if owner_id.trim().is_empty() {
+        return Err("owner_id é obrigatório".into());
+    }
+    let request = layout_request
+        .as_object()
+        .ok_or_else(|| "layout_request precisa ser um objeto".to_string())?;
+    if request
+        .get("owner_id")
+        .and_then(Value::as_str)
+        .is_some_and(|identity| identity != owner_id)
+    {
+        return Err("layout_request pertence a outro owner".into());
+    }
+    let pages = project
+        .get("paginas")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "projeto sem páginas".to_string())?;
+    let mut found = Vec::new();
+    for (page_index, page) in pages.iter().enumerate() {
+        for (layer_index, layer) in page
+            .get("text_layers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let identity = layer
+                .get("owner_id")
+                .or_else(|| layer.get("id"))
+                .and_then(Value::as_str);
+            if identity == Some(owner_id) {
+                found.push((page_index, layer_index));
+            }
+        }
+    }
+    if found.len() != 1 {
+        return Err(format!(
+            "owner_id precisa identificar exatamente uma camada, encontrou {}",
+            found.len()
+        ));
+    }
+    let (page_index, layer_index) = found[0];
+    let mut page = pages[page_index].clone();
+    let layer = page
+        .get_mut("text_layers")
+        .and_then(Value::as_array_mut)
+        .and_then(|layers| layers.get_mut(layer_index))
+        .ok_or_else(|| "camada do owner desapareceu durante preparação".to_string())?;
+    let layer = layer
+        .as_object_mut()
+        .ok_or_else(|| "camada do owner precisa ser um objeto".to_string())?;
+    let target_text = if let Some(lines) = request.get("line_breaks") {
+        lines
+            .as_array()
+            .filter(|lines| !lines.is_empty())
+            .ok_or_else(|| "line_breaks precisa ser uma lista não vazia".to_string())?
+            .iter()
+            .map(|line| {
+                line.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "line_breaks exige texto".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n")
+    } else {
+        request
+            .get("text")
+            .or_else(|| request.get("target"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                layer
+                    .get("translated")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            })
+    };
+    if target_text.trim().is_empty() {
+        return Err("retypeset exige texto de destino não vazio".into());
+    }
+    layer.insert("translated".into(), Value::String(target_text.clone()));
+    if let Some(bbox) = request.get("layout_bbox") {
+        require_layout_bbox(bbox)?;
+        layer.insert("layout_bbox".into(), bbox.clone());
+    }
+    if let Some(style_patch) = request.get("style") {
+        let style = layer.entry("style").or_insert_with(|| json!({}));
+        merge_json_object(style, style_patch, "style")?;
+    }
+    if let Some(font_size) = request
+        .get("font_size_px")
+        .or_else(|| request.get("font_size"))
+    {
+        let value = font_size
+            .as_u64()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "font_size precisa ser positivo".to_string())?;
+        layer.entry("style").or_insert_with(|| json!({}))["tamanho"] = Value::from(value);
+    }
+    layer.insert("style_origin".into(), Value::String("editor".into()));
+    layer.insert(
+        "integration_v1_layout_request".into(),
+        layout_request.clone(),
+    );
+    let request_sha256 = canonical_json_sha256(layout_request)?;
+    let page_sha256 = canonical_json_sha256(&page)?;
+    Ok(PreparedOwnerLayout {
+        page_index,
+        layer_index,
+        page,
+        target_text,
+        request_sha256,
+        page_sha256,
+        invalidated_stages: [
+            "layout",
+            "rasterize",
+            "review",
+            "persist",
+            "export_decision",
+        ],
+    })
+}
+
+fn project_relative_artifact(project_root: &Path, artifact: &Path) -> Result<String, String> {
+    let root = project_root
+        .canonicalize()
+        .map_err(|error| format!("falha ao resolver raiz do projeto: {error}"))?;
+    let artifact = artifact
+        .canonicalize()
+        .map_err(|error| format!("falha ao resolver artefato raster: {error}"))?;
+    let relative = artifact
+        .strip_prefix(&root)
+        .map_err(|_| "artefato raster escapou da raiz do projeto".to_string())?;
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn owner_source_path(project_root: &Path, page: &Value) -> Result<PathBuf, String> {
+    let raw = page
+        .pointer("/image_layers/base/path")
+        .or_else(|| page.get("arquivo_original"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "owner sem imagem-fonte persistida".to_string())?;
+    let candidate = project_root.join(raw);
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|error| format!("falha ao resolver raiz do projeto: {error}"))?;
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|error| format!("falha ao resolver imagem-fonte: {error}"))?;
+    if !canonical.starts_with(canonical_root) {
+        return Err("imagem-fonte escapou da raiz do projeto".into());
+    }
+    Ok(canonical)
+}
+
+fn write_recipe(
+    project_root: &Path,
+    owner_id: &str,
+    prepared: &PreparedOwnerLayout,
+    source_sha256: &str,
+    output_sha256: &str,
+    output_relative_path: &str,
+    renderer_backend: &str,
+) -> Result<(Value, String), String> {
+    let runtime_sha256 = canonical_json_sha256(&json!({
+        "runtime_id": "tauri-render-preview-page-v1",
+        "renderer_backend": renderer_backend,
+    }))?;
+    let owner_digest = canonical_json_sha256(&Value::String(owner_id.to_string()))?;
+    let relative_path = format!(
+        "recipes/page_{:04}/{}-{}-{}.json",
+        prepared.page_index + 1,
+        &owner_digest[..16],
+        &prepared.request_sha256[..16],
+        &output_sha256[..16]
+    );
+    let body = json!({
+        "output_sha256": output_sha256,
+        "relative_path": relative_path,
+        "runtime_id": "tauri-render-preview-page-v1",
+        "runtime_sha256": runtime_sha256,
+        "source_sha256": source_sha256,
+        "dependency_hashes": {
+            "layout_plan": prepared.page_sha256,
+            "layout_request": prepared.request_sha256,
+        },
+        "owner_id": owner_id,
+        "target_sha256": format!("{:x}", Sha256::digest(prepared.target_text.as_bytes())),
+        "invalidated_stages": prepared.invalidated_stages,
+        "raster_artifact_ref": {
+            "relative_path": output_relative_path,
+            "sha256": output_sha256,
+        },
+    });
+    let recipe_sha256 = canonical_json_sha256(&body)?;
+    let mut recipe = body;
+    recipe["recipe_sha256"] = Value::String(recipe_sha256.clone());
+    let recipe_path = project_root.join(&relative_path);
+    if let Some(parent) = recipe_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("falha ao criar diretório de receitas: {error}"))?;
+    }
+    if !recipe_path.exists() {
+        fs::write(
+            &recipe_path,
+            serde_json::to_vec_pretty(&recipe)
+                .map_err(|error| format!("falha ao serializar receita: {error}"))?,
+        )
+        .map_err(|error| format!("falha ao persistir receita: {error}"))?;
+    }
+    Ok((recipe, relative_path))
+}
+
+fn persist_retypeset_in_project(
+    project: &mut Value,
+    owner_id: &str,
+    layout_request: &Value,
+    expected_revision: u64,
+    idempotency_key: &str,
+    rendered_page_sha256: &str,
+    raster_relative_path: &str,
+    output_sha256: &str,
+    recipe: &Value,
+    recipe_relative_path: &str,
+) -> Result<Value, String> {
+    if let Some(result) = find_receipt(project, "retypeset_owner", idempotency_key) {
+        return Ok(result);
+    }
+    require_revision(project, expected_revision)?;
+    let mut prepared = prepare_owner_layout(project, owner_id, layout_request)?;
+    if prepared.page_sha256 != rendered_page_sha256 {
+        return Err("layout preparado diverge da página efetivamente rasterizada".into());
+    }
+    prepared.page["text_layers"][prepared.layer_index]["render_preview_path"] =
+        Value::String(raster_relative_path.to_string());
+    let pages = project
+        .get_mut("paginas")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "projeto sem páginas persistíveis".to_string())?;
+    pages[prepared.page_index] = prepared.page;
+    let next_revision = expected_revision + 1;
+    let recipe_sha256 = require_sha256_field(&recipe["recipe_sha256"], "recipe_sha256")?;
+    if recipe["relative_path"].as_str() != Some(recipe_relative_path)
+        || recipe["output_sha256"].as_str() != Some(output_sha256)
+    {
+        return Err("receita diverge do artefato raster".into());
+    }
+    let recipe_receipt = json!({
+        "recipe_sha256": recipe_sha256,
+        "output_sha256": output_sha256,
+        "relative_path": recipe_relative_path,
+        "runtime_id": recipe["runtime_id"],
+    });
+    let raster_artifact_ref = json!({
+        "relative_path": raster_relative_path,
+        "sha256": output_sha256,
+    });
+    let result = json!({
+        "project_revision": next_revision,
+        "recipe_receipt": recipe_receipt,
+        "raster_artifact_ref": raster_artifact_ref,
+    });
+    let root = project
+        .as_object_mut()
+        .ok_or_else(|| "project.json precisa ser um objeto".to_string())?;
+    root.insert("project_revision".into(), Value::from(next_revision));
+    root.insert("verified".into(), Value::Bool(false));
+    root.insert(
+        "output_review_state".into(),
+        Value::String("review_required".into()),
+    );
+    let integration = root
+        .entry("integration_v1")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "integration_v1 precisa ser um objeto".to_string())?;
+    integration
+        .entry("recipe_receipts")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| "integration_v1.recipe_receipts precisa ser uma lista".to_string())?
+        .push(json!({
+            "owner_id": owner_id,
+            "project_revision": next_revision,
+            "recipe": recipe,
+            "receipt": result["recipe_receipt"],
+            "raster_artifact_ref": result["raster_artifact_ref"],
+        }));
+    let qa = root
+        .entry("qa")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "qa precisa ser um objeto".to_string())?;
+    let gate = qa
+        .entry("export_gate")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "qa.export_gate precisa ser um objeto".to_string())?;
+    gate.insert("status".into(), Value::String("BLOCK".into()));
+    gate.insert("allowed".into(), Value::Bool(false));
+    gate.insert("needs_review".into(), Value::Bool(true));
+    append_receipt(project, "retypeset_owner", idempotency_key, &result)?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn start_consumer_fast(
+    app: AppHandle,
+    project_path: String,
+    chapter_id: String,
+    expected_revision: u64,
+    idempotency_key: String,
+) -> Result<Value, String> {
+    let project_file = resolve_project_file(&project_path)?;
+    let canonical_project_file = project_file
+        .canonicalize()
+        .map_err(|error| format!("falha ao resolver project.json: {error}"))?;
+    let canonical_path = canonical_project_file.to_string_lossy().into_owned();
+    let result = project_schema::edit_project_value(&canonical_project_file, |project| {
+        start_job_in_project(
+            project,
+            &canonical_path,
+            &chapter_id,
+            expected_revision,
+            &idempotency_key,
+        )
+    })?;
+    let job_id = result["job_id"]
+        .as_str()
+        .ok_or_else(|| "start_consumer_fast não produziu job_id".to_string())?;
+    register_job(&app, job_id, &canonical_project_file)?;
+    emit_latest_job_event(&app, &canonical_project_file, job_id)?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn cancel_consumer_fast(
+    app: AppHandle,
+    job_id: String,
+    expected_revision: u64,
+    idempotency_key: String,
+) -> Result<Value, String> {
+    control_registered_job(
+        &app,
+        &job_id,
+        "cancel",
+        &[],
+        expected_revision,
+        &idempotency_key,
+    )
+}
+
+#[tauri::command]
+pub fn pause_consumer_fast(
+    app: AppHandle,
+    job_id: String,
+    expected_revision: u64,
+    idempotency_key: String,
+) -> Result<Value, String> {
+    control_registered_job(
+        &app,
+        &job_id,
+        "pause",
+        &[],
+        expected_revision,
+        &idempotency_key,
+    )
+}
+
+#[tauri::command]
+pub fn resume_consumer_fast(
+    app: AppHandle,
+    job_id: String,
+    expected_revision: u64,
+    idempotency_key: String,
+) -> Result<Value, String> {
+    control_registered_job(
+        &app,
+        &job_id,
+        "resume",
+        &[],
+        expected_revision,
+        &idempotency_key,
+    )
+}
+
+#[tauri::command]
+pub fn retry_consumer_fast(
+    app: AppHandle,
+    job_id: String,
+    terminal_unit_ids: Vec<String>,
+    expected_revision: u64,
+    idempotency_key: String,
+) -> Result<Value, String> {
+    control_registered_job(
+        &app,
+        &job_id,
+        "retry",
+        &terminal_unit_ids,
+        expected_revision,
+        &idempotency_key,
+    )
+}
+
+#[tauri::command]
+pub fn persist_project_event(
+    app: AppHandle,
+    event: ProjectEventInput,
+    expected_revision: u64,
+    idempotency_key: String,
+) -> Result<Value, String> {
+    let project_file = resolve_registered_job(&app, &event.job_id)?;
+    let result = project_schema::edit_project_value(&project_file, |project| {
+        persist_event_in_project(project, &event, expected_revision, &idempotency_key)
+    })?;
+    emit_latest_job_event(&app, &project_file, &event.job_id)?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn retypeset_owner(
+    app: AppHandle,
+    project_path: String,
+    owner_id: String,
+    layout_request: Value,
+    expected_revision: u64,
+    idempotency_key: String,
+) -> Result<Value, String> {
+    let project_file = resolve_project_file(&project_path)?;
+    let project = project_schema::load_project_value(&project_file)?;
+    if let Some(result) = find_receipt(&project, "retypeset_owner", &idempotency_key) {
+        return Ok(result);
+    }
+    require_revision(&project, expected_revision)?;
+    let prepared = prepare_owner_layout(&project, &owner_id, &layout_request)?;
+    let project_root = project_file
+        .parent()
+        .ok_or_else(|| "project.json sem diretório pai".to_string())?;
+    let source_path = owner_source_path(project_root, &prepared.page)?;
+    let (source_sha256, _) = file_sha256(&source_path)?;
+    let rendered = crate::commands::pipeline::render_preview_page(
+        app,
+        crate::commands::pipeline::RenderPreviewConfig {
+            project_path: project_file.to_string_lossy().into_owned(),
+            page_index: prepared.page_index as u32,
+            page: prepared.page.clone(),
+            fingerprint: prepared.page_sha256.clone(),
+        },
+    )
+    .await?;
+    let raw_output = PathBuf::from(&rendered.output_path);
+    let output_path = if raw_output.is_absolute() {
+        raw_output
+    } else {
+        project_root.join(raw_output)
+    };
+    let (output_sha256, _) = file_sha256(&output_path)?;
+    let raster_relative_path = project_relative_artifact(project_root, &output_path)?;
+    let (recipe, recipe_relative_path) = write_recipe(
+        project_root,
+        &owner_id,
+        &prepared,
+        &source_sha256,
+        &output_sha256,
+        &raster_relative_path,
+        &rendered.renderer_backend,
+    )?;
+    project_schema::edit_project_value(&project_file, |project| {
+        persist_retypeset_in_project(
+            project,
+            &owner_id,
+            &layout_request,
+            expected_revision,
+            &idempotency_key,
+            &prepared.page_sha256,
+            &raster_relative_path,
+            &output_sha256,
+            &recipe,
+            &recipe_relative_path,
+        )
+    })
+}
+
 #[tauri::command]
 pub fn submit_review_decision(
     project_path: String,
@@ -554,7 +1745,7 @@ pub fn submit_review_decision(
     }
     let project_file = resolve_project_file(&project_path)?;
     project_schema::edit_project_value(&project_file, |project| {
-        if let Some(result) = find_receipt(project, &idempotency_key) {
+        if let Some(result) = find_receipt(project, "submit_review_decision", &idempotency_key) {
             return Ok(result);
         }
         require_revision(project, expected_revision)?;
@@ -568,6 +1759,98 @@ pub fn decide_export(project_path: String, expected_revision: u64) -> Result<Val
     let project = project_schema::load_project_value(&project_file)?;
     require_revision(&project, expected_revision)?;
     Ok(json!({"export_decision": export_decision(&project)}))
+}
+
+#[tauri::command]
+pub async fn export_final(
+    project_path: String,
+    destination: String,
+    expected_revision: u64,
+    idempotency_key: String,
+) -> Result<Value, String> {
+    let project_file = resolve_project_file(&project_path)?;
+    let project = project_schema::load_project_value(&project_file)?;
+    if let Some(result) = find_receipt(&project, "export_final", &idempotency_key) {
+        return Ok(result);
+    }
+    require_revision(&project, expected_revision)?;
+    if export_decision(&project)["allowed"].as_bool() != Some(true) {
+        return Err("exportação final bloqueada por pendências reais do projeto".into());
+    }
+    let destination_path = PathBuf::from(&destination);
+    if let Some(parent) = destination_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("falha ao preparar destino final: {error}"))?;
+    }
+    crate::commands::project::export_project(crate::commands::project::ExportConfig {
+        project_path: project_file.to_string_lossy().into_owned(),
+        format: "cbz".into(),
+        output_path: destination.clone(),
+        export_mode: Some("final".into()),
+    })
+    .await?;
+    let (artifact_sha256, artifact_size) = file_sha256(&destination_path)?;
+    project_schema::edit_project_value(&project_file, |project| {
+        record_final_export_in_project(
+            project,
+            expected_revision,
+            &idempotency_key,
+            &destination,
+            &artifact_sha256,
+            artifact_size,
+        )
+    })
+}
+
+#[tauri::command]
+pub fn export_diagnostic(
+    project_path: String,
+    destination: String,
+    expected_revision: u64,
+) -> Result<Value, String> {
+    let project_file = resolve_project_file(&project_path)?;
+    let project = project_schema::load_project_value(&project_file)?;
+    require_revision(&project, expected_revision)?;
+    let pages = project
+        .get("paginas")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let text_units = project
+        .get("paginas")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|page| {
+            page.get("text_layers")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        })
+        .sum::<usize>();
+    let body = json!({
+        "schema": "traduzai.diagnostic-export.v1",
+        "project_revision": expected_revision,
+        "project_sha256": canonical_json_sha256(&project)?,
+        "export_decision": export_decision(&project),
+        "page_count": pages,
+        "text_unit_count": text_units,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "contains_source_images": false,
+        "promotes_final_export_state": false,
+    });
+    let manifest_sha256 = canonical_json_sha256(&body)?;
+    let mut manifest = body;
+    manifest["manifest_sha256"] = Value::String(manifest_sha256);
+    let destination_path = PathBuf::from(&destination);
+    write_diagnostic_archive(&destination_path, &manifest)?;
+    let (artifact_sha256, artifact_size) = file_sha256(&destination_path)?;
+    Ok(json!({
+        "diagnostic_manifest": manifest,
+        "artifact_ref": {
+            "path": destination,
+            "sha256": artifact_sha256,
+            "size": artifact_size,
+        }
+    }))
 }
 
 #[tauri::command]
@@ -751,7 +2034,11 @@ mod tests {
             1
         );
         assert_eq!(
-            find_receipt(&project, &decision.idempotency_key),
+            find_receipt(
+                &project,
+                "submit_review_decision",
+                &decision.idempotency_key,
+            ),
             Some(first)
         );
     }
@@ -978,5 +2265,174 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("caminho relativo seguro"));
+    }
+
+    #[test]
+    fn durable_job_lifecycle_is_revision_bound_idempotent_and_terminal() {
+        let mut project = project(4);
+        project["project_id"] = Value::String("project-001".into());
+        project["capitulo"] = Value::from(57);
+        project["paginas"] = json!([{
+            "numero": 1,
+            "text_layers": [{"id": "owner-001"}, {"id": "owner-002"}]
+        }]);
+
+        let started =
+            start_job_in_project(&mut project, "N:/p/project.json", "57", 4, "start-r4").unwrap();
+        assert_eq!(started["status"], "queued");
+        assert_eq!(started["project_revision"], 5);
+        let duplicate =
+            start_job_in_project(&mut project, "N:/p/project.json", "57", 4, "start-r4").unwrap();
+        assert_eq!(duplicate, started);
+
+        let job_id = started["job_id"].as_str().unwrap();
+        let paused =
+            control_job_in_project(&mut project, job_id, "pause", &[], 5, "pause-r5").unwrap();
+        assert_eq!(paused["status"], "paused");
+        let resumed =
+            control_job_in_project(&mut project, job_id, "resume", &[], 6, "resume-r6").unwrap();
+        assert_eq!(resumed["status"], "queued");
+        let cancelled =
+            control_job_in_project(&mut project, job_id, "cancel", &[], 7, "cancel-r7").unwrap();
+        assert_eq!(cancelled["status"], "cancelled");
+        assert!(control_job_in_project(
+            &mut project,
+            job_id,
+            "resume",
+            &[],
+            8,
+            "resume-terminal-r8"
+        )
+        .unwrap_err()
+        .contains("terminal"));
+    }
+
+    #[test]
+    fn project_event_requires_next_revision_and_monotonic_sequence() {
+        let mut project = project(4);
+        project["project_id"] = Value::String("project-001".into());
+        project["capitulo"] = Value::from(57);
+        let started =
+            start_job_in_project(&mut project, "N:/p/project.json", "57", 4, "start-r4").unwrap();
+        let job_id = started["job_id"].as_str().unwrap().to_string();
+        let event = ProjectEventInput {
+            job_id: job_id.clone(),
+            project_id: "project-001".into(),
+            expected_revision: 5,
+            project_revision: 6,
+            sequence: 2,
+            stage: "analysis".into(),
+            status: "running".into(),
+            reason_code: "analysis_started".into(),
+            payload: json!({"page_id": "page-001"}),
+        };
+        let persisted = persist_event_in_project(&mut project, &event, 5, "event-r5").unwrap();
+        assert_eq!(persisted["project_revision"], 6);
+        let stale = ProjectEventInput {
+            expected_revision: 6,
+            project_revision: 7,
+            ..event
+        };
+        assert!(
+            persist_event_in_project(&mut project, &stale, 6, "event-stale-r6")
+                .unwrap_err()
+                .contains("sequence")
+        );
+    }
+
+    #[test]
+    fn final_export_receipt_is_persisted_only_after_fail_closed_gate_passes() {
+        let digest = "a".repeat(64);
+        let mut blocked = project(4);
+        let error = record_final_export_in_project(
+            &mut blocked,
+            4,
+            "export-r4",
+            "N:/exports/final.cbz",
+            &digest,
+            123,
+        )
+        .unwrap_err();
+        assert!(error.contains("bloqueada"));
+        assert_eq!(blocked["project_revision"], 4);
+
+        let mut allowed = project(4);
+        allowed["verified"] = Value::Bool(true);
+        allowed["completion_status"] = Value::String("approved".into());
+        allowed["output_review_state"] = Value::String("approved".into());
+        allowed["qa"] = json!({"export_gate": {"status": "PASS", "allowed": true}});
+        let result = record_final_export_in_project(
+            &mut allowed,
+            4,
+            "export-r4",
+            "N:/exports/final.cbz",
+            &digest,
+            123,
+        )
+        .unwrap();
+        assert_eq!(result["project_revision"], 5);
+        assert_eq!(result["publication_receipt"]["human_review_claimed"], false);
+        assert_eq!(
+            record_final_export_in_project(
+                &mut allowed,
+                4,
+                "export-r4",
+                "N:/exports/final.cbz",
+                &digest,
+                123,
+            )
+            .unwrap(),
+            result
+        );
+    }
+
+    #[test]
+    fn preparing_owner_retypeset_changes_only_layout_dependents() {
+        let mut project = project(7);
+        project["paginas"] = json!([{
+            "numero": 1,
+            "text_layers": [{
+                "id": "owner-001",
+                "original": "HELLO",
+                "translated": "OLÁ",
+                "layout_bbox": [10, 20, 110, 90],
+                "style": {"tamanho": 24, "fonte": "ComicNeue-Bold.ttf"}
+            }]
+        }]);
+        let source_before = project["paginas"][0]["text_layers"][0]["original"].clone();
+        let prepared = prepare_owner_layout(
+            &project,
+            "owner-001",
+            &json!({
+                "owner_id": "owner-001",
+                "text": "TEXTO CORRIGIDO",
+                "layout_bbox": [12, 22, 122, 96],
+                "style": {"tamanho": 30}
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.page_index, 0);
+        assert_eq!(
+            prepared.page["text_layers"][0]["translated"],
+            "TEXTO CORRIGIDO"
+        );
+        assert_eq!(prepared.page["text_layers"][0]["style"]["tamanho"], 30);
+        assert_eq!(
+            prepared.page["text_layers"][0]["style"]["fonte"],
+            "ComicNeue-Bold.ttf"
+        );
+        assert_eq!(prepared.page["text_layers"][0]["original"], source_before);
+        assert_eq!(project["project_revision"], 7);
+        assert_eq!(
+            prepared.invalidated_stages,
+            [
+                "layout",
+                "rasterize",
+                "review",
+                "persist",
+                "export_decision"
+            ]
+        );
     }
 }

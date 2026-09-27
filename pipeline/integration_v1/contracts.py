@@ -701,7 +701,7 @@ def studio_ipc_contract() -> dict[str, Any]:
         "schema": STUDIO_IPC_VERSION,
         "contract_owner": "integration",
         "transport_adapter_owner": "studio",
-        "implementation_state": "awaiting_specialist_handoff",
+        "implementation_state": "rust_backend_commands_available_worker_dispatch_pending",
         "argument_envelope": "direct_fields",
         "commands": {
             "start_consumer_fast": {
