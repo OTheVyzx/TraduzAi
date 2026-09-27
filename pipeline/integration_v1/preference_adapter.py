@@ -25,6 +25,12 @@ def candidate_from_recipe_receipt(
     dependency_layout = validated["dependency_hashes"].get("layout_plan")
     if dependency_layout is not None and dependency_layout != layout_plan_sha256:
         raise ValueError("layout plan hash diverges from the recipe dependency")
+    from typesetter.raster_safety import validate_raster_safety_evidence
+
+    safety = validate_raster_safety_evidence(metrics.get("raster_safety"))
+    dependency_safety = validated["dependency_hashes"].get("raster_safety")
+    if dependency_safety is not None and dependency_safety != safety["evidence_sha256"]:
+        raise ValueError("raster safety hash diverges from the recipe dependency")
     return PreferenceCandidate.build(
         owner_id=owner_id,
         target_text=target_text,
@@ -35,7 +41,7 @@ def candidate_from_recipe_receipt(
         output_sha256=validated["output_sha256"],
         preview_ref=preview_ref,
         context_ref=context_ref,
-        metrics=metrics,
+        metrics={**dict(metrics), "raster_safety": safety},
         hard_safety_passed=hard_safety_passed,
     )
 
