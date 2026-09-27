@@ -67,7 +67,7 @@ fn validate_review_decision(decision: &ReviewDecisionInput) -> Result<(), String
         || decision
             .evidence_sha256s
             .iter()
-            .any(|hash| hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .any(|hash| !is_lower_sha256(hash))
     {
         return Err("decisão de revisão exige evidência SHA-256 válida".into());
     }
@@ -77,11 +77,18 @@ fn validate_review_decision(decision: &ReviewDecisionInput) -> Result<(), String
     Ok(())
 }
 
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn require_sha256_field(value: &Value, field: &str) -> Result<String, String> {
     let digest = value
         .as_str()
         .ok_or_else(|| format!("{field} exige SHA-256"))?;
-    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !is_lower_sha256(digest) {
         return Err(format!("{field} exige SHA-256 minúsculo"));
     }
     Ok(digest.to_string())
@@ -482,6 +489,15 @@ mod tests {
         let mut project = project(5);
         let error = append_review_decision(&mut project, &decision("human", 4)).unwrap_err();
         assert!(error.contains(REVISION_CONFLICT));
+    }
+
+    #[test]
+    fn uppercase_sha256_is_rejected_before_persistence() {
+        let mut decision = decision("human", 4);
+        decision.evidence_sha256s = vec!["A".repeat(64)];
+        assert!(validate_review_decision(&decision)
+            .unwrap_err()
+            .contains("SHA-256"));
     }
 
     #[test]

@@ -582,7 +582,8 @@ class ReviewDecision:
             raise ValueError("review decision identity is incomplete")
         if expected_revision < 0 or not evidence_sha256s:
             raise ValueError("review decision requires revision and evidence")
-        if any(len(value) != 64 for value in evidence_sha256s):
+        if any(len(value) != 64 or any(char not in "0123456789abcdef" for char in value)
+               for value in evidence_sha256s):
             raise ValueError("review decision evidence hash is invalid")
         validated_preference = None
         if preference_response is not None:

@@ -144,6 +144,12 @@ def test_review_decision_never_promotes_model_to_human() -> None:
     assert decision.actor_kind == "model"
     assert decision.is_human is False
     assert decision.to_dict()["actor_kind"] == "model"
+    with pytest.raises(ValueError, match="evidence hash"):
+        ReviewDecision.build(
+            project_id="project-001", owner_id="owner-001", expected_revision=8,
+            actor_kind="human", actor_id="local-user", decision="approve",
+            reason_code="visual_review_passed", evidence_sha256s=("A" * 64,),
+            idempotency_key="review-owner-001-uppercase")
 
 
 def test_review_decision_persists_canonical_renderer_preference_response() -> None:

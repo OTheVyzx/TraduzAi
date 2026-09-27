@@ -325,7 +325,7 @@ def _prepare_split(*, source_root: Path, control_root: Path, control: dict,
         result = search_source_centered_layout(clean, recipe,
             source_visual_height_px=visual, preferred_font_size=font_size,
             minimum_font_size=recipe["minimum_font_size"],
-            maximum_font_size=min(56, font_size+6))
+            maximum_font_size=min(56, font_size+6), maximum_seconds=90)
         if result["status"] != "rendered_candidate":
             return dict(status="review_required", reason=result["reason"], proposal=proposal,
                         failed_subblock_order=order, search_attempts=result["attempts"])
@@ -505,10 +505,22 @@ def prepare_member(*, source_root: Path, control_root: Path, member: str,
         result = search_source_centered_layout(clean, recipe,
             source_visual_height_px=visual, preferred_font_size=font_size,
             minimum_font_size=recipe["minimum_font_size"],
-            maximum_font_size=min(56, font_size+6))
+            maximum_font_size=min(56, font_size+6), maximum_seconds=90)
         if result["status"] != "rendered_candidate":
             outcomes.append(dict(status="review_required", reason=result["reason"],
-                                 proposal=proposal, search_attempts=result["attempts"]))
+                                 proposal=proposal, source_member=member,
+                                 source=source, target=target,
+                                 target_binding=target_binding,
+                                 source_preserved=True,
+                                 source_review_sha256=adjudicated["source_review_sha256"],
+                                 ocr_job_sha256=sha(json.dumps(
+                                     job, sort_keys=True, ensure_ascii=False,
+                                     default=str).encode()),
+                                 selected_observation_ids=
+                                     adjudicated["review"]["selected_observation_ids"],
+                                 crop_bbox=crop_bbox,
+                                 crop_pixel_sha256=sha(crop.tobytes()),
+                                 search_attempts=result["attempts"]))
             continue
         primary = proposal["owner_ids"][0]
         if primary not in {row["owner_id"] for row in meta["raster_cache"]}:

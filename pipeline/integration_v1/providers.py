@@ -182,7 +182,10 @@ def recover_source_with_ocr(
             bbox_page=tuple(int(value) for value in bbox_page),
             request=request,
             variants=("anchored_crop", "gray", "inverted", "scale_2x"),
-            stop_on_first_text=False,
+            # Variants are ordered fallbacks, not independent text fragments.
+            # Combining successful variants duplicates the same source unit and
+            # can turn a short balloon into a pathological repeated translation.
+            stop_on_first_text=True,
         )
     except Exception as exc:
         raise ProviderUnavailable(f"local OCR provider unavailable: {exc.__class__.__name__}") from exc
