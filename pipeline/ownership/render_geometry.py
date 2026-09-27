@@ -635,6 +635,20 @@ def build_owner_render_geometry(
     if tuple(item.observation_id for item in observations) != tuple(sorted(selected_ids)):
         raise ValueError("owner render geometry is missing selected observation geometry")
     source_bbox = _union_bbox(tuple(item.bbox_page for item in observations))
+    source_area = max(1, (source_bbox[2] - source_bbox[0]) * (source_bbox[3] - source_bbox[1]))
+    # A discovery component can enclose a whole balloon (or a nearby owner)
+    # while its OCR lines occupy only a small, supported portion. Retain that
+    # component in provenance, but do not make its envelope the text body or a
+    # paintable connected subregion. The selected source glyphs stay included.
+    semantic_components = tuple(
+        item for item in components
+        if (item.bbox_page[2] - item.bbox_page[0]) * (item.bbox_page[3] - item.bbox_page[1])
+        <= 3 * source_area
+    )
+    if semantic_components and len(semantic_components) < len(components):
+        semantic_bbox = _union_bbox((source_bbox, *(item.bbox_page for item in semantic_components)))
+    else:
+        semantic_components = components
     protected_hash = (
         _check_sha256(protected_art_mask_sha256, "protected art mask hash")
         if protected_art_mask_sha256
@@ -729,6 +743,33 @@ def build_owner_render_geometry(
                 evidence_ids = tuple(
                     sorted({*evidence_ids, f"protected_art_mask:{protected_hash}"})
                 )
+        # The full-page visual recovery is a weak envelope, not proof that
+        # every pixel inside its rectangular bbox is a paintable balloon.
+        # Keep the source untouched when it bridges separate text supports or
+        # expands a small source slot across an implausibly large page area.
+        if status == "ready" and str(layout_source).startswith("full_page_visual_container"):
+            ordered = sorted((item.bbox_page for item in components), key=lambda box: (box[1], box[3]))
+            vertical_clusters: list[tuple[int, int]] = []
+            for box in ordered:
+                if vertical_clusters and box[1] <= vertical_clusters[-1][1]:
+                    vertical_clusters[-1] = (vertical_clusters[-1][0], max(vertical_clusters[-1][1], box[3]))
+                else:
+                    vertical_clusters.append((box[1], box[3]))
+            bridges_gap = any(
+                bottom[0] - top[1] >= max(20, .7 * max(top[1] - top[0], bottom[1] - bottom[0]))
+                for top, bottom in zip(vertical_clusters, vertical_clusters[1:])
+            )
+            source_area = max(1, (source_bbox[2] - source_bbox[0]) * (source_bbox[3] - source_bbox[1]))
+            container_area = (layout_bbox[2] - layout_bbox[0]) * (layout_bbox[3] - layout_bbox[1])
+            unsafe_reason = (
+                "recovered_container_bridges_disjoint_components" if bridges_gap
+                else "recovered_container_exceeds_source_slot" if container_area > 6 * source_area
+                else None
+            )
+            if unsafe_reason:
+                layout_bbox = layout_polygon = None
+                layout_source = "none"
+                status, reason = "review_required", unsafe_reason
     elif visual_card_slot:
         layout_bbox = semantic_bbox
         layout_polygon = _rect_polygon(semantic_bbox)
@@ -752,7 +793,7 @@ def build_owner_render_geometry(
         evidence_ids, evidence_confidence = (), 0.0
 
     subregions = []
-    for order, component in enumerate(components):
+    for order, component in enumerate(semantic_components):
         evidence_ids_for_component = tuple(sorted(
             observation.observation_id
             for observation in graph.observations

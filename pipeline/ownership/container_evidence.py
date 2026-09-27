@@ -51,6 +51,157 @@ def _proportional_fallback(seed: BBox, *, width: int, height: int) -> BBox:
     )
 
 
+def canonical_component_container_ids(
+    evidence_by_component: dict[str, dict[str, Any]],
+) -> dict[str, str]:
+    """Canonicalize nested local evidence without joining adjacent containers."""
+
+    component_ids = tuple(sorted(str(value) for value in evidence_by_component))
+    parents = {component_id: component_id for component_id in component_ids}
+
+    def find(component_id: str) -> str:
+        current = component_id
+        while parents[current] != current:
+            parents[current] = parents[parents[current]]
+            current = parents[current]
+        return current
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root == right_root:
+            return
+        first, second = sorted((left_root, right_root))
+        parents[second] = first
+
+    def containment_fraction(left: BBox, right: BBox) -> float:
+        ix1, iy1 = max(left[0], right[0]), max(left[1], right[1])
+        ix2, iy2 = min(left[2], right[2]), min(left[3], right[3])
+        intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        smaller_area = min(
+            max(1, (left[2] - left[0]) * (left[3] - left[1])),
+            max(1, (right[2] - right[0]) * (right[3] - right[1])),
+        )
+        return float(intersection) / float(smaller_area)
+
+    def is_page_spanning(item: dict[str, Any]) -> bool:
+        bbox = tuple(int(value) for value in item.get("bbox_page") or ())
+        shape = tuple(int(value) for value in item.get("page_shape") or ())
+        if len(bbox) != 4 or len(shape) < 2:
+            return False
+        page_height, page_width = shape[:2]
+        if page_width <= 0 or page_height <= 0:
+            return False
+        box_width = max(0, bbox[2] - bbox[0])
+        box_height = max(0, bbox[3] - bbox[1])
+        return (
+            box_width * box_height >= page_width * page_height * 0.45
+            or (box_width >= page_width * 0.85 and box_height >= page_height * 0.45)
+        )
+
+    def semantic_neighbours(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        left_bbox = tuple(int(value) for value in left.get("semantic_bbox_page") or ())
+        right_bbox = tuple(int(value) for value in right.get("semantic_bbox_page") or ())
+        if len(left_bbox) != 4 or len(right_bbox) != 4:
+            return True
+        left_width = max(1, left_bbox[2] - left_bbox[0])
+        right_width = max(1, right_bbox[2] - right_bbox[0])
+        left_height = max(1, left_bbox[3] - left_bbox[1])
+        right_height = max(1, right_bbox[3] - right_bbox[1])
+        x_overlap = max(
+            0, min(left_bbox[2], right_bbox[2]) - max(left_bbox[0], right_bbox[0])
+        )
+        y_overlap = max(
+            0, min(left_bbox[3], right_bbox[3]) - max(left_bbox[1], right_bbox[1])
+        )
+        x_gap = max(
+            0, max(left_bbox[0], right_bbox[0]) - min(left_bbox[2], right_bbox[2])
+        )
+        y_gap = max(
+            0, max(left_bbox[1], right_bbox[1]) - min(left_bbox[3], right_bbox[3])
+        )
+        same_line = (
+            y_overlap >= 0.40 * min(left_height, right_height)
+            and x_gap <= 2.0 * max(left_height, right_height)
+        )
+        stacked_lines = (
+            x_overlap >= 0.15 * min(left_width, right_width)
+            and y_gap <= max(8.0, 1.35 * min(left_height, right_height))
+        )
+        return bool(same_line or stacked_lines)
+
+    for index, left_id in enumerate(component_ids):
+        left = evidence_by_component[left_id]
+        left_evidence_id = str(left.get("evidence_id") or "")
+        left_source = str(left.get("source") or "")
+        left_bbox = tuple(int(value) for value in left.get("bbox_page") or ())
+        for right_id in component_ids[index + 1 :]:
+            right = evidence_by_component[right_id]
+            right_evidence_id = str(right.get("evidence_id") or "")
+            if left_evidence_id and left_evidence_id == right_evidence_id:
+                if (
+                    not (is_page_spanning(left) or is_page_spanning(right))
+                    or semantic_neighbours(left, right)
+                ):
+                    union(left_id, right_id)
+                continue
+            if (
+                left_source != "full_page_visual_container"
+                or str(right.get("source") or "") != "full_page_visual_container"
+            ):
+                continue
+            right_bbox = tuple(int(value) for value in right.get("bbox_page") or ())
+            if len(left_bbox) != 4 or len(right_bbox) != 4:
+                continue
+            if (
+                containment_fraction(left_bbox, right_bbox) >= 0.80
+                and (
+                    not (is_page_spanning(left) or is_page_spanning(right))
+                    or semantic_neighbours(left, right)
+                )
+            ):
+                union(left_id, right_id)
+
+    members_by_root: dict[str, list[str]] = {}
+    for component_id in component_ids:
+        members_by_root.setdefault(find(component_id), []).append(component_id)
+
+    roots_by_evidence_id: dict[str, set[str]] = {}
+    for component_id in component_ids:
+        evidence_id = str(evidence_by_component[component_id].get("evidence_id") or "")
+        if evidence_id:
+            roots_by_evidence_id.setdefault(evidence_id, set()).add(find(component_id))
+
+    result: dict[str, str] = {}
+    for members in members_by_root.values():
+        evidence_ids = {
+            str(evidence_by_component[component_id].get("evidence_id") or "")
+            for component_id in members
+        }
+        if (
+            len(evidence_ids) == 1
+            and len(roots_by_evidence_id.get(next(iter(evidence_ids)), ())) == 1
+        ):
+            canonical_id = next(iter(evidence_ids))
+        else:
+            payload = [
+                {
+                    "component_id": component_id,
+                    "evidence_id": evidence_by_component[component_id].get("evidence_id"),
+                    "bbox_page": list(
+                        evidence_by_component[component_id].get("bbox_page") or ()
+                    ),
+                }
+                for component_id in sorted(members)
+            ]
+            digest = sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()[:16]
+            canonical_id = f"full_page_visual_container_group:{digest}"
+        for component_id in members:
+            result[component_id] = canonical_id
+    return result
+
+
 def recover_full_page_visual_container(
     image_rgb: np.ndarray,
     *,

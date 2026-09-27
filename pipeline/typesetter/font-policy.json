@@ -1,0 +1,12 @@
+{
+  "schema": "quality_font_policy_v1",
+  "base": "ComicNeue-Bold.ttf",
+  "score_metric": "shape_score_v2_multiline",
+  "single_line_threshold": 0.68,
+  "multiline_threshold": 0.58,
+  "margin_threshold": 0.025,
+  "source": "Active FontShapeMatcher.MATCH_SCORE_THRESHOLD, MULTILINE_MATCH_SCORE_THRESHOLD and MATCH_MARGIN_THRESHOLD; shape similarity, not calibrated probability",
+  "source_map": "workspace-font-map",
+  "resolved_map": "font-map.closed.json",
+  "fonts_root": "workspace-fonts-read-only"
+}

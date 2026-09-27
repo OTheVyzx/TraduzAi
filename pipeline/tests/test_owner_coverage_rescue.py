@@ -720,7 +720,7 @@ def test_ocr_empty_detector_region_with_visual_sfx_support_is_preserved_as_sfx()
     coverage.require_ready_for_ownership()
 
 
-def test_ocr_empty_plain_detector_region_without_sfx_support_remains_blocking() -> None:
+def test_ocr_empty_plain_detector_region_without_sfx_support_requires_review() -> None:
     import cv2
     import numpy as np
 
@@ -771,10 +771,10 @@ def test_ocr_empty_plain_detector_region_without_sfx_support_remains_blocking() 
         ocr_runner=runner,
     )
 
-    assert coverage.entries[0].materiality == "material"
+    assert coverage.entries[0].materiality == "uncertain"
+    assert coverage.entries[0].state == "review_required"
     assert coverage.entries[0].preserve_policy is None
-    with pytest.raises(CoverageInvariantError, match="lacks OCR observation"):
-        coverage.require_ready_for_ownership()
+    coverage.require_ready_for_ownership()
 
 
 def test_ocr_empty_unconfirmed_dark_balloon_heuristic_gets_visual_non_text_disposition() -> None:

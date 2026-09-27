@@ -14,7 +14,7 @@ _SOURCE_NUMBER_RE = re.compile(
 )
 _TARGET_NUMBER_RE = re.compile(
     r"(?<![\w.,])(?P<number>\d+(?:\.\d{3})*(?:,\d+)?)"
-    r"(?:\s*(?P<magnitude>mil|milh(?:ão|ões)|bilh(?:ão|ões)|trilh(?:ão|ões)))?",
+    r"(?:\s*(?P<magnitude>trilh(?:ão|ões)|bilh(?:ão|ões)|milh(?:ão|ões)|mil))?",
     re.IGNORECASE,
 )
 _SOURCE_MAGNITUDES = {

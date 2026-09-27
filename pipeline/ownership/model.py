@@ -30,7 +30,7 @@ Point = tuple[int, int]
 OWNER_GRAPH_SCHEMA_VERSION = 2
 OWNER_GRAPH_LEGACY_SCHEMA_VERSION = 1
 
-FINAL_COMPONENT_DECISIONS = frozenset({"owned", "preserve", "suppress", "review"})
+FINAL_COMPONENT_DECISIONS = frozenset({"owned", "preserve", "suppress", "review", "uncertain"})
 OWNER_DISPOSITIONS = frozenset({"owned", "review"})
 LEGACY_OWNER_STATES = frozenset(
     {
@@ -364,6 +364,8 @@ class OwnerMutation:
     component_geometry_verified: bool = False
     text_execution_authority_sha256: str = ""
     text_execution_authority: Any = None
+    source_support_mask: Any = None
+    source_support_mask_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -371,6 +373,7 @@ class OwnerMutation:
             "action_mask",
             "protected_art_mask",
             "changed_mask",
+            "source_support_mask",
         ):
             value = getattr(self, field_name)
             copy_value = getattr(value, "copy", None)
@@ -381,6 +384,12 @@ class OwnerMutation:
             if callable(setflags):
                 setflags(write=False)
             object.__setattr__(self, field_name, frozen_value)
+        if self.source_support_mask is not None and self.source_support_mask_sha256 is None:
+            object.__setattr__(
+                self,
+                "source_support_mask_sha256",
+                _immutable_array_sha256(self.source_support_mask),
+            )
         if self.protected_art_mask_sha256 is None:
             object.__setattr__(
                 self,
@@ -1149,6 +1158,7 @@ class OwnerGlyphPatch:
     text_execution_authority_sha256: str = ""
     text_execution_authority: Any = None
     delivery_contract: Any = None
+    render_layout_contract: Any = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.render_quality_contract, OwnerRenderQuality):
@@ -1947,6 +1957,22 @@ class OwnerGraph:
                         _violation(
                             "preserve_policy_reason_missing",
                             "Preserved source component requires an audited policy reason.",
+                            disposition.component_id,
+                        )
+                    )
+
+            if mode == "enforce" and disposition.decision == "uncertain":
+                if (
+                    disposition.owner_id is not None
+                    or disposition.policy_id != "coverage_ambiguous_candidate"
+                    or not _is_canonical_page_bbox(disposition.policy_bbox_page)
+                    or not disposition.policy_evidence_ids
+                    or not str(disposition.policy_reason or "").strip()
+                ):
+                    violations.append(
+                        _violation(
+                            "uncertain_component_audit_missing",
+                            "Uncertain source component requires review evidence without an owner.",
                             disposition.component_id,
                         )
                     )

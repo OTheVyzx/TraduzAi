@@ -286,7 +286,9 @@ def test_page_evidence_ref_rejects_tampered_pointer_snapshot_or_asset(tmp_path, 
     elif tamper == "evidence":
         (root / Path(ref.page_execution_evidence_relative_path)).write_text("{}", encoding="utf-8")
     else:
-        Image.new("RGB", (140, 90), (0, 0, 0)).save(root / "translated" / "page_001.png")
+        Image.new("RGB", (140, 90), (0, 0, 0)).save(
+            root / ".page-generations" / ref.page_id / ref.page_generation_id / "final.png"
+        )
 
     with pytest.raises(PageArtifactIntegrityError):
         ref.read_verified(root)
@@ -402,7 +404,9 @@ def test_wrap_up_builds_self_contained_bundle_that_reopens_after_publication(tmp
 
     assert staged.receipt.receipt_sha256 == bundle.publication_receipt.receipt_sha256
     assert reopened.verified_inputs.sha256 == bundle.verified_inputs_sha256
-    assert reopened.export_manifest.pages[0].translated_path == "translated/page_001.png"
+    assert reopened.export_manifest.pages[0].translated_path == (
+        ".page-generations/page_001/page-generation-001/final.png"
+    )
 
 
 def test_verified_strip_boundary_calls_run_chapter_once_then_returns_only_frozen_inputs(tmp_path):

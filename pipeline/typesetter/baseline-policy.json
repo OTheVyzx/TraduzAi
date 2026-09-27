@@ -1,0 +1,10 @@
+{
+  "schema": "quality_baseline_policy_v1",
+  "profiles": {
+    "standard": {"factor": 1.0},
+    "compact_5_unadorned": {"factor": 0.95, "requires_no_outline_shadow_glow": true}
+  },
+  "rounding": "floor(base_advance * factor + 0.5)",
+  "calibration": "editorial-leading-pilot-r001/leading_calibration.json",
+  "rejected_global_candidate": 0.90
+}
