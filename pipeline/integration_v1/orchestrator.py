@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -16,19 +19,35 @@ STAGE_ORDER = (
 CAPABILITY_ORDER = (
     "analysis", "continuity", "narration_multiline", "operational_recovery",
 )
+EXECUTION_DEPENDENCIES = (
+    "source", "config", "glossary", "context", "providers", "models",
+    "runtime_recipe",
+)
 
 
 class RevisionConflict(RuntimeError):
     pass
 
 
-def build_execution_plan(capabilities: dict[str, bool], *, policy_versions: dict[str, str]) -> dict[str, Any]:
+def build_execution_plan(capabilities: dict[str, bool], *,
+                         policy_versions: dict[str, str],
+                         dependency_hashes: dict[str, str]) -> dict[str, Any]:
+    missing = sorted(set(EXECUTION_DEPENDENCIES) - set(dependency_hashes))
+    if missing:
+        raise ValueError(f"missing execution dependencies: {', '.join(missing)}")
+    normalized_dependencies = {
+        key: str(dependency_hashes[key]).lower() for key in EXECUTION_DEPENDENCIES
+    }
+    for key, value in normalized_dependencies.items():
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise ValueError(f"execution dependency {key} is not a SHA-256")
     enabled = [name for name in CAPABILITY_ORDER if capabilities.get(name) is True]
     payload = {
         "schema": "traduzai.consumer-fast-plan.v1",
         "stages": list(STAGE_ORDER),
         "capabilities": enabled,
         "policy_versions": {key: policy_versions[key] for key in sorted(policy_versions)},
+        "dependency_hashes": dict(sorted(normalized_dependencies.items())),
     }
     return {**payload, "fingerprint": canonical_json_sha256(payload)}
 
@@ -59,6 +78,11 @@ class ConsumerFastJobStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "idempotency").mkdir(exist_ok=True)
+        self._thread_lock = threading.RLock()
+        self._lock_path = self.root / ".store.lock"
+        self._lock_path.touch(exist_ok=True)
+        if self._lock_path.stat().st_size == 0:
+            self._lock_path.write_bytes(b"\0")
 
     def _job_path(self, job_id: str) -> Path:
         return self.root / f"{job_id}.json"
@@ -69,9 +93,48 @@ class ConsumerFastJobStore:
     @staticmethod
     def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                             encoding="utf-8")
+        encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+                   + "\n").encode("utf-8")
+        with temporary.open("wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
+        if os.name != "nt":
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+
+    @contextmanager
+    def _locked(self):
+        with self._thread_lock, self._lock_path.open("r+b") as handle:
+            deadline = time.monotonic() + 5.0
+            while True:
+                try:
+                    handle.seek(0)
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("consumer fast job store lock timeout")
+                    time.sleep(0.01)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _read(self, job_id: str) -> dict[str, Any]:
         path = self._job_path(job_id)
@@ -80,12 +143,13 @@ class ConsumerFastJobStore:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def _idempotent(self, key: str, operation) -> dict[str, Any]:
-        receipt = self._idempotency_path(key)
-        if receipt.is_file():
-            return json.loads(receipt.read_text(encoding="utf-8"))["response"]
-        response = operation()
-        self._atomic_write(receipt, {"idempotency_key": key, "response": response})
-        return response
+        with self._locked():
+            receipt = self._idempotency_path(key)
+            if receipt.is_file():
+                return json.loads(receipt.read_text(encoding="utf-8"))["response"]
+            response = operation()
+            self._atomic_write(receipt, {"idempotency_key": key, "response": response})
+            return response
 
     @staticmethod
     def _require_revision(state: dict[str, Any], expected_revision: int) -> None:
@@ -151,7 +215,8 @@ class ConsumerFastJobStore:
             if all(unit["terminal"] for unit in state["units"].values()):
                 state["status"] = "complete_with_review" if any(
                     unit["status"] != "complete" for unit in state["units"].values()) else "complete"
-        return self._mutate(job_id, expected_revision, change)
+        with self._locked():
+            return self._mutate(job_id, expected_revision, change)
 
     def retry(self, job_id: str, unit_ids: Iterable[str], *, expected_revision: int,
               idempotency_key: str) -> dict[str, Any]:

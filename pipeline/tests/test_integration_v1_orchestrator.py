@@ -10,11 +10,23 @@ from integration_v1.orchestrator import (
 )
 
 
+DEPENDENCY_HASHES = {
+    "source": "1" * 64,
+    "config": "2" * 64,
+    "glossary": "3" * 64,
+    "context": "4" * 64,
+    "providers": "5" * 64,
+    "models": "6" * 64,
+    "runtime_recipe": "7" * 64,
+}
+
+
 def test_one_plan_combines_analysis_continuity_narration_and_recovery():
     plan = build_execution_plan({
         "analysis": True, "continuity": True, "narration_multiline": True,
         "operational_recovery": True,
-    }, policy_versions={"vision": "v1", "language": "v1", "renderer": "v1"})
+    }, policy_versions={"vision": "v1", "language": "v1", "renderer": "v1"},
+       dependency_hashes=DEPENDENCY_HASHES)
     assert plan["stages"] == list(STAGE_ORDER)
     assert plan["capabilities"] == [
         "analysis", "continuity", "narration_multiline", "operational_recovery"]
@@ -22,7 +34,28 @@ def test_one_plan_combines_analysis_continuity_narration_and_recovery():
     assert plan == build_execution_plan({
         "operational_recovery": True, "analysis": True,
         "narration_multiline": True, "continuity": True,
-    }, policy_versions={"renderer": "v1", "language": "v1", "vision": "v1"})
+    }, policy_versions={"renderer": "v1", "language": "v1", "vision": "v1"},
+       dependency_hashes=dict(reversed(list(DEPENDENCY_HASHES.items()))))
+
+
+def test_plan_fingerprint_changes_with_any_execution_dependency():
+    capabilities = {"analysis": True, "operational_recovery": True}
+    policies = {"vision": "v1", "language": "v1", "renderer": "v1"}
+    baseline = build_execution_plan(
+        capabilities, policy_versions=policies, dependency_hashes=DEPENDENCY_HASHES)
+    changed = dict(DEPENDENCY_HASHES, glossary="f" * 64)
+    updated = build_execution_plan(
+        capabilities, policy_versions=policies, dependency_hashes=changed)
+    assert baseline["fingerprint"] != updated["fingerprint"]
+    assert baseline["dependency_hashes"] == dict(sorted(DEPENDENCY_HASHES.items()))
+
+
+def test_plan_rejects_missing_or_non_sha256_dependencies():
+    with pytest.raises(ValueError, match="missing execution dependencies"):
+        build_execution_plan({}, policy_versions={}, dependency_hashes={})
+    invalid = dict(DEPENDENCY_HASHES, models="not-a-sha256")
+    with pytest.raises(ValueError, match="models"):
+        build_execution_plan({}, policy_versions={}, dependency_hashes=invalid)
 
 
 @pytest.mark.parametrize(("change", "must_include", "must_exclude"), [
