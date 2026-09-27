@@ -97,7 +97,8 @@ _CONTRACTS: dict[str, dict[str, Any]] = {
         "owner": "renderer",
         "schema_version": 1,
         "python_type": "integration_v1.contracts.adapt_contract_payload",
-        "runtime_type": "typesetter.style_materialization.OwnerStyleMaterializationPlan",
+        "runtime_type": "integration_v1.contracts.LayoutPlan",
+        "adapts_from": "typesetter.style_materialization.OwnerStyleMaterializationPlan",
         "required_fields": ["owner_id", "lines", "metrics", "usable_body", "plan_sha256"],
     },
     "Recipe": {
@@ -323,6 +324,11 @@ def adapt_contract_payload(name: str, payload: Mapping[str, Any]) -> dict[str, A
         TypesettingRenderRequest.from_mapping(copied)
     elif name == "LayoutPlan":
         _require_sha256(copied["plan_sha256"], "LayoutPlan.plan_sha256")
+        if "materialization_plan_sha256" in copied:
+            _require_sha256(
+                copied["materialization_plan_sha256"],
+                "LayoutPlan.materialization_plan_sha256",
+            )
         if not copied["lines"] or not copied["usable_body"].get("bbox"):
             raise ValueError("LayoutPlan requires lines and usable body")
     elif name == "Recipe":
@@ -376,6 +382,47 @@ def contract_snapshot() -> dict[str, Any]:
             "job_schema": "traduzai.consumer-fast-job.v1",
         },
     }
+
+
+@dataclass(frozen=True)
+class LayoutPlan:
+    """Published renderer envelope with an explicit materialization lineage."""
+
+    payload: dict[str, Any]
+    plan_sha256: str
+
+    @classmethod
+    def build(cls, payload: Mapping[str, Any]) -> "LayoutPlan":
+        adapted = adapt_contract_payload("LayoutPlan", payload)
+        return cls(payload=adapted, plan_sha256=str(adapted["plan_sha256"]))
+
+    @classmethod
+    def from_materialization(
+        cls,
+        materialization: Mapping[str, Any],
+        *,
+        lines: tuple[str, ...] | list[str],
+        metrics: Mapping[str, Any],
+        usable_body: Mapping[str, Any],
+    ) -> "LayoutPlan":
+        owner_id = str(materialization.get("owner_id") or "").strip()
+        if not owner_id:
+            raise ValueError("materialization owner_id is required")
+        materialization_sha256 = _require_sha256(
+            materialization.get("plan_sha256"),
+            "OwnerStyleMaterializationPlan.plan_sha256",
+        )
+        body = {
+            "owner_id": owner_id,
+            "lines": [str(line) for line in lines],
+            "metrics": _canonical_copy(metrics),
+            "usable_body": _canonical_copy(usable_body),
+            "materialization_plan_sha256": materialization_sha256,
+        }
+        return cls.build({**body, "plan_sha256": canonical_json_sha256(body)})
+
+    def to_dict(self) -> dict[str, Any]:
+        return _canonical_copy(self.payload)
 
 
 @dataclass(frozen=True)

@@ -50,6 +50,11 @@ def test_contract_registry_reuses_existing_runtime_types() -> None:
     assert analysis["runtime_type"] == "integration_v1.contracts.AnalysisRecord"
     assert "dependency_hashes" in analysis["reference_fields"]
     assert len(analysis["schema_sha256"]) == 64
+    layout = snapshot["contracts"]["LayoutPlan"]
+    assert layout["runtime_type"] == "integration_v1.contracts.LayoutPlan"
+    assert layout["adapts_from"] == (
+        "typesetter.style_materialization.OwnerStyleMaterializationPlan"
+    )
 
     assert set(snapshot["examples"]) == set(snapshot["contracts"])
     assert "N:\\" not in repr(snapshot["examples"])
@@ -73,6 +78,32 @@ def test_contract_registry_reuses_existing_runtime_types() -> None:
     assert snapshot["orchestration"]["stage_order"][:5] == [
         "import", "analysis", "ocr", "logical_units", "translate"]
     assert "ocr" not in snapshot["orchestration"]["invalidation"]["target"]
+
+
+def test_layout_plan_materialization_adapter_is_explicit_and_hash_bound() -> None:
+    from integration_v1.contracts import LayoutPlan
+
+    materialization = {
+        "owner_id": "owner-001",
+        "plan_sha256": "a" * 64,
+    }
+    plan = LayoutPlan.from_materialization(
+        materialization,
+        lines=("TEXTO", "TRADUZIDO"),
+        metrics={"font_size_px": 30, "line_advance_px": 33},
+        usable_body={"bbox": [100, 200, 500, 600], "coordinate_space": "logical_page"},
+    )
+
+    assert plan.to_dict()["materialization_plan_sha256"] == "a" * 64
+    assert len(plan.plan_sha256) == 64
+
+    with pytest.raises(ValueError, match="owner_id"):
+        LayoutPlan.from_materialization(
+            {"owner_id": "", "plan_sha256": "a" * 64},
+            lines=("TEXTO",),
+            metrics={"font_size_px": 30},
+            usable_body={"bbox": [0, 0, 10, 10]},
+        )
 
 
 def test_project_event_is_deterministic_and_revision_bound() -> None:
