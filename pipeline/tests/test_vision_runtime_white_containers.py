@@ -72,6 +72,29 @@ def test_geometric_lobes_without_text_support_do_not_claim_connected_structure()
     assert containers[0]["lobe_bboxes"] == []
 
 
+def test_uncertain_shape_candidate_does_not_corroborate_second_lobe() -> None:
+    from vision_runtime.white_containers import discover_white_containers
+
+    image = np.full((220, 440, 3), 210, dtype=np.uint8)
+    _outlined_bubble(image, (100, 110), 85)
+    _outlined_bubble(image, (340, 110), 85)
+    image[95:125, 180:260] = 255
+    observations = [
+        {"observation_id": "left", "bbox_page": [60, 90, 140, 125]},
+        {
+            "observation_id": "shape",
+            "bbox_page": [300, 60, 390, 155],
+            "selection_state": "uncertain",
+        },
+    ]
+
+    containers = discover_white_containers(image, observations)
+
+    assert set(containers[0]["observation_ids"]) == {"left", "shape"}
+    assert containers[0]["kind"] == "balloon"
+    assert containers[0]["lobe_bboxes"] == []
+
+
 def test_aligned_line_stack_does_not_corroborate_vertical_lobes() -> None:
     from vision_runtime.white_containers import corroborate_lobes
 

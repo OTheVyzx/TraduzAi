@@ -67,6 +67,10 @@ def build_structural_analysis(
             "observation_id": str(row.get("observation_id") or ""),
             "text": str(row.get("text") or ""),
             "bbox_page": _bbox(row.get("bbox_page"), "observation bbox"),
+            "selection_state": str(row.get("selection_state") or "eligible"),
+            "uncertainty_reasons": tuple(
+                str(value) for value in row.get("uncertainty_reasons", ())
+            ),
         }
         for row in observations
     ]
@@ -124,6 +128,16 @@ def build_structural_analysis(
             row["bbox_page"][3], row["bbox_page"][2],
         ))
         observation_ids = [row["observation_id"] for row in ordered]
+        selected = [row for row in ordered if row["selection_state"] == "eligible"]
+        selected_observation_ids = [row["observation_id"] for row in selected]
+        uncertainty_reasons = list(dict.fromkeys(
+            reason for row in ordered for reason in row["uncertainty_reasons"]
+        ))
+        if container["container_id"] is None:
+            uncertainty_reasons.append("container_not_observed")
+        if not selected:
+            uncertainty_reasons.append("no_selection_eligible_observation")
+        uncertainty_reasons = list(dict.fromkeys(uncertainty_reasons))
         unit_bbox = _union([row["bbox_page"] for row in ordered])
         unit_id = _stable_id("logical_unit", {
             "container_ref": container["container_id"],
@@ -139,10 +153,9 @@ def build_structural_analysis(
             ),
             "bbox_page": list(unit_bbox),
             "observation_ids": observation_ids,
-            "text": " ".join(row["text"].strip() for row in ordered if row["text"].strip()),
-            "uncertainty_reasons": (
-                ["container_not_observed"] if container["container_id"] is None else []
-            ),
+            "selected_observation_ids": selected_observation_ids,
+            "text": " ".join(row["text"].strip() for row in selected if row["text"].strip()),
+            "uncertainty_reasons": uncertainty_reasons,
         })
 
         lobe_bboxes = tuple(container["lobe_bboxes"])
@@ -180,6 +193,10 @@ def build_structural_analysis(
                 "logical_unit_id": unit_id,
                 "bbox_page": list(lobe_bbox),
                 "observation_ids": [row["observation_id"] for row in lobe_members],
+                "selected_observation_ids": [
+                    row["observation_id"] for row in lobe_members
+                    if row["selection_state"] == "eligible"
+                ],
                 "order": order,
                 "uncertainty_reasons": (
                     [] if lobe_members else ["lobe_has_no_selected_observation"]

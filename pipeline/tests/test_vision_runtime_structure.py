@@ -110,3 +110,30 @@ def test_overlapping_lobes_assign_each_observation_to_exactly_one_subblock() -> 
         row["observation_ids"].count("shared") for row in result.physical_subblocks
     )
     assert assignments == 1
+
+
+def test_uncertain_glyph_is_retained_but_not_concatenated_into_selected_text() -> None:
+    from vision_runtime.structure import build_structural_analysis
+
+    observations = [
+        {
+            **_observation("stroke", "W", [20, 20, 180, 150]),
+            "selection_state": "uncertain",
+            "uncertainty_reasons": ["sparse_large_glyph_candidate"],
+        },
+        _observation("line", "REAL DIALOGUE", [30, 170, 190, 205]),
+    ]
+    result = build_structural_analysis(
+        observations=observations,
+        containers=[{
+            "container_id": "balloon",
+            "bbox_page": [0, 0, 220, 230],
+            "kind": "balloon",
+        }],
+    )
+
+    unit = result.logical_units[0]
+    assert unit["observation_ids"] == ["stroke", "line"]
+    assert unit["selected_observation_ids"] == ["line"]
+    assert unit["text"] == "REAL DIALOGUE"
+    assert unit["uncertainty_reasons"] == ["sparse_large_glyph_candidate"]

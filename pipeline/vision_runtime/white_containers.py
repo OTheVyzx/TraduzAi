@@ -213,6 +213,7 @@ def discover_white_containers(
         groups.setdefault(ranked[0][1], []).append({
             "observation_id": str(row.get("observation_id") or ""),
             "bbox_page": list(bbox),
+            "selection_state": str(row.get("selection_state") or "eligible"),
         })
 
     containers: list[dict[str, Any]] = []
@@ -232,11 +233,16 @@ def discover_white_containers(
             [int(point[0][0]) + x, int(point[0][1]) + y] for point in polygon
         ]
         bbox_page = [x, y, x + w, y + h]
+        supporting_members = [
+            row for row in members if row["selection_state"] == "eligible"
+        ]
         geometric_lobes = _split_lobes(local, (x, y))
-        lobe_bboxes = corroborate_lobes(geometric_lobes, members, bbox_page)
+        lobe_bboxes = corroborate_lobes(
+            geometric_lobes, supporting_members, bbox_page
+        )
         lobe_evidence = "eroded_source_component" if lobe_bboxes else None
         if not lobe_bboxes:
-            lobe_bboxes = infer_text_cluster_lobes(bbox_page, members)
+            lobe_bboxes = infer_text_cluster_lobes(bbox_page, supporting_members)
             if lobe_bboxes:
                 lobe_evidence = "spatial_text_clusters_within_authenticated_component"
         observation_ids = [
