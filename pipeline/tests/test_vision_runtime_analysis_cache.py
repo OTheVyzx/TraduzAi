@@ -137,3 +137,68 @@ def test_two_consumers_share_one_inflight_provider_call(tmp_path) -> None:
 
     assert calls == 1
     assert sorted(result.cache_hit for result in results) == [False, True]
+
+
+def test_deterministic_failure_is_reused_for_same_capability_identity(tmp_path) -> None:
+    from vision_runtime.analysis_cache import (
+        AnalysisCacheIdentity, DeterministicFailureCache,
+    )
+
+    identity = AnalysisCacheIdentity.build(_request())
+    cache = DeterministicFailureCache(tmp_path / "failures")
+    recorded = cache.record(
+        identity,
+        capability="ocr",
+        reason_code="illegible_or_unrecognized",
+        evidence_sha256=SHA_A,
+    )
+
+    reused = cache.lookup(identity, capability="ocr")
+    assert reused == recorded
+    assert reused["cache_hit"] is True
+    assert reused["status"] == "deterministic_failure"
+
+
+def test_transient_provider_failure_cannot_be_cached_as_deterministic(tmp_path) -> None:
+    from vision_runtime.analysis_cache import (
+        AnalysisCacheIdentity, DeterministicFailureCache,
+    )
+
+    identity = AnalysisCacheIdentity.build(_request())
+    cache = DeterministicFailureCache(tmp_path / "failures")
+
+    with pytest.raises(ValueError, match="not deterministic"):
+        cache.record(
+            identity,
+            capability="ocr",
+            reason_code="provider_unavailable",
+            evidence_sha256=SHA_A,
+        )
+
+
+def test_failure_cache_invalidates_only_when_capability_identity_changes(tmp_path) -> None:
+    from vision_runtime.analysis_cache import (
+        AnalysisCacheIdentity, DeterministicFailureCache,
+    )
+
+    first = AnalysisCacheIdentity.build(_request())
+    cache = DeterministicFailureCache(tmp_path / "failures")
+    cache.record(
+        first,
+        capability="ocr",
+        reason_code="no_observations",
+        evidence_sha256=SHA_A,
+    )
+    typography = _request()
+    typography.update({"target_text": "OUTRO", "font_size": 12})
+    assert cache.lookup(
+        AnalysisCacheIdentity.build(typography), capability="ocr"
+    ) is not None
+
+    provider_changed = _request()
+    providers = deepcopy(provider_changed["providers"])
+    providers["ocr"]["version"] = "new"
+    provider_changed["providers"] = providers
+    assert cache.lookup(
+        AnalysisCacheIdentity.build(provider_changed), capability="ocr"
+    ) is None

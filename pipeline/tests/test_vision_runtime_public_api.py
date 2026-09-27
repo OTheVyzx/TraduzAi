@@ -33,3 +33,4 @@ def test_public_api_exports_runtime_entry_points() -> None:
     assert callable(vision_runtime.assess_observation_evidence)
     assert callable(vision_runtime.build_structural_analysis)
     assert callable(vision_runtime.discover_white_containers)
+    assert vision_runtime.DeterministicFailureCache is not None

@@ -11,6 +11,7 @@ VISION_RUNTIME_VERSION = "1.0.0"
 _EXPORTS = {
     "AnalysisArtifactCache": ("analysis_cache", "AnalysisArtifactCache"),
     "AnalysisCacheIdentity": ("analysis_cache", "AnalysisCacheIdentity"),
+    "DeterministicFailureCache": ("analysis_cache", "DeterministicFailureCache"),
     "AuthenticatedContextWindow": ("context_window", "AuthenticatedContextWindow"),
     "assess_observation_evidence": (
         "observation_evidence", "assess_observation_evidence"

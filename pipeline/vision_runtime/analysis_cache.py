@@ -20,6 +20,12 @@ _CAPABILITY_PROVIDERS = {
     "structure": ("detection", "ocr", "structure"),
     "masks": ("detection", "masks"),
 }
+_DETERMINISTIC_FAILURE_REASONS = {
+    "capability_unavailable",
+    "illegible_or_unrecognized",
+    "no_observations",
+    "unsupported_language",
+}
 
 
 def _canonical_copy(value: Any) -> Any:
@@ -203,3 +209,73 @@ class AnalysisArtifactCache:
             with self._lock:
                 self._inflight.pop(identity.sha256, None)
                 event.set()
+
+
+class DeterministicFailureCache:
+    """Persist stable capability failures without masking transient outages."""
+
+    def __init__(self, root: str | os.PathLike[str]) -> None:
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, identity: AnalysisCacheIdentity, capability: str) -> Path:
+        digest = identity.capability_sha256(capability)
+        return self.root / str(capability) / digest[:2] / f"{digest}.json"
+
+    def lookup(
+        self, identity: AnalysisCacheIdentity, *, capability: str
+    ) -> dict[str, Any] | None:
+        path = self._path(identity, capability)
+        try:
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+        receipt = envelope.get("receipt")
+        if not isinstance(receipt, Mapping):
+            return None
+        expected_capability_sha256 = identity.capability_sha256(capability)
+        if (
+            receipt.get("status") != "deterministic_failure"
+            or receipt.get("capability") != capability
+            or receipt.get("capability_sha256") != expected_capability_sha256
+            or receipt.get("reason_code") not in _DETERMINISTIC_FAILURE_REASONS
+            or envelope.get("receipt_sha256") != _sha256(receipt)
+        ):
+            return None
+        return _canonical_copy(receipt)
+
+    def record(
+        self,
+        identity: AnalysisCacheIdentity,
+        *,
+        capability: str,
+        reason_code: str,
+        evidence_sha256: str,
+    ) -> dict[str, Any]:
+        reason = str(reason_code or "")
+        if reason not in _DETERMINISTIC_FAILURE_REASONS:
+            raise ValueError(f"failure reason is not deterministic: {reason}")
+        evidence = _require_sha256(evidence_sha256, "evidence_sha256")
+        capability_sha256 = identity.capability_sha256(capability)
+        existing = self.lookup(identity, capability=capability)
+        if existing is not None:
+            return existing
+        receipt = {
+            "status": "deterministic_failure",
+            "cache_hit": True,
+            "analysis_identity_sha256": identity.sha256,
+            "capability": str(capability),
+            "capability_sha256": capability_sha256,
+            "reason_code": reason,
+            "evidence_sha256": evidence,
+        }
+        envelope = {
+            "receipt": receipt,
+            "receipt_sha256": _sha256(receipt),
+        }
+        path = self._path(identity, capability)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        temporary.write_bytes(_canonical_bytes(envelope))
+        os.replace(temporary, path)
+        return _canonical_copy(receipt)
