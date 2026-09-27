@@ -16,6 +16,7 @@ from ownership.hash_contract import canonical_json_sha256
 
 
 SCHEMA_VERSION = "traduzai.renderer-preference.v1"
+RESOLUTION_SCHEMA = "traduzai.renderer-preference-resolution.v1"
 PREFERENCE_PROFILE = "uncalibrated"
 PreferenceChoice = Literal["A", "B", "equivalent", "neither", "unsure"]
 _CHOICES = {"A", "B", "equivalent", "neither", "unsure"}
@@ -105,6 +106,14 @@ class PreferenceCandidate:
         expected_target_sha256 = sha256(target_text.encode("utf-8")).hexdigest()
         if target_sha256 is not None and target_sha256 != expected_target_sha256:
             raise ValueError("target_sha256 does not match the exact UTF-8 target text")
+        exact_metrics = _canonical_copy(metrics)
+        from typesetter.raster_safety import validate_raster_safety_evidence
+
+        safety = validate_raster_safety_evidence(exact_metrics.get("raster_safety"))
+        if hard_safety_passed and safety["status"] != "pass":
+            raise ValueError("candidate cannot pass hard safety with raster collisions")
+        if not hard_safety_passed and safety["status"] == "pass":
+            raise ValueError("candidate hard safety flag disagrees with raster safety evidence")
         body = {
             "schema": schema,
             "owner_id": owner_id,
@@ -113,7 +122,7 @@ class PreferenceCandidate:
             **hashes,
             "preview_ref": _validate_artifact_ref(preview_ref, "preview_ref"),
             "context_ref": _validate_artifact_ref(context_ref, "context_ref"),
-            "metrics": _canonical_copy(metrics),
+            "metrics": exact_metrics,
             "hard_safety_passed": hard_safety_passed,
             "preference_profile": preference_profile,
         }
@@ -263,12 +272,18 @@ def resolve_preference_choice(
     if choice not in _CHOICES:
         raise ValueError("preference choice must be A, B, equivalent, neither, or unsure")
     selected_candidate_id = validated.positions[str(choice)] if choice in {"A", "B"} else None
+    by_id = {item.candidate_id: item for item in validated.candidates}
+    displayed = [by_id[validated.positions[position]] for position in ("A", "B")]
     body = {
-        "schema": SCHEMA_VERSION,
+        "schema": RESOLUTION_SCHEMA,
         "comparison_sha256": validated.comparison_sha256,
         "choice": choice,
         "selected_candidate_id": selected_candidate_id,
         "displayed_candidate_ids": dict(validated.positions),
+        "candidate_recipe_sha256s": [item.recipe_sha256 for item in displayed],
+        "candidate_output_sha256s": [item.output_sha256 for item in displayed],
+        "target_sha256": displayed[0].target_sha256,
+        "randomization_sha256": validated.randomization_sha256,
         "preference_profile": PREFERENCE_PROFILE,
     }
     return body | {"response_sha256": canonical_json_sha256(body)}

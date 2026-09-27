@@ -11,6 +11,23 @@ _E = "e" * 64
 _F = "f" * 64
 
 
+def _raster_safety(*, protected_art_overlap_px: int = 0):
+    from ownership.hash_contract import canonical_json_sha256
+
+    body = {
+        "schema": "traduzai.raster-safety.v1",
+        "status": "pass" if protected_art_overlap_px == 0 else "review_required",
+        "bbox": [10, 20, 30, 40],
+        "ink_pixel_count": 120,
+        "alpha_sha256": _A,
+        "authorized_body_sha256": _B,
+        "protected_art_sha256": _C,
+        "outside_authorized_body_px": 0,
+        "protected_art_overlap_px": protected_art_overlap_px,
+    }
+    return body | {"evidence_sha256": canonical_json_sha256(body)}
+
+
 def _candidate(*, recipe_sha256: str, output_sha256: str, target_text: str = "Ação!"):
     from typesetter.preference_contract import PreferenceCandidate
 
@@ -24,7 +41,11 @@ def _candidate(*, recipe_sha256: str, output_sha256: str, target_text: str = "A�
         output_sha256=output_sha256,
         preview_ref={"relative_path": f"previews/{output_sha256[:8]}.png", "sha256": output_sha256},
         context_ref={"relative_path": "context/page-001.png", "sha256": _D},
-        metrics={"minimum_ink_gap_px": 8.5, "font_size_px": 31},
+        metrics={
+            "minimum_ink_gap_px": 8.5,
+            "font_size_px": 31,
+            "raster_safety": _raster_safety(),
+        },
         hard_safety_passed=True,
     )
 
@@ -69,6 +90,7 @@ def test_comparison_requires_two_distinct_safe_candidates_for_same_rendering_tas
 
     unsafe_payload = second.to_dict() | {"hard_safety_passed": False}
     unsafe_payload.pop("candidate_id")
+    unsafe_payload["metrics"]["raster_safety"] = _raster_safety(protected_art_overlap_px=1)
     unsafe = PreferenceCandidate.build(**unsafe_payload)
     with pytest.raises(ValueError, match="hard safety"):
         PreferenceComparison.build(first, unsafe, randomization_nonce="seed")
@@ -79,6 +101,17 @@ def test_comparison_requires_two_distinct_safe_candidates_for_same_rendering_tas
 
     with pytest.raises(ValueError, match="distinct"):
         PreferenceComparison.build(first, first, randomization_nonce="seed")
+
+
+def test_candidate_cannot_claim_hard_safety_without_raster_evidence() -> None:
+    from typesetter.preference_contract import PreferenceCandidate
+
+    payload = _candidate(recipe_sha256=_E, output_sha256=_F).to_dict()
+    payload.pop("candidate_id")
+    payload["metrics"] = {"font_size_px": 31}
+
+    with pytest.raises(ValueError, match="raster safety evidence"):
+        PreferenceCandidate.build(**payload)
 
 
 def test_randomized_positions_are_reproducible_and_tamper_evident() -> None:
@@ -127,12 +160,25 @@ def test_preference_response_resolves_position_without_claiming_human_taste(
 
     result = resolve_preference_choice(comparison, choice)
 
+    assert result["schema"] == "traduzai.renderer-preference-resolution.v1"
     assert result["choice"] == choice
     assert result["preference_profile"] == "uncalibrated"
     assert result["selected_candidate_id"] == (
         comparison.positions[expected_position] if expected_position else None
     )
     assert result["comparison_sha256"] == comparison.comparison_sha256
+    displayed = {
+        position: next(item for item in comparison.candidates if item.candidate_id == candidate_id)
+        for position, candidate_id in comparison.positions.items()
+    }
+    assert result["candidate_recipe_sha256s"] == [
+        displayed["A"].recipe_sha256,
+        displayed["B"].recipe_sha256,
+    ]
+    assert result["candidate_output_sha256s"] == [
+        displayed["A"].output_sha256,
+        displayed["B"].output_sha256,
+    ]
 
 
 def test_preference_response_rejects_unknown_choice() -> None:
