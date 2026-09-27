@@ -17,7 +17,7 @@
   ],
   "materialized_hash_semantics": "Entradas ausentes em materialized_overrides preservam exatamente o hash de files. Entradas presentes foram adaptadas no worktree e seu SHA-256 atual e autenticado e revisado no diff.",
   "materialized_overrides": {
-    "pipeline/consumer_fast/runtime/consumer_operational_recovery.py": "a94c1a64725bbd24338ad73bae95d459c9b328bda13dcb216e4e68828c17eb15",
+    "pipeline/consumer_fast/runtime/consumer_operational_recovery.py": "72ef8264d3dd0ef23310aa94133a246ed0473c17502a688e74515fe404b205f7",
     "pipeline/consumer_fast/run_operational_closure.py": "a1c98ca092b05b0ce3421ede84bede2698676db64a46154696000d262a978328",
     "pipeline/consumer_fast/runtime/consumer_recipe_runtime.py": "31c1689196ede576d9495d8779d24f23911ab824c8aac38d6924e1485901ce6d",
     "pipeline/consumer_fast/runtime/consumer_layout_search.py": "4e3e757e935c4d903fc49b672c26cb352dfb60dfff36eaf4e8d7ef80ec2b28c2",

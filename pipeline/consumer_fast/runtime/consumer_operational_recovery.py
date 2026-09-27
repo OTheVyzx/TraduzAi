@@ -508,7 +508,7 @@ def prepare_member(*, source_root: Path, control_root: Path, member: str,
             job, adjudicated = _cached_or_fresh_ocr(
                 page_rgb=original, crop=crop, bbox=crop_bbox, member=member,
                 page_id=page["page_id"], source_sha256=page["source_sha256"],
-                cache_root=cache_root if allow_prepared_responses else None, run_id=run_id,
+                cache_root=cache_root, run_id=run_id,
                 origin_execution_id=origin_execution_id,
                 ocr_invocation=ocr_invocation, context=context,
                 allow_cache_read=allow_prepared_responses)
