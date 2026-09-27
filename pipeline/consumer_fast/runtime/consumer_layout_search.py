@@ -261,6 +261,7 @@ def search_source_centered_layout(clean: np.ndarray, base_recipe: dict,
     widths = sorted({max(8, int(round(max_width*ratio))) for ratio in width_ratios}, reverse=True)
     attempts = []
     accepted = []
+    early_completion = None
     # Prefer breathing room within a bounded, source-relative readable range.
     # Once this distance is reached, extra empty space earns no reward.
     desired_comfort = max(float(prepared["ideal_px"]), .50 * source_visual_height_px)
@@ -338,12 +339,22 @@ def search_source_centered_layout(clean: np.ndarray, base_recipe: dict,
                                  comfort_shortfall_px=shortfall,
                                  center_error_px=evidence["center_error_px"])
                     accepted.append((score, recipe, layer, evidence, entry))
+                    if size == preferred_font_size and shortfall == 0:
+                        early_completion = "preferred_size_comfort_target_reached"
                 except (ValueError, IndexError) as error:
                     entry.update(status="rejected", reason=str(error))
                 attempts.append(entry)
+                if early_completion is not None:
+                    break
+            if early_completion is not None:
+                break
+        if early_completion is not None:
+            break
         if len(attempts) >= maximum_candidates:
             break
     time_budget_exhausted = (
+        early_completion is None
+        and
         maximum_seconds is not None
         and time.monotonic() - started >= maximum_seconds
     )
@@ -374,6 +385,7 @@ def search_source_centered_layout(clean: np.ndarray, base_recipe: dict,
                                "chosen_score": score,
                                "chosen_lines": choice["lines"],
                                "alternative_breaks": alternative_breaks,
+                               "early_completion": early_completion,
                                "time_budget_exhausted": False,
                                "candidate_count": len(attempts),
                                "attempts": attempts}
