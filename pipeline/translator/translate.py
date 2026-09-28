@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -457,6 +458,36 @@ def _translate_google_parallel_chunks(
     return [translated_by_source.get(text, text) for text in texts]
 
 
+_GOOGLE_PRIMARY_REQUEST_LOCK = threading.RLock()
+
+
+def _translate_with_bounded_deep_google(translator, text: str) -> str:
+    """Call deep-translator with a real per-request network deadline."""
+
+    import deep_translator.google as deep_google
+
+    timeout_sec = _env_positive_int("TRADUZAI_GOOGLE_HTTP_TIMEOUT_SEC", 15)
+
+    class _BoundedRequestsProxy:
+        def __init__(self, delegate):
+            self._delegate = delegate
+
+        def get(self, *args, **kwargs):
+            kwargs.setdefault("timeout", timeout_sec)
+            return self._delegate.get(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+    with _GOOGLE_PRIMARY_REQUEST_LOCK:
+        original_requests = deep_google.requests
+        deep_google.requests = _BoundedRequestsProxy(original_requests)
+        try:
+            return translator.translate(text)
+        finally:
+            deep_google.requests = original_requests
+
+
 class _GoogleTranslator:
     def __init__(self, source="en", target="pt"):
         from deep_translator import GoogleTranslator
@@ -505,7 +536,7 @@ class _GoogleTranslator:
 
         for attempt in range(3):
             try:
-                result = self._translator.translate(text)
+                result = _translate_with_bounded_deep_google(self._translator, text)
                 self._cache[key] = result
                 if result:
                     self._persistent_store(key, result)
@@ -573,7 +604,10 @@ class _GoogleTranslator:
                     )
                     try:
                         from deep_translator import GoogleTranslator
-                        trans = GoogleTranslator(source="auto", target=self._translator.target).translate(uncached_texts[i])
+                        trans = _translate_with_bounded_deep_google(
+                            GoogleTranslator(source="auto", target=self._translator.target),
+                            uncached_texts[i],
+                        )
                     except Exception:
                         pass
                 results[i] = trans or uncached_texts[i]
@@ -704,7 +738,10 @@ def _call_ollama(model: str, system: str, user_msg: str, host: str) -> list[dict
         data=payload,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=180) as resp:
+    with urllib.request.urlopen(
+        req,
+        timeout=_env_positive_int("TRADUZAI_OLLAMA_HTTP_TIMEOUT_SEC", 15),
+    ) as resp:
         data = json.loads(resp.read().decode())
 
     content = data.get("message", {}).get("content", "").strip()
