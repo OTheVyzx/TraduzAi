@@ -1272,6 +1272,54 @@ def test_layout_chord_escape_fails_closed_without_crashing_page(monkeypatch):
     assert "owner_layout_unsafe" in execution.records[0]["qa_flags"]
 
 
+def test_page_composition_conflict_retires_every_conflicting_write():
+    from types import SimpleNamespace
+
+    from ownership.model import OwnerCompositionConflict
+    from strip.process_bands import _retire_owner_composition_conflicts
+    from test_final_pixel_qa import _graph
+
+    graph = _graph(state="owned")
+    owner = graph.owners[0]
+    record = {
+        "owner_id": owner.owner_id,
+        "state": "rendered",
+        "visible": True,
+        "qa_flags": ["existing_flag"],
+    }
+    conflict = OwnerCompositionConflict(
+        code="owner_pixel_conflict",
+        phase="cross_phase",
+        owner_ids=(owner.owner_id, "owner_peer"),
+        pixel_count=17,
+        message="Cleanup and glyph claims overlap between owners.",
+    )
+
+    commits, records, materializations = _retire_owner_composition_conflicts(
+        graph,
+        commits=(SimpleNamespace(owner_id=owner.owner_id),),
+        records=(record,),
+        target_materializations=(SimpleNamespace(owner_id=owner.owner_id),),
+        conflicts=(conflict,),
+        enforce_graph=True,
+    )
+
+    assert commits == ()
+    assert materializations == ()
+    assert graph.owners == []
+    assert graph.component_dispositions[0].decision == "uncertain"
+    graph.require_valid(mode="enforce")
+    assert records[0]["visible"] is False
+    assert records[0]["route_action"] == "review_required"
+    assert records[0]["owner_execution_rejection_reason"] == (
+        "owner composition conflict: cross_phase/owner_pixel_conflict/17"
+    )
+    assert records[0]["qa_flags"] == [
+        "existing_flag",
+        "owner_composition_conflict",
+    ]
+
+
 def test_dialogue_without_independent_container_stops_before_inpaint():
     from test_final_pixel_qa import _graph
     from strip.process_bands import execute_owner_page_graph
