@@ -6447,6 +6447,7 @@ def _run_owner_style_replay_chapter(
         finalized, evidence_ref = finalize_and_persist_page_result(
             candidate,
             candidate_pixels=rendered_rgb,
+            original_pixels=original_rgb,
             cleanup_pixels=cleanup_rgb,
             generation_root=artifact_root,
             observer=observer,
@@ -7571,6 +7572,7 @@ def run_chapter(
             finalized, evidence_ref = finalize_and_persist_page_result(
                 owner_page_results_by_page[_page_id_for(page_index + 1)],
                 candidate_pixels=page.image,
+                original_pixels=original_page.image,
                 cleanup_pixels=page.inpainted_image,
                 generation_root=private_execution_root,
                 observer=DetectorOcrFinalPixelObserver(

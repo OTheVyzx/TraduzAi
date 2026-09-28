@@ -1,5 +1,6 @@
 """Smoke test do entry-point run_chapter."""
 
+import ast
 import sys
 import tempfile
 import unittest
@@ -114,6 +115,32 @@ class DarkPanelCleanupTests(unittest.TestCase):
 
 
 class RunChapterSmokeTests(unittest.TestCase):
+    def test_every_page_finalization_supplies_original_pixels(self):
+        """All publication paths must validate against the immutable source page."""
+
+        run_source = Path(__file__).resolve().parents[1] / "strip" / "run.py"
+        tree = ast.parse(run_source.read_text(encoding="utf-8"))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "finalize_and_persist_page_result"
+        ]
+
+        self.assertEqual(len(calls), 2)
+        original_sources = set()
+        for call in calls:
+            with self.subTest(line=call.lineno):
+                keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+                self.assertIn(
+                    "original_pixels",
+                    keywords,
+                    f"page finalization at line {call.lineno} omitted source pixels",
+                )
+                original_sources.add(ast.unparse(keywords["original_pixels"]))
+        self.assertEqual(original_sources, {"original_rgb", "original_page.image"})
+
     def test_debug_crops_are_derived_from_final_page_only(self):
         from strip.run import _write_final_band_crop_debug
         from strip.types import Band, OutputPage
