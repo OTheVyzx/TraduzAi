@@ -9255,6 +9255,23 @@ def _build_connected_reasoner_config(config: dict, *, ollama_status: dict | None
     return result
 
 
+def _resolve_chapter_translation_provider(config: dict):
+    if config.get("runtime_id") == "consumer-fast-v1":
+        plan = config.get("consumer_fast_execution_plan") or {}
+        if (
+            plan.get("schema") != "traduzai.consumer-fast-plan.v1"
+            or config.get("translation_provider_policy") != "consumer-fast-bounded-owner-v1"
+            or config.get("legacy_translation_fallback_allowed") is not False
+        ):
+            raise ValueError("Consumer Fast execution plan/provider binding is incomplete")
+        from consumer_fast import provider_adapter
+
+        return provider_adapter
+    from translator import translate
+
+    return translate
+
+
 def _run_pipeline(config_path: str):
     from corpus.runtime import extract_expected_terms, load_corpus_bundle, merge_corpus_into_context
     from extractor.extractor import cleanup, extract
@@ -9373,7 +9390,7 @@ def _run_pipeline(config_path: str):
             run_final_pixel_ocr_probe,
             run_ocr_stage,
         )
-        from translator import translate as translator_mod
+        translator_mod = _resolve_chapter_translation_provider(config)
         from inpainter import inpaint_band_image
         from typesetter import renderer as typesetter_mod
         from translator.context import fetch_context, merge_context
@@ -17214,7 +17231,13 @@ def _build_cli_help() -> str:
 
 if __name__ == "__main__":
     try:
-        main()
+        if len(sys.argv) >= 2 and sys.argv[1] == "--consumer-fast-v1":
+            from consumer_fast.chapter_runner import run_chapter
+            if len(sys.argv) != 3:
+                raise ValueError("uso: traduzai-pipeline --consumer-fast-v1 <config.json>")
+            run_chapter(Path(sys.argv[2]))
+        else:
+            main()
     except Exception as e:
         import traceback
         tb = traceback.format_exc()

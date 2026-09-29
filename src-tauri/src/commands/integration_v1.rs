@@ -1219,6 +1219,8 @@ fn physical_pipeline_config(
         .unwrap_or("Obra sem título");
     let capitulo = project.get("capitulo").and_then(Value::as_u64).unwrap_or(1);
     Ok(json!({
+        "runtime_id": "consumer-fast-v1",
+        "consumer_fast_plan_schema": "traduzai.consumer-fast-plan.v1",
         "job_id": job_id,
         "source_path": source_path,
         "work_dir": work_dir.to_string_lossy(),
@@ -1355,7 +1357,7 @@ async fn execute_consumer_job(app: AppHandle, project_file: PathBuf, job_id: Str
         )
         .map_err(|error| format!("falha ao persistir config física: {error}"))?;
         let output_path =
-            crate::commands::pipeline::run_pipeline_config_file(&app, &config_file).await?;
+            crate::commands::pipeline::run_consumer_fast_config_file(&app, &config_file).await?;
         let output_project = resolve_physical_output_project(&work_dir, &output_path)?;
         attach_job_ledger_to_physical_output(&project_file, &output_project, &job_id)?;
         register_job(&app, &job_id, &output_project)?;
@@ -2764,6 +2766,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config["source_path"], "N:/source/chapter.cbz");
+        assert_eq!(config["runtime_id"], "consumer-fast-v1");
         assert_eq!(config["owner_graph_mode"], "enforce");
         assert_eq!(config["style_copy_mode"], "shadow");
         assert_eq!(config["pause_file"], "N:/runtime/pause.flag");

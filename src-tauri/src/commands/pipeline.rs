@@ -932,6 +932,28 @@ pub(crate) async fn run_pipeline_config_file(
     }
 }
 
+pub(crate) async fn run_consumer_fast_config_file(
+    app: &AppHandle,
+    config_path: &std::path::Path,
+) -> Result<String, String> {
+    let mut sidecar = get_sidecar_info(app)?;
+    if cfg!(debug_assertions) {
+        let script = std::path::Path::new(
+            sidecar
+                .script
+                .as_deref()
+                .ok_or_else(|| "script Python do pipeline não resolvido".to_string())?,
+        )
+        .parent()
+        .ok_or_else(|| "raiz do pipeline não resolvida".to_string())?
+        .join("consumer_fast/chapter_runner.py");
+        sidecar.script = Some(script.to_string_lossy().to_string());
+    } else {
+        sidecar.script = Some("--consumer-fast-v1".to_string());
+    }
+    run_sidecar(app, &sidecar, config_path).await
+}
+
 #[tauri::command]
 pub async fn cancel_pipeline() -> Result<(), String> {
     *PIPELINE_CANCEL.lock().await = true;
