@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-03",
+  "upstreams": {
+    "suwayomiServer": {
+      "repository": "https://github.com/Suwayomi/Suwayomi-Server.git",
+      "commit": "ac3dd314dba275fdadc4a3208002a9fa42135bf2",
+      "gradleWrapper": "9.7.1",
+      "license": "MPL-2.0"
+    },
+    "mihon": {
+      "repository": "https://github.com/mihonapp/mihon.git",
+      "commit": "056d9baeeba6b7f53c0638b3d30da72e71c159fa",
+      "license": "Apache-2.0"
+    },
+    "keiyoushiExtensionsSource": {
+      "repository": "https://github.com/keiyoushi/extensions-source.git",
+      "commit": "2063590a39622a68075a4cb8834edec8b11d0986",
+      "license": "Apache-2.0"
+    },
+    "temurin": {
+      "repository": "https://github.com/adoptium/temurin21-binaries.git",
+      "release": "jdk-21.0.12.1+1",
+      "platform": "windows-x64-hotspot",
+      "archive": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip",
+      "sha256": "f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e",
+      "license": "GPL-2.0-with-classpath-exception"
+    },
+    "gradle": {
+      "repository": "https://github.com/gradle/gradle.git",
+      "release": "8.14.3",
+      "archive": "gradle-8.14.3-bin.zip",
+      "sha256": "bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531",
+      "license": "Apache-2.0"
+    }
+  }
+}
