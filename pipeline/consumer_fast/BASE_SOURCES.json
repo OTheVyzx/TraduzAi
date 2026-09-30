@@ -42,7 +42,7 @@
     "pipeline/consumer_fast/run_operational_closure.py": "a1c98ca092b05b0ce3421ede84bede2698676db64a46154696000d262a978328",
     "pipeline/consumer_fast/runtime/consumer_recipe_runtime.py": "31c1689196ede576d9495d8779d24f23911ab824c8aac38d6924e1485901ce6d",
     "pipeline/consumer_fast/runtime/consumer_layout_search.py": "4e3e757e935c4d903fc49b672c26cb352dfb60dfff36eaf4e8d7ef80ec2b28c2",
-    "pipeline/typesetter/renderer.py": "d3fbe6835fa3807e65e1a42956527c9c0ab1df38cc738efdf69a54f83b41ec5a",
+    "pipeline/typesetter/renderer.py": "c56318b59394d0cfc4477d39fe20e7df9fc12b0398c14f93bd723e39debea2c7",
     "pipeline/typesetter/font-policy.json": "e79d4e3bec049c73e1511c963f4dc4c2edcd6c899c2ef368212823f501e26162",
     "pipeline/ownership/render_geometry.py": "b3a6ce8868721a770f12ac9c31135700b28be3bbe9bd98122744ac47d6c82d85",
     "pipeline/typesetter/owner_render_quality.py": "5c35e8b79e3f3270293c1a311b347e710fa77ff40715593674f90b8da7850e45",
