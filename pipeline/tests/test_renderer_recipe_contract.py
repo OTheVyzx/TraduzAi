@@ -140,3 +140,88 @@ def test_recipe_exports_the_existing_integration_receipt_shape() -> None:
     assert adapt_contract_payload("Recipe", receipt) == receipt
     assert receipt["recipe_sha256"] == recipe.recipe_sha256
     assert receipt["runtime_sha256"] == recipe.rasterizer["runtime_sha256"]
+
+
+def test_persisted_recipe_is_immutable_and_roundtrips(tmp_path) -> None:
+    from typesetter.recipe_persistence import load_renderer_recipe, persist_renderer_recipe
+
+    recipe = _recipe()
+    path = persist_renderer_recipe(tmp_path, recipe)
+
+    assert load_renderer_recipe(path) == recipe
+    assert persist_renderer_recipe(tmp_path, recipe) == path
+    assert path.read_bytes().endswith(b"}")
+
+
+def test_typography_edit_replays_deterministically_and_keeps_analysis_revision(tmp_path) -> None:
+    from typesetter.recipe_persistence import (
+        load_renderer_recipe,
+        persist_renderer_recipe,
+        rerender_typography_edit,
+    )
+    from typesetter.recipe_contract import ExactLinePlan, RendererRecipe
+
+    previous = _recipe(target_text="AÇÃO total", lines=["AÇÃO", "total"], separators=[" "])
+    previous_payload = previous.to_dict()
+    previous_payload.pop("recipe_sha256")
+    previous_payload["dependency_hashes"]["analysis_record"] = "1" * 64
+    previous = RendererRecipe.build(**previous_payload)
+
+    output = b"canonical edited RGBA pixels"
+    revised_payload = previous.to_dict()
+    revised_payload.pop("recipe_sha256")
+    revised_payload.pop("target_utf8_sha256")
+    revised_payload.update(
+        target_text="AÇÃO definitiva",
+        output_sha256=sha256(output).hexdigest(),
+        line_plan=ExactLinePlan.build(
+            target_text="AÇÃO definitiva", lines=["AÇÃO", "definitiva"], separators=[" "],
+        ).to_dict(),
+    )
+    revised = RendererRecipe.build(**revised_payload)
+    rasterize_calls = []
+
+    def rasterize(recipe):
+        rasterize_calls.append(recipe.recipe_sha256)
+        return output
+
+    rendered, path = rerender_typography_edit(
+        previous, revised, rasterize=rasterize, persist_root=tmp_path,
+    )
+    replayed, replay_path = rerender_typography_edit(
+        previous, revised, rasterize=rasterize, persist_root=tmp_path,
+    )
+
+    assert rendered == replayed == output
+    assert rasterize_calls == [revised.recipe_sha256, revised.recipe_sha256]
+    assert path is not None
+    assert replay_path == path
+    persisted = load_renderer_recipe(path)
+    assert persisted.target_text == "AÇÃO definitiva"
+    assert persisted.dependency_hashes["analysis_record"] == previous.dependency_hashes["analysis_record"]
+    assert persisted.recipe_sha256 != previous.recipe_sha256
+    assert persist_renderer_recipe(tmp_path, persisted) == path
+
+
+def test_typography_edit_rejects_analysis_record_substitution() -> None:
+    from typesetter.recipe_contract import ExactLinePlan, RendererRecipe
+    from typesetter.recipe_persistence import rerender_typography_edit
+
+    previous = _recipe()
+    old_payload = previous.to_dict()
+    old_payload.pop("recipe_sha256")
+    old_payload["dependency_hashes"]["analysis_record"] = "1" * 64
+    previous = RendererRecipe.build(**old_payload)
+    revised_payload = previous.to_dict()
+    revised_payload.pop("recipe_sha256")
+    revised_payload.pop("target_utf8_sha256")
+    revised_payload["target_text"] = "EDITADO"
+    revised_payload["line_plan"] = ExactLinePlan.build(
+        target_text="EDITADO", lines=["EDITADO"], separators=[],
+    ).to_dict()
+    revised_payload["output_sha256"] = _A
+    revised_payload["dependency_hashes"]["analysis_record"] = "2" * 64
+    revised = RendererRecipe.build(**revised_payload)
+
+    with pytest.raises(ValueError, match="same AnalysisRecord"):
+        rerender_typography_edit(previous, revised, rasterize=lambda _recipe: b"unused")
