@@ -213,6 +213,96 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(correct["render_bbox"], [275, 16138, 547, 16321])
         self.assertTrue(correct["_cross_page_band_rehomed_geometry"])
 
+    def test_rehome_cross_page_band_layer_does_not_merge_into_unrelated_longer_sibling(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "numero": 2,
+                    "text_layers": [
+                        {
+                            "id": "ocr_004",
+                            "text_id": "ocr_004",
+                            "trace_id": "ocr_004@page_002_band_019",
+                            "band_id": "page_002_band_019",
+                            "visible": True,
+                            "translated": "TEXTO MAIS LONGO DE OUTRO BALÃO",
+                            "text_pixel_bbox": [80, 300, 250, 380],
+                            "target_bbox": [60, 280, 270, 400],
+                        },
+                        {
+                            "id": "ocr_006",
+                            "text_id": "ocr_006",
+                            "trace_id": "ocr_006@page_002_band_019",
+                            "band_id": "page_002_band_019",
+                            "visible": True,
+                            "translated": "TEXTO CURTO ORIGINAL",
+                            "text_pixel_bbox": [500, 640, 700, 720],
+                            "target_bbox": [480, 620, 720, 740],
+                        },
+                    ],
+                },
+                {
+                    "numero": 3,
+                    "text_layers": [
+                        {
+                            "id": "ocr_006",
+                            "text_id": "ocr_006",
+                            "trace_id": "ocr_006@page_002_band_019",
+                            "band_id": "page_002_band_019",
+                            "visible": True,
+                            "translated": "TEXTO CURTO CORRIGIDO",
+                            "text_pixel_bbox": [500, 640, 700, 720],
+                            "target_bbox": [480, 620, 720, 740],
+                        }
+                    ],
+                },
+            ]
+        }
+
+        moved = main._rehome_cross_page_band_layers(project)
+
+        points_layer, strength_layer = project["paginas"][0]["text_layers"]
+        misplaced = project["paginas"][1]["text_layers"][0]
+        self.assertEqual(moved, 1)
+        self.assertEqual(points_layer["translated"], "TEXTO MAIS LONGO DE OUTRO BALÃO")
+        self.assertEqual(strength_layer["translated"], "TEXTO CURTO CORRIGIDO")
+        self.assertFalse(misplaced["visible"])
+        self.assertEqual(misplaced["merged_into_trace_id"], "ocr_006@page_002_band_019")
+
+    def test_rehome_cross_page_band_layer_moves_standalone_layer_when_destination_has_no_band_layer(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "numero": 2,
+                    "text_layers": [
+                        {
+                            "id": "ocr_001",
+                            "text_id": "ocr_001",
+                            "trace_id": "ocr_001@page_003_band_013",
+                            "band_id": "page_003_band_013",
+                            "visible": True,
+                            "translated": "TEXTO QUE PERTENCE À PÁGINA 3",
+                            "text_pixel_bbox": [120, 340, 410, 460],
+                            "target_bbox": [100, 320, 430, 480],
+                        }
+                    ],
+                },
+                {"numero": 3, "text_layers": []},
+            ]
+        }
+
+        moved = main._rehome_cross_page_band_layers(project)
+
+        misplaced = project["paginas"][0]["text_layers"][0]
+        destination_layers = project["paginas"][1]["text_layers"]
+        self.assertEqual(moved, 1)
+        self.assertFalse(misplaced["visible"])
+        self.assertEqual(misplaced["render_policy"], "rehomed_to_destination")
+        self.assertEqual(len(destination_layers), 1)
+        self.assertEqual(destination_layers[0]["trace_id"], "ocr_001@page_003_band_013")
+        self.assertEqual(destination_layers[0]["translated"], "TEXTO QUE PERTENCE À PÁGINA 3")
+        self.assertIn("cross_page_band_rehomed", destination_layers[0]["qa_flags"])
+
     def test_scrub_project_local_auxiliary_bboxes_removes_band_local_render_plan_fields(self) -> None:
         project = {
             "paginas": [
@@ -2014,6 +2104,91 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(rows_by_band["page_003_band_045"]["changed_gt8"], 0)
             self.assertEqual(rows_by_band["page_003_band_046"]["visible_pixels"], 72)
             self.assertTrue((debug_root / "translated_page_band_consistency_audit.json").exists())
+
+    def test_translated_page_band_consistency_tolerates_jpeg_recompression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_bands = debug_root / "final_bands"
+            final_bands.mkdir(parents=True)
+
+            y, x = np.indices((160, 180))
+            textured = np.zeros((160, 180, 3), dtype=np.uint8)
+            textured[:, :, 0] = (x * 7 + y * 3) % 256
+            textured[:, :, 1] = (x * 5 + y * 11) % 256
+            textured[:, :, 2] = ((x // 4 + y // 5) % 2) * 190 + 30
+            final_path = final_bands / "page_001_band_000.jpg"
+            cv2.imwrite(str(final_path), textured, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            cv2.imwrite(str(translated_dir / "001.jpg"), textured, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            (debug_root / "final_band_crops.jsonl").write_text(
+                json.dumps(
+                    {
+                        "band_id": "page_001_band_000",
+                        "translated_output_page": "001.jpg",
+                        "band_y_top": 0,
+                        "band_y_bottom": 160,
+                        "crop_bbox_in_translated_page": [0, 0, 180, 160],
+                        "final_crop_path": "10_copyback_reassemble/final_bands/page_001_band_000.jpg",
+                        "trace_ids": ["ocr_001@page_001_band_000"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            audit = main._write_translated_page_band_consistency_audit(
+                DebugRecorder(root, enabled=True, run_id="run-test"),
+                root,
+            )
+
+            self.assertTrue(audit["passed"])
+            self.assertTrue(audit["rows"][0]["jpeg_recompression_tolerated"])
+            self.assertEqual(audit["rows"][0]["flags"], [])
+
+    def test_translated_page_band_consistency_rejects_structural_content_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_bands = debug_root / "final_bands"
+            final_bands.mkdir(parents=True)
+
+            final = np.full((120, 160, 3), 240, dtype=np.uint8)
+            translated = final.copy()
+            translated[35:85, 40:120] = [0, 0, 0]
+            final_path = final_bands / "page_001_band_000.png"
+            cv2.imwrite(str(final_path), final)
+            cv2.imwrite(str(translated_dir / "001.png"), translated)
+            (debug_root / "final_band_crops.jsonl").write_text(
+                json.dumps(
+                    {
+                        "band_id": "page_001_band_000",
+                        "translated_output_page": "001.png",
+                        "band_y_top": 0,
+                        "band_y_bottom": 120,
+                        "crop_bbox_in_translated_page": [0, 0, 160, 120],
+                        "final_crop_path": "10_copyback_reassemble/final_bands/page_001_band_000.png",
+                        "trace_ids": ["ocr_001@page_001_band_000"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            audit = main._write_translated_page_band_consistency_audit(
+                DebugRecorder(root, enabled=True, run_id="run-test"),
+                root,
+            )
+
+            self.assertFalse(audit["passed"])
+            self.assertIn("translated_crop_mismatch_final_band_visible_area", audit["rows"][0]["flags"])
 
     def test_post_rerender_visual_contract_uses_visible_slice_for_page_start_clipped_band(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

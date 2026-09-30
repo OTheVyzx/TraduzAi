@@ -646,6 +646,13 @@ def consolidate_mask_evidence(
         reasons.append("coverage_too_low")
 
     fast_fill_allowed = not reasons
+    default_contract_kind = (
+        "missing"
+        if normalized_kind == "none"
+        else "geometry_only"
+        if normalized_kind == "clipped_line_polygon"
+        else "glyph_confirmed"
+    )
     evidence = {
         "kind": normalized_kind,
         "raw_mask_pixels": raw_pixels,
@@ -653,8 +660,19 @@ def consolidate_mask_evidence(
         "evidence_score": round(float(score), 6),
         "fast_fill_allowed": bool(fast_fill_allowed),
         "fast_fill_reject_reasons": reasons,
+        "contract_kind": default_contract_kind,
     }
     region["mask_evidence"] = evidence
+    metrics = region.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict) and "glyph_mask_contract" not in metrics:
+        metrics["glyph_mask_contract"] = {
+            "kind": default_contract_kind,
+            "sources": [],
+            "raw_mask_rejected_overbroad": False,
+            "raw_mask_dense_in_text_bbox": False,
+            "geometry_pixels": 0,
+            "final_mask_pixels": int(expanded_pixels),
+        }
     route_action = str(region.get("route_action") or "").strip().lower()
     fast_fill_route = route_action in {"", "translate_inpaint_render", "inpaint_only"}
     if (
@@ -5754,6 +5772,7 @@ def build_inpaint_mask(
 
     text_mask = None
     raw_text_mask = None
+    raw_mask_rejected_overbroad = False
     visual_text_only_source_mask = None
     used_component_bubble_cleaner = False
     explicit_bubble_mask, _bubble_mask_key = _explicit_bubble_mask_array(block)
@@ -5815,6 +5834,7 @@ def build_inpaint_mask(
                 and np.any(geometry_mask)
                 and _mask_is_overbroad_against_geometry(text_mask, geometry_mask)
             ):
+                raw_mask_rejected_overbroad = True
                 text_mask = geometry_mask.astype(np.uint8)
         elif raw_text_evidence_rejected(block):
             if (
@@ -6438,7 +6458,46 @@ def build_inpaint_mask(
                 "bbox": _mask_bbox(bubble_mask),
                 "reason": "balloon_mask_touches_band_edge",
             }
-    consolidate_mask_evidence(
+    raw_mask_dense_in_text_bbox = False
+    raw_mask_text_bbox_coverage = 0.0
+    if isinstance(raw_text_mask, np.ndarray) and np.any(raw_text_mask):
+        text_bbox = _normalize_bbox(block.get("text_pixel_bbox"), width, height)
+        if text_bbox is not None:
+            x1, y1, x2, y2 = text_bbox
+            text_bbox_area = max(1, (x2 - x1) * (y2 - y1))
+            raw_pixels_in_text_bbox = int(np.count_nonzero(raw_text_mask[y1:y2, x1:x2]))
+            raw_mask_text_bbox_coverage = raw_pixels_in_text_bbox / float(text_bbox_area)
+            raw_mask_dense_in_text_bbox = raw_mask_text_bbox_coverage >= 0.55
+
+    glyph_contract_sources: list[str] = []
+    if (
+        isinstance(raw_text_mask, np.ndarray)
+        and np.any(raw_text_mask)
+        and not raw_mask_rejected_overbroad
+        and not raw_mask_dense_in_text_bbox
+    ):
+        glyph_contract_sources.append("raw_text_mask")
+    if used_component_bubble_cleaner:
+        glyph_contract_sources.append("component_bubble_cleaner")
+    if isinstance(visual_card_text_mask, np.ndarray) and np.any(visual_card_text_mask):
+        glyph_contract_sources.append("visual_card_glyph_mask")
+    if isinstance(dark_bubble_visual_mask, np.ndarray) and np.any(dark_bubble_visual_mask):
+        glyph_contract_sources.append("dark_bubble_visual_glyph_mask")
+    if isinstance(dark_bbox_mask, np.ndarray) and np.any(dark_bbox_mask):
+        glyph_contract_sources.append("dark_text_pixels")
+
+    final_mask_pixels = int(np.count_nonzero(text_mask))
+    # Line polygons and text bboxes are useful geometry, but they are not proof
+    # that the pixels inside them are actual glyphs. Keep that distinction in
+    # the audit contract before future safety gates act on it. A candidate
+    # source is not a usable contract when cleanup leaves no final mask.
+    candidate_glyph_contract_sources = list(glyph_contract_sources)
+    if final_mask_pixels <= 0:
+        glyph_contract_kind = "missing"
+        glyph_contract_sources = []
+    else:
+        glyph_contract_kind = "glyph_confirmed" if glyph_contract_sources else "geometry_only"
+    evidence = consolidate_mask_evidence(
         block,
         kind=(
             "component_bubble_cleaner"
@@ -6446,10 +6505,26 @@ def build_inpaint_mask(
             else "ocr_pixels" if isinstance(raw_text_mask, np.ndarray) and np.any(raw_text_mask) else "clipped_line_polygon"
         ),
         raw_mask_pixels=int(np.count_nonzero(raw_text_mask)) if isinstance(raw_text_mask, np.ndarray) else int(np.count_nonzero(text_mask)),
-        expanded_mask_pixels=int(np.count_nonzero(text_mask)),
+        expanded_mask_pixels=final_mask_pixels,
         evidence_score=1.0,
         fast_fill_reject_reasons=_dark_text_without_balloon_fast_fill_reject_reasons(block, image_shape),
     )
+    evidence["contract_kind"] = glyph_contract_kind
+    evidence["glyph_sources"] = list(glyph_contract_sources)
+    evidence["raw_mask_rejected_overbroad"] = bool(raw_mask_rejected_overbroad)
+    evidence["raw_mask_dense_in_text_bbox"] = bool(raw_mask_dense_in_text_bbox)
+    metrics = block.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["glyph_mask_contract"] = {
+            "kind": glyph_contract_kind,
+            "sources": list(glyph_contract_sources),
+            "candidate_sources": candidate_glyph_contract_sources,
+            "raw_mask_rejected_overbroad": bool(raw_mask_rejected_overbroad),
+            "raw_mask_dense_in_text_bbox": bool(raw_mask_dense_in_text_bbox),
+            "raw_mask_text_bbox_coverage": round(float(raw_mask_text_bbox_coverage), 6),
+            "geometry_pixels": int(np.count_nonzero(geometry_mask)) if isinstance(geometry_mask, np.ndarray) else 0,
+            "final_mask_pixels": final_mask_pixels,
+        }
     return text_mask
 
 

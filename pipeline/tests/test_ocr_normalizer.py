@@ -1,10 +1,17 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ocr import ocr_normalizer
 from ocr.ocr_normalizer import merge_same_balloon_fragments_before_translation, normalize_ocr_record, normalize_ocr_text
+
+
+@pytest.fixture(autouse=True)
+def _clear_ocr_assignment_audit_flag(monkeypatch):
+    monkeypatch.delenv("TRADUZAI_FLAG_OCR_ASSIGNMENT_AUDIT_V2", raising=False)
 
 
 def test_required_corrections_are_applied():
@@ -254,6 +261,113 @@ def test_same_balloon_merge_drops_duplicate_sentence_fragment_before_translation
     assert "ocr_joined_repaired" in merged[0]["qa_flags"]
 
 
+def test_same_balloon_merge_audits_risky_crop_fallback_without_changing_merge(monkeypatch):
+    monkeypatch.setenv("TRADUZAI_FLAG_OCR_ASSIGNMENT_AUDIT_V2", "1")
+    common = {
+        "bubble_mask_bbox": [40, 120, 760, 1040],
+        "band_id": "page_007_band_074",
+    }
+    records = [
+        {
+            **common,
+            "id": "ocr_primary",
+            "trace_id": "ocr_primary@page_007_band_074",
+            "text": "OF COURSE. THAT OUTDATED THIRD-RATE MARTIAL ART I KNEW COULDN'T POSSIBLY HAVE SUCH POWER.",
+            "bbox": [73, 160, 425, 356],
+            "text_pixel_bbox": [73, 160, 425, 356],
+            "confidence": 0.951,
+            "line_polygons": [[[73, 160], [425, 160], [425, 356], [73, 356]]],
+            "_ocr_assignment_audit": {"assignment_mode": "full_page_lines"},
+        },
+        {
+            **common,
+            "id": "ocr_crop",
+            "trace_id": "ocr_crop@page_007_band_074",
+            "text": "HIND NHIL ART I KNEW OSSIBLYHAVE POWER.",
+            "bbox": [235, 232, 720, 997],
+            "text_pixel_bbox": [235, 232, 720, 997],
+            "confidence": 0.57,
+            "_ocr_assignment_audit": {"assignment_mode": "crop_fallback"},
+        },
+    ]
+
+    merged = merge_same_balloon_fragments_before_translation(records)
+
+    assert len(merged) == 1
+    audit = merged[0]["_ocr_normalizer_merge_audit"]
+    assert audit["merge_path"] == "same_balloon_geometry"
+    assert audit["suspicious"] is True
+    assert audit["reason"] == "low_confidence_crop_fallback_dominates_geometry"
+    assert audit["suspicious_pairs"][0]["trusted_text_id"] == "ocr_primary"
+    assert audit["suspicious_pairs"][0]["weak_text_id"] == "ocr_crop"
+    assert audit["suspicious_pairs"][0]["weak_to_trusted_area_ratio"] == pytest.approx(5.378, abs=0.001)
+
+
+def test_same_balloon_merge_does_not_emit_audit_when_shadow_flag_is_off():
+    records = [
+        {
+            "id": "ocr_001",
+            "text": "PLEASE, FOR",
+            "bbox": [10, 10, 180, 60],
+            "text_pixel_bbox": [10, 10, 180, 60],
+            "bubble_mask_bbox": [0, 0, 240, 150],
+            "band_id": "page_001_band_001",
+        },
+        {
+            "id": "ocr_002",
+            "text": "THE CHILD'S SAKE.",
+            "bbox": [10, 58, 180, 110],
+            "text_pixel_bbox": [10, 58, 180, 110],
+            "bubble_mask_bbox": [0, 0, 240, 150],
+            "band_id": "page_001_band_001",
+        },
+    ]
+
+    merged = merge_same_balloon_fragments_before_translation(records)
+
+    assert len(merged) == 1
+    assert "_ocr_normalizer_merge_audit" not in merged[0]
+
+
+def test_quarantined_crop_fallback_is_preserved_and_never_remerged():
+    records = [
+        {
+            "id": "ocr_primary",
+            "text": "OF COURSE. THAT OUTDATED THIRD-RATE MARTIAL ART I KNEW COULDN'T POSSIBLY HAVE SUCH POWER.",
+            "bbox": [73, 160, 425, 356],
+            "text_pixel_bbox": [73, 160, 425, 356],
+            "bubble_mask_bbox": [40, 120, 760, 1040],
+            "band_id": "page_007_band_074",
+        },
+        {
+            "id": "ocr_crop",
+            "text": "HIND NHIL ART I KNEW OSSIBLYHAVE POWER.",
+            "bbox": [235, 232, 720, 997],
+            "text_pixel_bbox": [235, 232, 720, 997],
+            "bubble_mask_bbox": [40, 120, 760, 1040],
+            "band_id": "page_007_band_074",
+            "_ocr_assignment_quarantine": {"reason": "low_confidence_crop_fallback_dominates_geometry"},
+            "qa_flags": ["ocr_low_confidence_crop_fallback_quarantined"],
+            "skip_processing": True,
+            "preserve_original": True,
+            "translate_policy": "skip_translation",
+            "render_policy": "preserve_original",
+            "route_action": "review_required",
+        },
+    ]
+
+    normalized = [normalize_ocr_record(record) for record in records]
+    result = merge_same_balloon_fragments_before_translation(normalized)
+
+    assert len(result) == 2
+    quarantined = result[1]
+    assert quarantined["route_action"] == "review_required"
+    assert quarantined["translate_policy"] == "skip_translation"
+    assert quarantined["render_policy"] == "preserve_original"
+    assert quarantined["preserve_original"] is True
+    assert quarantined["skip_processing"] is True
+
+
 def test_dark_connected_lobes_do_not_merge_before_translation():
     common = {
         "bubble_mask_bbox": [56, 28, 713, 593],
@@ -290,6 +404,105 @@ def test_dark_connected_lobes_do_not_merge_before_translation():
     assert len(merged) == 2
     assert [item["id"] for item in merged] == ["ocr_001", "ocr_001_002"]
     assert "same_balloon_fragment_merged" not in (merged[0].get("qa_flags") or [])
+
+
+def test_same_balloon_merge_partitions_spatial_line_clusters_before_translation():
+    common = {
+        "bubble_mask_bbox": [160, 192, 583, 677],
+        "balloon_bbox": [0, 192, 709, 822],
+        "band_id": "page_028_band_109",
+    }
+    records = [
+        {
+            **common,
+            "id": "ocr_001_spatial_cluster_01",
+            "trace_id": "ocr_001_spatial_cluster_01@page_028_band_109",
+            "text": "I CAN'T FEEL ANYTHING.",
+            "bbox": [128, 333, 384, 404],
+            "text_pixel_bbox": [128, 333, 384, 404],
+            "_spatial_line_cluster_parent_id": "ocr_001",
+            "_spatial_line_cluster_index": 1,
+            "_spatial_line_cluster_count": 2,
+            "_spatial_text_body_bbox": [128, 333, 384, 404],
+        },
+        {
+            **common,
+            "id": "ocr_001_spatial_cluster_02",
+            "trace_id": "ocr_001_spatial_cluster_02@page_028_band_109",
+            "text": "PHEROMONES, MENTAL",
+            "bbox": [254, 524, 488, 589],
+            "text_pixel_bbox": [254, 524, 488, 589],
+            "_spatial_line_cluster_parent_id": "ocr_001",
+            "_spatial_line_cluster_index": 2,
+            "_spatial_line_cluster_count": 2,
+            "_spatial_text_body_bbox": [254, 524, 488, 589],
+        },
+        {
+            **common,
+            "id": "ocr_002",
+            "trace_id": "ocr_002@page_028_band_109",
+            "text": "SYNCHRONIZATION, EMOTIONS.",
+            "bbox": [224, 598, 519, 659],
+            "text_pixel_bbox": [224, 598, 519, 659],
+        },
+    ]
+
+    merged = merge_same_balloon_fragments_before_translation(records)
+
+    assert len(merged) == 2
+    assert merged[0]["text"] == "I CAN'T FEEL ANYTHING."
+    assert merged[0]["id"] == "ocr_001_spatial_cluster_01"
+    assert merged[1]["text"] == "PHEROMONES, MENTAL SYNCHRONIZATION, EMOTIONS."
+    assert merged[1]["source_text_ids"] == ["ocr_001_spatial_cluster_02", "ocr_002"]
+    assert "same_balloon_fragment_merged" in merged[1]["qa_flags"]
+
+
+def test_spatial_line_cluster_merges_adjacent_continuation_across_different_bubble_masks():
+    records = [
+        {
+            "id": "ocr_001_spatial_cluster_01",
+            "trace_id": "ocr_001_spatial_cluster_01@page_029_band_116",
+            "band_id": "page_029_band_116",
+            "bubble_mask_bbox": [187, 2186, 538, 2369],
+            "text": "DON'T HAVE ONE, I WAS ABANDONED.",
+            "bbox": [240, 2220, 485, 2335],
+            "text_pixel_bbox": [240, 2220, 485, 2335],
+            "_spatial_line_cluster_parent_id": "ocr_001",
+            "_spatial_line_cluster_index": 1,
+            "_spatial_line_cluster_count": 2,
+            "_spatial_text_body_bbox": [240, 2220, 485, 2335],
+        },
+        {
+            "id": "ocr_001_spatial_cluster_02",
+            "trace_id": "ocr_001_spatial_cluster_02@page_029_band_116",
+            "band_id": "page_029_band_116",
+            "bubble_mask_bbox": [35, 2428, 456, 2616],
+            "text": "NO IDENTIFICATION NUMBER",
+            "bbox": [99, 2463, 392, 2581],
+            "text_pixel_bbox": [99, 2463, 392, 2581],
+            "_spatial_line_cluster_parent_id": "ocr_001",
+            "_spatial_line_cluster_index": 2,
+            "_spatial_line_cluster_count": 2,
+            "_spatial_text_body_bbox": [99, 2463, 392, 2581],
+        },
+        {
+            "id": "ocr_002",
+            "trace_id": "ocr_002@page_029_band_116",
+            "band_id": "page_029_band_116",
+            "bubble_mask_bbox": [142, 2579, 346, 2634],
+            "text": "Either.",
+            "bbox": [94, 2468, 393, 2619],
+            "text_pixel_bbox": [173, 2591, 315, 2622],
+        },
+    ]
+
+    merged = merge_same_balloon_fragments_before_translation(records)
+
+    assert len(merged) == 2
+    assert merged[0]["text"] == "DON'T HAVE ONE, I WAS ABANDONED."
+    assert merged[1]["text"] == "NO IDENTIFICATION NUMBER Either."
+    assert merged[1]["source_text_ids"] == ["ocr_001_spatial_cluster_02", "ocr_002"]
+    assert "same_balloon_spatial_continuation_merged" in merged[1]["qa_flags"]
 
 
 def test_joined_ocr_is_repaired_before_review_flag_survives():

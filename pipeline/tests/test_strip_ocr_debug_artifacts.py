@@ -14,6 +14,7 @@ from strip.run import (
     _candidate_matches_band_text_bbox,
     _reconcile_overlapping_band_ocr_fragments_before_translation,
     _stitch_output_band_crop,
+    _write_strip_detect_text_matching_debug_artifacts,
     _write_lossless_visual_baseline,
     _write_final_band_crop_debug,
     _write_output_pages_after_lossless_debug,
@@ -26,6 +27,10 @@ from strip.process_bands import (
     _recover_empty_ocr_with_candidate_crops,
     _run_direct_paddle_candidate_crop_reocr,
     fuse_negative_dark_bubble_candidates,
+    _record_inpaint_identity_geometry_conflict_warnings,
+    _record_ocr_raw_blocks,
+    _record_inpaint_residual_warnings,
+    _record_unsafe_mask_contracts,
     process_band,
 )
 from strip.types import Band, Balloon, BBox, OutputPage, VerticalStrip
@@ -715,6 +720,423 @@ def test_ocr_confidence_audit_counts_only_lost_available_confidence():
     assert audit["summary"]["blocks_with_available_confidence"] == 2
     assert audit["summary"]["blocks_with_confidence_zero"] == 1
     assert audit["by_band"][0]["text_id"] == "ocr_002"
+
+
+def test_unsafe_mask_contract_warning_records_trace_and_contract(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page = {
+            "numero": 4,
+            "texts": [
+                {
+                    "id": "ocr_002",
+                    "trace_id": "ocr_002@page_004_band_036",
+                    "original": "WHERE ARE YOU GOING?",
+                    "bbox": [11, 22, 88, 46],
+                    "source_trace_ids": [
+                        "ocr_002@page_004_band_036",
+                        "ocr_001@page_004_band_036",
+                    ],
+                    "qa_flags": ["visual_text_only_inpaint_missing_glyph_source"],
+                    "qa_metrics": {
+                        "glyph_mask_contract": {
+                            "kind": "missing",
+                            "sources": [],
+                            "raw_mask_rejected_overbroad": True,
+                            "raw_mask_dense_in_text_bbox": False,
+                            "geometry_pixels": 832,
+                            "final_mask_pixels": 832,
+                        }
+                    },
+                },
+                {
+                    "id": "ocr_003",
+                    "original": "LEGACY FALLBACK WITHOUT CONTRACT",
+                    "bbox": [96, 22, 180, 46],
+                },
+                {
+                    "id": "ocr_004",
+                    "original": "GLYPH-SAFE TEXT",
+                    "bbox": [11, 52, 88, 76],
+                    "qa_metrics": {
+                        "glyph_mask_contract": {
+                            "kind": "glyph_confirmed",
+                            "sources": ["raw_text_mask"],
+                            "geometry_pixels": 128,
+                            "final_mask_pixels": 144,
+                        }
+                    },
+                },
+                {
+                    "id": "ocr_005",
+                    "original": "EMPTY FINAL MASK",
+                    "bbox": [96, 52, 180, 76],
+                    "qa_metrics": {
+                        "glyph_mask_contract": {
+                            "kind": "glyph_confirmed",
+                            "sources": ["raw_text_mask"],
+                            "geometry_pixels": 0,
+                            "final_mask_pixels": 0,
+                        }
+                    },
+                },
+            ],
+        }
+
+        _record_unsafe_mask_contracts(
+            page,
+            band_id="page_004_band_036",
+            source_page_number=4,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "unsafe_mask_contracts.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 3
+        assert rows[0]["trace_id"] == "ocr_002@page_004_band_036"
+        assert rows[0]["contract_kind"] == "missing"
+        assert rows[0]["reason"] == "glyph_mask_contract_missing"
+        assert rows[0]["raw_mask_rejected_overbroad"] is True
+        assert rows[0]["action"] == "audit_only_no_render_or_inpaint_change"
+        assert rows[0]["logical_group_trace_ids"] == [
+            "ocr_001@page_004_band_036",
+            "ocr_002@page_004_band_036",
+        ]
+        assert rows[1]["trace_id"] == "ocr_003@page_004_band_036"
+        assert rows[1]["contract_kind"] == "missing"
+        assert rows[2]["trace_id"] == "ocr_005@page_004_band_036"
+        assert rows[2]["reason"] == "glyph_mask_contract_empty_final_mask"
+        assert rows[2]["empty_final_mask"] is True
+        audit_path = tmp_path / "debug" / "e2e" / "warnings" / "mask_contract_audit.jsonl"
+        audit_rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+        assert len(audit_rows) == 4
+        assert audit_rows[2]["trace_id"] == "ocr_004@page_004_band_036"
+        assert audit_rows[2]["is_unsafe"] is False
+        assert audit_rows[2]["reason"] == "glyph_mask_contract_confirmed"
+        recovery_path = tmp_path / "debug" / "e2e" / "warnings" / "mask_contract_recovery_plan.jsonl"
+        recovery_rows = [json.loads(line) for line in recovery_path.read_text(encoding="utf-8").splitlines()]
+        assert len(recovery_rows) == 3
+        continuation_plan = next(
+            row for row in recovery_rows if row["logical_group_key"] == rows[0]["logical_group_key"]
+        )
+        assert continuation_plan["is_continuation_group"] is True
+        assert continuation_plan["recommended_recovery"] == "group_local_glyph_redetect_then_preserve_group"
+        assert continuation_plan["partial_group_render_forbidden"] is True
+    finally:
+        bind_recorder(None)
+
+
+def test_inpaint_residual_warning_groups_preserved_unsafe_glyph_texts(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page = {
+            "numero": 4,
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "trace_id": "ocr_001@page_004_band_036",
+                    "source_trace_ids": [
+                        "ocr_001@page_004_band_036",
+                        "ocr_002@page_004_band_036",
+                    ],
+                    "original": "CONTINUED SOURCE",
+                    "bbox": [11, 22, 88, 46],
+                    "route_action": "preserve_original",
+                    "route_reason": "missing_raw_glyph_evidence",
+                    "render_policy": "preserve_original",
+                    "skip_processing": True,
+                    "preserve_original": True,
+                    "qa_flags": ["unsafe_white_glyph_evidence_missing"],
+                    "qa_metrics": {
+                        "unsafe_white_balloon_glyph_fill": {
+                            "decision": "preserved_original",
+                            "reason": "missing_raw_glyph_evidence",
+                        }
+                    },
+                },
+                {
+                    "id": "ocr_002",
+                    "trace_id": "ocr_002@page_004_band_036",
+                    "source_trace_ids": [
+                        "ocr_001@page_004_band_036",
+                        "ocr_002@page_004_band_036",
+                    ],
+                    "original": "CONTINUED SOURCE",
+                    "bbox": [96, 22, 180, 46],
+                    "route_action": "preserve_original",
+                    "route_reason": "missing_raw_glyph_evidence",
+                    "render_policy": "preserve_original",
+                    "skip_processing": True,
+                    "preserve_original": True,
+                    "qa_flags": ["unsafe_white_glyph_evidence_missing"],
+                    "qa_metrics": {
+                        "unsafe_white_balloon_glyph_fill": {
+                            "decision": "preserved_original",
+                            "reason": "missing_raw_glyph_evidence",
+                        }
+                    },
+                },
+                {
+                    "id": "ocr_003",
+                    "trace_id": "ocr_003@page_004_band_036",
+                    "original": "SAFE FILL",
+                    "bbox": [11, 52, 88, 76],
+                    "qa_metrics": {
+                        "unsafe_white_balloon_glyph_fill": {
+                            "decision": "filled",
+                        }
+                    },
+                },
+            ],
+        }
+
+        _record_inpaint_residual_warnings(
+            page,
+            band_id="page_004_band_036",
+            source_page_number=4,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "inpaint_residual_blocks.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["logical_group_trace_ids"] == [
+            "ocr_001@page_004_band_036",
+            "ocr_002@page_004_band_036",
+        ]
+        assert rows[0]["preserved_text_ids"] == ["ocr_001", "ocr_002"]
+        assert rows[0]["reasons"] == ["missing_raw_glyph_evidence"]
+        assert rows[0]["fallback"] == "preserve_original_no_render"
+        assert rows[0]["partial_group_render_forbidden"] is True
+    finally:
+        bind_recorder(None)
+
+
+def test_inpaint_residual_warning_records_confirmed_glyph_residual_without_preserving_group(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page = {
+            "numero": 4,
+            "texts": [
+                {
+                    "id": "ocr_004",
+                    "trace_id": "ocr_004@page_004_band_036",
+                    "original": "RESIDUAL SOURCE",
+                    "bbox": [11, 52, 88, 76],
+                    "qa_flags": ["glyph_confirmed_residual_after_inpaint"],
+                    "qa_metrics": {
+                        "post_inpaint_glyph_residual": {
+                            "has_residual": True,
+                            "score": 0.042,
+                            "source": "raw_glyph_mask_expand2",
+                            "raw_mask_pixels": 244,
+                            "region_mask_pixels": 512,
+                            "dark_residual_pixels": 48,
+                            "light_residual_pixels": 0,
+                            "colored_residual_pixels": 0,
+                        }
+                    },
+                }
+            ],
+        }
+
+        _record_inpaint_residual_warnings(
+            page,
+            band_id="page_004_band_036",
+            source_page_number=4,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "inpaint_residual_blocks.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["warning_type"] == "confirmed_glyph_residual"
+        assert rows[0]["residual_text_ids"] == ["ocr_004"]
+        assert rows[0]["fallback"] == "pending_safe_recovery"
+        assert rows[0]["preserve_original"] is False
+    finally:
+        bind_recorder(None)
+
+
+def test_inpaint_identity_geometry_conflict_warning_is_audit_only(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page = {
+            "numero": 4,
+            "_strip_inpaint_identity_geometry_conflicts": [
+                {
+                    "text_id": "ocr_004",
+                    "trace_id": "ocr_004@page_004_band_036",
+                    "bbox": [11, 52, 88, 76],
+                    "block_identity": {"id": "ocr_004"},
+                    "geometry_text_id": "ocr_009",
+                    "overlap": 0.93,
+                    "decision": "audit_only_keep_existing_processing",
+                }
+            ],
+        }
+
+        _record_inpaint_identity_geometry_conflict_warnings(
+            page,
+            band_id="page_004_band_036",
+            source_page_number=4,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "inpaint_identity_geometry_conflicts.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["decision"] == "audit_only_keep_existing_processing"
+        assert rows[0]["recommended_recovery"] == "resolve_ocr_owner_before_inpaint"
+        assert rows[0]["action"] == "warning_only_pipeline_completed"
+    finally:
+        bind_recorder(None)
+
+
+def test_inpaint_residual_warning_records_applied_source_preservation_fallback(tmp_path):
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        page = {
+            "numero": 4,
+            "texts": [
+                {
+                    "id": "ocr_004",
+                    "trace_id": "ocr_004@page_004_band_036",
+                    "original": "RESIDUAL SOURCE",
+                    "bbox": [11, 52, 88, 76],
+                    "preserve_original": True,
+                    "skip_processing": True,
+                    "qa_flags": [
+                        "glyph_confirmed_residual_after_inpaint",
+                        "confirmed_source_glyph_residual_preserved",
+                    ],
+                    "qa_metrics": {
+                        "post_inpaint_glyph_residual": {
+                            "has_residual": True,
+                            "fallback_eligible": True,
+                            "confirmation": "strong_raw_glyph_overlap",
+                            "score": 0.155604,
+                            "source": "raw_glyph_mask",
+                            "raw_mask_pixels": 3194,
+                            "region_mask_pixels": 3194,
+                            "dark_residual_pixels": 497,
+                            "light_residual_pixels": 0,
+                            "colored_residual_pixels": 3,
+                        }
+                    },
+                }
+            ],
+        }
+
+        _record_inpaint_residual_warnings(
+            page,
+            band_id="page_004_band_036",
+            source_page_number=4,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "inpaint_residual_blocks.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["fallback"] == "preserve_original_no_render"
+        assert rows[0]["action"] == "warning_only_pipeline_completed"
+        assert rows[0]["preserve_original"] is True
+        assert rows[0]["skip_processing"] is True
+    finally:
+        bind_recorder(None)
+
+
+def test_process_band_emits_unsafe_mask_contract_warning_after_inpaint(tmp_path):
+    class ContractReportingInpainter:
+        def inpaint_band_image(self, image_rgb, page):
+            page["texts"][0]["qa_metrics"] = {
+                "glyph_mask_contract": {
+                    "kind": "geometry_only",
+                    "sources": [],
+                    "geometry_pixels": 640,
+                    "final_mask_pixels": 640,
+                }
+            }
+            return np.array(image_rgb, copy=True)
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        band = Band(
+            y_top=100,
+            y_bottom=180,
+            balloons=[Balloon(BBox(10, 112, 50, 140), confidence=0.87)],
+            strip_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+            original_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+        )
+
+        process_band(
+            band,
+            runtime=FakeRuntime(),
+            translator=FakeTranslator(),
+            inpainter=ContractReportingInpainter(),
+            typesetter=FakeTypesetter(),
+            page_idx=0,
+            source_page_number=1,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "unsafe_mask_contracts.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["band_id"] == "page_001_band_000"
+        assert rows[0]["contract_kind"] == "geometry_only"
+        assert rows[0]["action"] == "audit_only_no_render_or_inpaint_change"
+    finally:
+        bind_recorder(None)
+
+
+def test_process_band_emits_preserved_inpaint_residual_warning_after_inpaint(tmp_path):
+    class PreservingInpainter:
+        def inpaint_band_image(self, image_rgb, page):
+            text = page["texts"][0]
+            text["route_action"] = "preserve_original"
+            text["route_reason"] = "missing_raw_glyph_evidence"
+            text["render_policy"] = "preserve_original"
+            text["skip_processing"] = True
+            text["preserve_original"] = True
+            text["qa_flags"] = ["unsafe_white_glyph_evidence_missing"]
+            text["qa_metrics"] = {
+                "unsafe_white_balloon_glyph_fill": {
+                    "decision": "preserved_original",
+                    "reason": "missing_raw_glyph_evidence",
+                }
+            }
+            return np.array(image_rgb, copy=True)
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-test")
+    bind_recorder(recorder)
+    try:
+        band = Band(
+            y_top=100,
+            y_bottom=180,
+            balloons=[Balloon(BBox(10, 112, 50, 140), confidence=0.87)],
+            strip_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+            original_slice=np.full((80, 120, 3), 255, dtype=np.uint8),
+        )
+
+        process_band(
+            band,
+            runtime=FakeRuntime(),
+            translator=FakeTranslator(),
+            inpainter=PreservingInpainter(),
+            typesetter=FakeTypesetter(),
+            page_idx=0,
+            source_page_number=1,
+        )
+
+        warning_path = tmp_path / "debug" / "e2e" / "warnings" / "inpaint_residual_blocks.jsonl"
+        rows = [json.loads(line) for line in warning_path.read_text(encoding="utf-8").splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["band_id"] == "page_001_band_000"
+        assert rows[0]["fallback"] == "preserve_original_no_render"
+        assert rows[0]["action"] == "warning_only_pipeline_completed"
+    finally:
+        bind_recorder(None)
 
 
 def test_process_band_writes_ocr_raw_blocks_jsonl_with_confidence_and_trace(tmp_path):

@@ -4429,6 +4429,125 @@ def _split_text_by_validated_sources(text: dict, validated_bboxes: list[list[int
     return split_items
 
 
+def _spatial_line_cluster_groups(text: dict) -> list[list[dict]]:
+    """Return disjoint OCR line bodies when one record spans a large visual gap.
+
+    Full-page OCR can assign two separate speech bodies to one broad detector
+    block. We only split when the OCR supplied a one-to-one line/text mapping
+    and a gap is far larger than the normal line cadence of that record.
+    """
+    if not isinstance(text, dict):
+        return []
+    try:
+        rotation = float(text.get("rotation_deg") or text.get("text_angle_degrees") or 0.0)
+    except (TypeError, ValueError):
+        rotation = 0.0
+    if abs(rotation) > 12.0:
+        return []
+
+    polygons = _normalize_line_polygons(text.get("line_polygons") or [])
+    line_texts = _normalized_ocr_line_texts(
+        text.get("line_texts") or text.get("text_lines") or text.get("ocr_lines")
+    )
+    if len(polygons) < 3 or len(polygons) != len(line_texts):
+        return []
+
+    lines: list[dict] = []
+    for polygon, line_text in zip(polygons, line_texts):
+        bbox = _bbox_from_line_polygons([polygon])
+        if bbox is None or not line_text:
+            return []
+        lines.append({"polygon": polygon, "text": line_text, "bbox": bbox})
+    lines.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
+
+    heights = [max(1, int(item["bbox"][3]) - int(item["bbox"][1])) for item in lines]
+    gaps = [
+        max(0, int(current["bbox"][1]) - int(previous["bbox"][3]))
+        for previous, current in zip(lines, lines[1:])
+    ]
+    if not gaps:
+        return []
+    median_height = float(np.median(heights)) if heights else 1.0
+    median_gap = float(np.median(gaps)) if gaps else 0.0
+    split_threshold = max(64, int(round(median_height * 2.4)), int(round(median_gap * 3.5)))
+
+    groups: list[list[dict]] = [[lines[0]]]
+    for previous, current, gap in zip(lines, lines[1:], gaps):
+        if gap >= split_threshold:
+            groups.append([current])
+        else:
+            groups[-1].append(current)
+    if len(groups) < 2:
+        return []
+    return groups
+
+
+def _spatial_cluster_trace_id(text: dict, *, parent_id: str, child_id: str) -> str:
+    parent_trace = str(text.get("trace_id") or "").strip()
+    if parent_trace.startswith(f"{parent_id}@"):
+        return f"{child_id}{parent_trace[len(parent_id):]}"
+    band_id = str(text.get("band_id") or text.get("_band_id") or "").strip()
+    return f"{child_id}@{band_id}" if band_id else child_id
+
+
+def _split_text_by_spatial_line_clusters(text: dict) -> list[dict]:
+    groups = _spatial_line_cluster_groups(text)
+    if not groups:
+        return []
+
+    parent_id = str(text.get("id") or text.get("text_id") or text.get("trace_id") or "ocr").strip() or "ocr"
+    parent_trace = str(text.get("trace_id") or "").strip()
+    split_items: list[dict] = []
+    for index, group in enumerate(groups, start=1):
+        polygons = [item["polygon"] for item in group]
+        line_texts = [item["text"] for item in group]
+        bbox = _bbox_from_line_polygons(polygons)
+        if bbox is None:
+            return []
+        child_id = f"{parent_id}_spatial_cluster_{index:02d}"
+        child_trace = _spatial_cluster_trace_id(text, parent_id=parent_id, child_id=child_id)
+        child = dict(text)
+        for key in ("text", "original", "raw_ocr", "normalized_ocr", "normalized_text_final"):
+            if key in child:
+                child[key] = " ".join(line_texts)
+        child["id"] = child_id
+        child["text_id"] = child_id
+        child["trace_id"] = child_trace
+        child["bbox"] = list(bbox)
+        child["source_bbox"] = list(bbox)
+        child["text_pixel_bbox"] = list(bbox)
+        child["layout_bbox"] = list(bbox)
+        child["line_polygons"] = polygons
+        child["line_texts"] = line_texts
+        child["source_text_ids"] = [child_id]
+        child["_source_text_ids"] = [child_id]
+        child["source_trace_ids"] = [child_trace]
+        child["_source_trace_ids"] = [child_trace]
+        child["_spatial_line_cluster_parent_id"] = parent_id
+        child["_spatial_line_cluster_parent_trace_id"] = parent_trace
+        child["_spatial_line_cluster_index"] = index
+        child["_spatial_line_cluster_count"] = len(groups)
+        child["_spatial_text_body_bbox"] = list(bbox)
+        child["spatial_text_body_id"] = f"{parent_id}:spatial_cluster:{index:02d}"
+        flags = child.setdefault("qa_flags", [])
+        if isinstance(flags, list):
+            for flag in ("ocr_split_spatial_line_clusters", "ocr_overmerged_spatial_lines_repaired"):
+                if flag not in flags:
+                    flags.append(flag)
+        metrics = child.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["ocr_spatial_line_cluster_split"] = {
+                "decision": "split",
+                "parent_id": parent_id,
+                "cluster_index": index,
+                "cluster_count": len(groups),
+                "body_bbox": list(bbox),
+                "line_count": len(group),
+            }
+        split_items.append(child)
+    return split_items
+
+
 def _remove_inline_sfx_geometry_from_dialogue(text: dict) -> dict:
     if not isinstance(text, dict):
         return text
@@ -4510,6 +4629,10 @@ def _reconcile_ocr_with_validated_sources(page_result: dict) -> dict:
         text = _remove_inline_sfx_geometry_from_dialogue(text)
         validated_bboxes = _validated_source_bboxes_for_text(text, vision_blocks)
         if not validated_bboxes:
+            split_items = _split_text_by_spatial_line_clusters(text)
+            if split_items:
+                reconciled_texts.extend(split_items)
+                continue
             text.setdefault("validated_by_segment_mask", False)
             reconciled_texts.append(text)
             continue
@@ -4518,6 +4641,10 @@ def _reconcile_ocr_with_validated_sources(page_result: dict) -> dict:
             reconciled_texts.append(text)
             continue
         split_items = _split_text_by_validated_sources(text, validated_bboxes)
+        if split_items:
+            reconciled_texts.extend(split_items)
+            continue
+        split_items = _split_text_by_spatial_line_clusters(text)
         if split_items:
             reconciled_texts.extend(split_items)
             continue
@@ -6213,6 +6340,63 @@ def _qa_flags_for_text(text: dict) -> set[str]:
     return {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
 
 
+def _ocr_assignment_audit_enabled() -> bool:
+    return str(os.getenv("TRADUZAI_FLAG_OCR_ASSIGNMENT_AUDIT_V2", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _ocr_cluster_merge_guard_enabled() -> bool:
+    return str(os.getenv("TRADUZAI_FLAG_OCR_CLUSTER_MERGE_GUARD_V2", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _build_ocr_cluster_merge_audit(texts: list[dict]) -> dict:
+    try:
+        from ocr.merge_guard import build_merge_risk_audit
+    except ImportError:
+        from ..ocr.merge_guard import build_merge_risk_audit
+    return build_merge_risk_audit(texts, merge_stage="runtime_ocr_cluster")
+
+
+def _mark_ocr_assignment_quarantined(
+    text: dict,
+    block: dict,
+    *,
+    audit: dict,
+) -> None:
+    """Keep uncertain fallback pixels untouched while preserving a debug trail."""
+
+    flags = list(text.get("qa_flags") or [])
+    if "ocr_low_confidence_crop_fallback_quarantined" not in flags:
+        flags.append("ocr_low_confidence_crop_fallback_quarantined")
+    text["qa_flags"] = flags
+    text["_ocr_assignment_quarantine"] = copy.deepcopy(audit)
+    text["needs_review"] = False
+    text["skip_processing"] = True
+    text["preserve_original"] = True
+    text["translate_policy"] = "skip_translation"
+    text["render_policy"] = "preserve_original"
+    text["route_action"] = "review_required"
+    text["route_reason"] = "ocr_low_confidence_crop_fallback_quarantined"
+
+    block["qa_flags"] = list(flags)
+    block["_ocr_assignment_quarantine"] = copy.deepcopy(audit)
+    block["skip_processing"] = True
+    block["preserve_original"] = True
+    block["translate_policy"] = "skip_translation"
+    block["render_policy"] = "preserve_original"
+    block["route_action"] = "review_required"
+    block["route_reason"] = "ocr_low_confidence_crop_fallback_quarantined"
+
+
 def _append_qa_flag(text: dict, flag: str) -> None:
     flag = str(flag or "").strip()
     if not flag:
@@ -6349,6 +6533,30 @@ def _merge_ocr_clusters(
 
         ordered_texts = [page_texts[idx] for idx in ordered_indices]
         ordered_blocks = [vision_blocks[idx] for idx in ordered_indices]
+        merge_audit = _build_ocr_cluster_merge_audit(ordered_texts)
+        if _ocr_cluster_merge_guard_enabled() and merge_audit.get("suspicious"):
+            try:
+                from ocr.merge_guard import weak_source_ids_from_risk_audit
+            except ImportError:
+                from ..ocr.merge_guard import weak_source_ids_from_risk_audit
+            weak_ids = weak_source_ids_from_risk_audit(merge_audit)
+            quarantined = 0
+            for text, block in zip(ordered_texts, ordered_blocks):
+                text_id = str(text.get("text_id") or text.get("id") or "").strip()
+                if text_id not in weak_ids:
+                    continue
+                _mark_ocr_assignment_quarantined(text, block, audit=merge_audit)
+                quarantined += 1
+            if quarantined:
+                record_decision(
+                    stage="ocr",
+                    action="preserve_original",
+                    reason="ocr_low_confidence_crop_fallback_quarantined",
+                    page=page_number,
+                    bbox=region_bbox,
+                    details={**merge_audit, "quarantined_count": quarantined},
+                )
+                continue
         merged_bbox = ordered_texts[0].get("bbox", [0, 0, 0, 0])
         merged_pixel_bbox = ordered_texts[0].get("text_pixel_bbox", merged_bbox)
         merged_source_bbox = (
@@ -6410,6 +6618,8 @@ def _merge_ocr_clusters(
                 if str(flag).strip()
             }
         )
+        if _ocr_assignment_audit_enabled():
+            merged_text["_ocr_cluster_merge_audit"] = merge_audit
         if any(str(item.get("route_action") or "").strip().lower() == "review_required" for item in ordered_texts) or (
             "ocr_partial_low_confidence_fragment" in merged_text["qa_flags"]
         ):
@@ -13312,6 +13522,9 @@ def build_page_result(
             "block_profile": block_profile,
             "qa_flags": qa_flags,
         }
+        assignment_audit = raw_record.get("_ocr_assignment_audit")
+        if isinstance(assignment_audit, dict):
+            text_entry["_ocr_assignment_audit"] = copy.deepcopy(assignment_audit)
         _apply_uied_layout_metadata_from_block(text_entry, block)
         if False and force_review_low_confidence_fragment and not credit_name_list:
             apply_route_action(

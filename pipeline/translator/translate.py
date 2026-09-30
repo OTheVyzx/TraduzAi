@@ -1438,6 +1438,7 @@ class _TranslationDebugSession:
                 "model": model or self.model,
                 "source_text_before_normalization": source_text_before_normalization,
                 "source_text_sent_to_translator": source_text_sent_to_translator,
+                "ocr_normalizer_merge_audit": text.get("_ocr_normalizer_merge_audit"),
                 "prompt_hash": self._hash(source_text_sent_to_translator),
             },
         )

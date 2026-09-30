@@ -1019,6 +1019,79 @@ class PaddleBlockMappingTests(unittest.TestCase):
         self.assertEqual(mapped[0]["text"], "Name Resident registration number")
         self.assertEqual(mapped[0]["line_texts"], ["Name", "Resident", "registration number"])
 
+    def test_full_page_mapping_audits_spatially_disconnected_lines_without_changing_mapping(self):
+        engine = self._engine_with_lines(
+            [
+                (
+                    [[20, 20], [100, 20], [100, 42], [20, 42]],
+                    ("UPPER", 0.95),
+                ),
+                (
+                    [[20, 210], [120, 210], [120, 232], [20, 232]],
+                    ("LOWER", 0.94),
+                ),
+            ]
+        )
+        image = np.full((280, 220, 3), 255, dtype=np.uint8)
+        blocks = [SimpleNamespace(xyxy=(10, 10, 160, 250))]
+
+        with patch.dict(os.environ, {"TRADUZAI_FLAG_OCR_ASSIGNMENT_AUDIT_V2": "1"}, clear=False):
+            mapped = engine._paddle_ocr_full_page_to_blocks(image, blocks)
+
+        self.assertIsNotNone(mapped)
+        assert mapped is not None
+        self.assertEqual(mapped[0]["text"], "UPPER LOWER")
+        self.assertEqual(mapped[0]["source_bbox"], [20, 20, 120, 232])
+        audit = mapped[0]["_ocr_assignment_audit"]
+        self.assertTrue(audit["suspicious"])
+        self.assertEqual(audit["reason"], "large_vertical_gap")
+        self.assertEqual(audit["assigned_line_count"], 2)
+        self.assertGreater(audit["max_vertical_gap_over_median_height"], 4.0)
+
+    def test_full_page_mapping_audit_accepts_tight_multiline_text(self):
+        engine = self._engine_with_lines(
+            [
+                (
+                    [[20, 20], [100, 20], [100, 42], [20, 42]],
+                    ("UPPER", 0.95),
+                ),
+                (
+                    [[20, 50], [120, 50], [120, 72], [20, 72]],
+                    ("LOWER", 0.94),
+                ),
+            ]
+        )
+        image = np.full((120, 220, 3), 255, dtype=np.uint8)
+        blocks = [SimpleNamespace(xyxy=(10, 10, 160, 90))]
+
+        with patch.dict(os.environ, {"TRADUZAI_FLAG_OCR_ASSIGNMENT_AUDIT_V2": "1"}, clear=False):
+            mapped = engine._paddle_ocr_full_page_to_blocks(image, blocks)
+
+        self.assertIsNotNone(mapped)
+        assert mapped is not None
+        audit = mapped[0]["_ocr_assignment_audit"]
+        self.assertFalse(audit["suspicious"])
+        self.assertEqual(audit["reason"], "spatially_coherent")
+
+    def test_full_page_mapping_omits_assignment_audit_when_flag_is_disabled(self):
+        engine = self._engine_with_lines(
+            [
+                (
+                    [[20, 20], [100, 20], [100, 42], [20, 42]],
+                    ("HELLO", 0.95),
+                ),
+            ]
+        )
+        image = np.full((100, 220, 3), 255, dtype=np.uint8)
+        blocks = [SimpleNamespace(xyxy=(10, 10, 160, 90))]
+
+        with patch.dict(os.environ, {"TRADUZAI_FLAG_OCR_ASSIGNMENT_AUDIT_V2": "0"}, clear=False):
+            mapped = engine._paddle_ocr_full_page_to_blocks(image, blocks)
+
+        self.assertIsNotNone(mapped)
+        assert mapped is not None
+        self.assertNotIn("_ocr_assignment_audit", mapped[0])
+
     def test_full_page_mapping_downscales_large_band_and_restores_coordinates(self):
         captured_shapes = []
 

@@ -70,6 +70,7 @@ from vision_stack.runtime import (
     _attach_sfx_visual_candidates,
     _apply_white_text_overlay,
     _build_refined_bbox_mask,
+    _build_ocr_cluster_merge_audit,
     _build_post_cleanup_limit_mask,
     _clustered_inpaint_crop_windows,
     _build_koharu_worker_page_result,
@@ -1699,6 +1700,86 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(len(merged_texts), 2)
         self.assertEqual(len(merged_blocks), 2)
 
+    def test_merge_ocr_clusters_audits_low_confidence_crop_fallback_contamination(self):
+        texts = [
+            {
+                "id": "ocr_001",
+                "text_id": "ocr_001",
+                "text": "OF COURSE. THAT OUTDATED THIRD-RATE MARTIAL ART I KNEW COULDN'T POSSIBLY HAVE SUCH POWER.",
+                "bbox": [73, 160, 425, 356],
+                "text_pixel_bbox": [78, 174, 422, 350],
+                "line_polygons": [[[78, 174], [422, 174], [422, 350], [78, 350]]],
+                "confidence": 0.951,
+                "balloon_type": "white",
+                "balloon_bbox": [0, 0, 760, 1100],
+                "_ocr_assignment_audit": {"assignment_mode": "full_page_lines"},
+            },
+            {
+                "id": "ocr_003",
+                "text_id": "ocr_003",
+                "text": "HIND NHIL ART I KNEW OSSIBLYHAVE POWER.",
+                "bbox": [235, 232, 720, 997],
+                "text_pixel_bbox": [235, 232, 720, 997],
+                "confidence": 0.57,
+                "balloon_type": "white",
+                "balloon_bbox": [0, 0, 760, 1100],
+                "_ocr_assignment_audit": {"assignment_mode": "crop_fallback"},
+            },
+        ]
+        audit = _build_ocr_cluster_merge_audit(texts)
+        self.assertTrue(audit["suspicious"])
+        self.assertEqual(audit["reason"], "low_confidence_crop_fallback_dominates_geometry")
+        self.assertEqual(audit["source_count"], 2)
+
+    @patch.dict(os.environ, {"TRADUZAI_FLAG_OCR_CLUSTER_MERGE_GUARD_V2": "1"}, clear=False)
+    def test_merge_ocr_clusters_quarantines_risky_crop_fallback_without_touching_primary(self):
+        page_texts = [
+            {
+                "id": "ocr_001",
+                "text_id": "ocr_001",
+                "text": "OF COURSE. THAT OUTDATED THIRD-RATE MARTIAL ART I KNEW COULDN'T POSSIBLY HAVE SUCH POWER.",
+                "bbox": [73, 160, 425, 356],
+                "text_pixel_bbox": [78, 174, 422, 350],
+                "line_polygons": [[[78, 174], [422, 174], [422, 350], [78, 350]]],
+                "confidence": 0.951,
+                "balloon_type": "white",
+                "balloon_bbox": [0, 0, 760, 1100],
+                "_ocr_assignment_audit": {"assignment_mode": "full_page_lines"},
+            },
+            {
+                "id": "ocr_003",
+                "text_id": "ocr_003",
+                "text": "HIND NHIL ART I KNEW OSSIBLYHAVE POWER.",
+                "bbox": [235, 232, 720, 997],
+                "text_pixel_bbox": [235, 232, 720, 997],
+                "confidence": 0.57,
+                "balloon_type": "white",
+                "balloon_bbox": [0, 0, 760, 1100],
+                "_ocr_assignment_audit": {"assignment_mode": "crop_fallback"},
+            },
+        ]
+        vision_blocks = [{"bbox": text["bbox"], "confidence": text["confidence"]} for text in page_texts]
+
+        with (
+            patch(
+                "inpainter.mask_builder.build_mask_regions",
+                return_value=[{"texts": page_texts, "bbox": [40, 120, 760, 1040]}],
+            ),
+            patch("vision_stack.runtime._should_merge_ocr_cluster", return_value=True),
+            patch("vision_stack.runtime._ocr_cluster_merge_veto_reason", return_value=None),
+        ):
+            result_texts, result_blocks = _merge_ocr_clusters(page_texts, vision_blocks, (1100, 760, 3), page_number=7)
+
+        self.assertEqual(len(result_texts), 2)
+        self.assertEqual(result_texts[0]["text"], page_texts[0]["text"])
+        self.assertNotIn("_ocr_assignment_quarantine", result_texts[0])
+        quarantined = result_texts[1]
+        self.assertTrue(quarantined["skip_processing"])
+        self.assertTrue(quarantined["preserve_original"])
+        self.assertEqual(quarantined["route_action"], "review_required")
+        self.assertEqual(quarantined["route_reason"], "ocr_low_confidence_crop_fallback_quarantined")
+        self.assertEqual(result_blocks[1]["render_policy"], "preserve_original")
+
     def test_merge_ocr_clusters_keeps_p23_broad_container_and_lower_fragments_separate(self):
         page_texts = [
             {
@@ -2508,6 +2589,80 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(second["layout_bbox"], [48, 210, 340, 260])
         self.assertEqual(first["_render_target_source"], "validated_text_source")
         self.assertIn("ocr_split_validated_sources", first["qa_flags"])
+
+    def test_reconcile_ocr_splits_widely_separated_line_clusters_without_segment_sources(self):
+        from vision_stack.runtime import _reconcile_ocr_with_validated_sources
+
+        page = {
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "trace_id": "ocr_001@page_028_band_109",
+                    "band_id": "page_028_band_109",
+                    "text": "I CAN'T FEEL ANYTHING. PHEROMONES, MENTAL",
+                    "original": "I CAN'T FEEL ANYTHING. PHEROMONES, MENTAL",
+                    "bbox": [127, 310, 505, 655],
+                    "source_bbox": [127, 310, 505, 655],
+                    "text_pixel_bbox": [128, 333, 488, 589],
+                    "line_texts": [
+                        "I CAN'T FEEL",
+                        "ANYTHING.",
+                        "PHEROMONES,",
+                        "MENTAL",
+                    ],
+                    "line_polygons": [
+                        [[128, 333], [384, 333], [384, 360], [128, 360]],
+                        [[162, 373], [358, 373], [358, 404], [162, 404]],
+                        [[254, 524], [488, 527], [487, 554], [254, 551]],
+                        [[307, 561], [433, 561], [433, 589], [307, 589]],
+                    ],
+                    "tipo": "fala",
+                }
+            ],
+            "_vision_blocks": [],
+        }
+
+        result = _reconcile_ocr_with_validated_sources(page)
+
+        self.assertEqual(len(result["texts"]), 2)
+        upper, lower = result["texts"]
+        self.assertEqual(upper["id"], "ocr_001_spatial_cluster_01")
+        self.assertEqual(lower["id"], "ocr_001_spatial_cluster_02")
+        self.assertEqual(upper["trace_id"], "ocr_001_spatial_cluster_01@page_028_band_109")
+        self.assertEqual(upper["text"], "I CAN'T FEEL ANYTHING.")
+        self.assertEqual(lower["text"], "PHEROMONES, MENTAL")
+        self.assertEqual(upper["text_pixel_bbox"], [128, 333, 385, 405])
+        self.assertEqual(lower["text_pixel_bbox"], [254, 524, 489, 590])
+        self.assertEqual(upper["source_text_ids"], ["ocr_001_spatial_cluster_01"])
+        self.assertEqual(lower["source_text_ids"], ["ocr_001_spatial_cluster_02"])
+        self.assertEqual(upper["_spatial_line_cluster_parent_id"], "ocr_001")
+        self.assertIn("ocr_split_spatial_line_clusters", upper["qa_flags"])
+
+    def test_reconcile_ocr_keeps_normally_spaced_multiline_body_together(self):
+        from vision_stack.runtime import _reconcile_ocr_with_validated_sources
+
+        page = {
+            "texts": [
+                {
+                    "id": "ocr_001",
+                    "text": "FIRST LINE SECOND LINE THIRD LINE",
+                    "bbox": [80, 80, 340, 190],
+                    "text_pixel_bbox": [80, 80, 340, 190],
+                    "line_texts": ["FIRST LINE", "SECOND LINE", "THIRD LINE"],
+                    "line_polygons": [
+                        [[80, 80], [340, 80], [340, 104], [80, 104]],
+                        [[82, 116], [338, 116], [338, 140], [82, 140]],
+                        [[84, 152], [336, 152], [336, 176], [84, 176]],
+                    ],
+                }
+            ],
+            "_vision_blocks": [],
+        }
+
+        result = _reconcile_ocr_with_validated_sources(page)
+
+        self.assertEqual(len(result["texts"]), 1)
+        self.assertNotIn("ocr_split_spatial_line_clusters", result["texts"][0].get("qa_flags") or [])
 
     def test_get_ocr_engine_is_thread_safe_during_prewarm(self):
         import vision_stack.runtime as runtime
@@ -4136,6 +4291,11 @@ class VisionStackRuntimeTests(unittest.TestCase):
             ],
             "text_pixel_bbox": [35, 24, 61, 42],
             "bbox": [30, 18, 78, 42],
+            "_ocr_assignment_audit": {
+                "assigned_line_count": 2,
+                "suspicious": True,
+                "reason": "large_vertical_gap",
+            },
         }
 
         page = build_page_result(
@@ -4153,6 +4313,7 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertFalse(text["skip_processing"])
         self.assertEqual(text["line_polygons"], rich_item["line_polygons"])
         self.assertEqual(text["text_pixel_bbox"], rich_item["text_pixel_bbox"])
+        self.assertEqual(text["_ocr_assignment_audit"], rich_item["_ocr_assignment_audit"])
         vision_block = page["_vision_blocks"][0]
         self.assertEqual(vision_block["line_polygons"], rich_item["line_polygons"])
         self.assertEqual(vision_block["text_pixel_bbox"], rich_item["text_pixel_bbox"])

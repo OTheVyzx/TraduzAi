@@ -7,6 +7,11 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 try:
+    from ocr.merge_guard import build_merge_risk_audit
+except ImportError:
+    from .merge_guard import build_merge_risk_audit
+
+try:
     from ocr.text_router import ROUTE_ACTIONS, apply_route_action
     from ocr.postprocess import (
         is_ocr_truncated_or_joined,
@@ -699,6 +704,20 @@ def normalize_ocr_record(record: dict[str, Any], glossary: dict[str, str] | None
     updated = dict(record)
     updated.update(normalized)
     updated["normalized_text_final"] = normalized["normalized_ocr"]
+    if isinstance(updated.get("_ocr_assignment_quarantine"), dict):
+        flags = list(updated.get("qa_flags") or [])
+        if "ocr_low_confidence_crop_fallback_quarantined" not in flags:
+            flags.append("ocr_low_confidence_crop_fallback_quarantined")
+        updated["qa_flags"] = flags
+        updated["text"] = raw
+        updated["needs_review"] = False
+        updated["skip_processing"] = True
+        updated["preserve_original"] = True
+        updated["translate_policy"] = "skip_translation"
+        updated["render_policy"] = "preserve_original"
+        updated["route_action"] = "review_required"
+        updated["route_reason"] = "ocr_low_confidence_crop_fallback_quarantined"
+        return updated
     normalize_rotated_text_metadata(updated)
     _strip_removed_legacy_decision_metadata(updated)
     visual_review_reason = _visual_evidence_review_reason(updated, normalized["normalized_ocr"])
@@ -857,15 +876,24 @@ def merge_same_balloon_fragments_before_translation(texts: list[dict[str, Any]])
         if len(indexes) < 2:
             continue
         ordered = sorted(indexes, key=lambda item: _record_reading_order(records[item]))
-        group = [records[index] for index in ordered]
-        if not _same_balloon_fragment_group_should_merge(group):
-            continue
-        merged = _merge_same_balloon_fragment_group(group)
-        if merged is None:
-            continue
-        merged_records[ordered[0]] = merged
-        consumed.update(ordered[1:])
+        for partition in _same_balloon_spatial_body_partitions(records, ordered):
+            if len(partition) < 2:
+                continue
+            group = [records[index] for index in partition]
+            if not _same_balloon_fragment_group_should_merge(group):
+                continue
+            merged = _merge_same_balloon_fragment_group(group, merge_path="same_balloon_geometry")
+            if merged is None:
+                continue
+            if any(_record_has_spatial_line_cluster(item) for item in group):
+                flags = list(merged.get("qa_flags") or [])
+                if "same_balloon_spatial_body_partition_merged" not in flags:
+                    flags.append("same_balloon_spatial_body_partition_merged")
+                merged["qa_flags"] = flags
+            merged_records[partition[0]] = merged
+            consumed.update(partition[1:])
 
+    _merge_spatial_line_cluster_continuations(records, consumed, merged_records)
     _merge_same_band_joined_word_fragments(records, consumed, merged_records)
     _merge_same_band_dependent_fragments(records, consumed, merged_records)
 
@@ -912,6 +940,8 @@ def _record_should_not_merge_for_translation(record: dict[str, Any]) -> bool:
     # fragments and must survive to the renderer separately.
     if str(record.get("layout_category") or "").strip().lower() == "item_card" or record.get("card_panel_id"):
         return True
+    if isinstance(record.get("_ocr_assignment_quarantine"), dict):
+        return True
     action = str(record.get("route_action") or "").strip().lower()
     if action in {"preserve", "merged_into_primary", "suppress"}:
         return True
@@ -921,6 +951,140 @@ def _record_should_not_merge_for_translation(record: dict[str, Any]) -> bool:
     if not text or CJK_LETTER_PATTERN.search(text):
         return True
     return not bool(re.search(r"[A-Za-z]", text))
+
+
+def _record_has_spatial_line_cluster(record: dict[str, Any]) -> bool:
+    return bool(
+        str(record.get("_spatial_line_cluster_parent_id") or "").strip()
+        and int(record.get("_spatial_line_cluster_count") or 0) >= 2
+    )
+
+
+def _spatial_body_bbox(record: dict[str, Any]) -> list[int] | None:
+    return (
+        _record_bbox4(record.get("_spatial_text_body_bbox"))
+        or _record_stable_text_bbox(record)
+    )
+
+
+def _record_matches_spatial_body(record: dict[str, Any], body_record: dict[str, Any]) -> bool:
+    body_bbox = _spatial_body_bbox(body_record)
+    record_bbox = _record_stable_text_bbox(record)
+    if body_bbox is None or record_bbox is None:
+        return False
+    overlap = _bbox_overlap_area(body_bbox, record_bbox)
+    min_area = max(1, min(_bbox_area_for_merge(body_bbox), _bbox_area_for_merge(record_bbox)))
+    if overlap / float(min_area) >= 0.20:
+        return True
+    vertical_gap = max(0, max(body_bbox[1], record_bbox[1]) - min(body_bbox[3], record_bbox[3]))
+    horizontal_overlap = min(body_bbox[2], record_bbox[2]) - max(body_bbox[0], record_bbox[0])
+    min_width = max(1, min(body_bbox[2] - body_bbox[0], record_bbox[2] - record_bbox[0]))
+    max_height = max(1, body_bbox[3] - body_bbox[1], record_bbox[3] - record_bbox[1])
+    return horizontal_overlap >= int(min_width * 0.25) and vertical_gap <= max(24, int(max_height * 0.65))
+
+
+def _same_balloon_spatial_body_partitions(records: list[dict[str, Any]], ordered: list[int]) -> list[list[int]]:
+    """Partition a same-balloon merge group around explicit spatial OCR bodies.
+
+    A broad detector crop may contain two actual speech bodies. Split children
+    carry an explicit body marker; unsplit fragments may join one child only
+    when they are geometrically adjacent to that same body.
+    """
+    spatial_indexes = [index for index in ordered if _record_has_spatial_line_cluster(records[index])]
+    if not spatial_indexes:
+        return [ordered]
+
+    partitions: dict[int, list[int]] = {index: [index] for index in spatial_indexes}
+    standalone: list[list[int]] = []
+    for index in ordered:
+        if index in partitions:
+            continue
+        matches = [
+            body_index
+            for body_index in spatial_indexes
+            if _record_matches_spatial_body(records[index], records[body_index])
+        ]
+        if len(matches) == 1:
+            partitions[matches[0]].append(index)
+        else:
+            standalone.append([index])
+
+    result = list(partitions.values()) + standalone
+    for partition in result:
+        partition.sort(key=lambda item: _record_reading_order(records[item]))
+    result.sort(key=lambda partition: _record_reading_order(records[partition[0]]))
+    return result
+
+
+def _source_text_has_open_continuation(record: dict[str, Any]) -> bool:
+    text = _normalize_spaces(_record_source_text_for_merge(record))
+    if not text:
+        return False
+    return not bool(re.search(r"[.!?…](?:['\")\]]+)?$", text))
+
+
+def _record_is_spatial_continuation_candidate(record: dict[str, Any]) -> bool:
+    if _record_should_not_merge_for_translation(record):
+        return False
+    if _record_has_spatial_line_cluster(record):
+        return False
+    content_class = str(record.get("content_class") or "").strip().lower()
+    return content_class not in {"sfx", "watermark", "scanlation_credit", "promotional", "non_story"}
+
+
+def _merge_spatial_line_cluster_continuations(
+    records: list[dict[str, Any]],
+    consumed: set[int],
+    merged_records: dict[int, dict[str, Any]],
+) -> None:
+    """Join an open spatial child only to its adjacent continuation body.
+
+    A broad OCR assignment may be split into two real speech bodies. The lower
+    body can still have a separate final line assigned to a tighter detector
+    box, which gives it a different bubble mask. Merge that line only when it
+    is geometrically part of the same spatial body and the first phrase is
+    grammatically open; unrelated nearby bubbles remain separate.
+    """
+    by_band: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        if index in consumed or index in merged_records:
+            continue
+        band_id = _record_band_id(record)
+        if band_id:
+            by_band.setdefault(band_id, []).append(index)
+
+    for indexes in by_band.values():
+        ordered = sorted(indexes, key=lambda item: _record_reading_order(records[item]))
+        for anchor_index in ordered:
+            if anchor_index in consumed or anchor_index in merged_records:
+                continue
+            anchor = records[anchor_index]
+            if not _record_has_spatial_line_cluster(anchor) or not _source_text_has_open_continuation(anchor):
+                continue
+            anchor_order = _record_reading_order(anchor)
+            candidates = [
+                candidate_index
+                for candidate_index in ordered
+                if candidate_index not in consumed
+                and candidate_index not in merged_records
+                and candidate_index != anchor_index
+                and _record_reading_order(records[candidate_index]) >= anchor_order
+                and _record_is_spatial_continuation_candidate(records[candidate_index])
+                and _record_matches_spatial_body(records[candidate_index], anchor)
+            ]
+            if len(candidates) != 1:
+                continue
+            continuation_index = candidates[0]
+            group = [anchor, records[continuation_index]]
+            merged = _merge_same_balloon_fragment_group(group, merge_path="spatial_line_cluster_continuation")
+            if merged is None:
+                continue
+            flags = list(merged.get("qa_flags") or [])
+            if "same_balloon_spatial_continuation_merged" not in flags:
+                flags.append("same_balloon_spatial_continuation_merged")
+            merged["qa_flags"] = flags
+            merged_records[anchor_index] = merged
+            consumed.add(continuation_index)
 
 
 def _bbox_area_for_merge(bbox: list[int] | None) -> int:
@@ -1070,7 +1234,7 @@ def _merge_same_band_joined_word_fragments(
                 probe += 1
             if len(group_indexes) > 1:
                 group = [records[index] for index in group_indexes]
-                merged = _merge_same_balloon_fragment_group(group)
+                merged = _merge_same_balloon_fragment_group(group, merge_path="same_band_joined_word")
                 if merged is not None:
                     flags = list(merged.get("qa_flags") or [])
                     if "same_band_joined_word_fragment_merged" not in flags:
@@ -1136,7 +1300,7 @@ def _merge_same_band_dependent_fragments(
                 probe += 1
             if len(group_indexes) > 1:
                 group = [records[index] for index in group_indexes]
-                merged = _merge_same_balloon_fragment_group(group)
+                merged = _merge_same_balloon_fragment_group(group, merge_path="same_band_dependent")
                 if merged is not None:
                     flags = list(merged.get("qa_flags") or [])
                     if "same_band_dependent_fragment_merged" not in flags:
@@ -1256,7 +1420,11 @@ def _same_band_fragment_geometry_is_close(group: list[dict[str, Any]]) -> bool:
     return True
 
 
-def _merge_same_balloon_fragment_group(group: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _merge_same_balloon_fragment_group(
+    group: list[dict[str, Any]],
+    *,
+    merge_path: str,
+) -> dict[str, Any] | None:
     if not group:
         return None
     primary = dict(group[0])
@@ -1351,8 +1519,24 @@ def _merge_same_balloon_fragment_group(group: list[dict[str, Any]]) -> dict[str,
         "is_gibberish": _is_gibberish(repaired),
         "confidence_after_estimate": max(0.7, confidence),
     }
+    if _ocr_assignment_audit_enabled():
+        primary["_ocr_normalizer_merge_audit"] = build_merge_risk_audit(
+            group,
+            merge_stage="pretranslation_ocr_normalizer",
+            merge_path=merge_path,
+        )
     return primary
 
+
+def _ocr_assignment_audit_enabled() -> bool:
+    try:
+        from runtime_profiles import resolve_visual_pipeline_flags
+    except ImportError:
+        try:
+            from pipeline.runtime_profiles import resolve_visual_pipeline_flags
+        except ImportError:
+            return False
+    return bool(resolve_visual_pipeline_flags().get("ocr_assignment_audit_v2", False))
 
 def _drop_leading_duplicate_fragment_parts(raw_parts: list[str]) -> list[str]:
     repaired: list[str] = []

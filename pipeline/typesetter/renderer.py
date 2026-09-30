@@ -5727,6 +5727,25 @@ def _should_skip_unverified_merged_fragment(text: dict) -> bool:
     flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
     if "same_balloon_fragment_merged" not in flags:
         return False
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    glyph_contract = metrics.get("glyph_mask_contract") if isinstance(metrics, dict) else None
+    glyph_confirmed = bool(
+        isinstance(glyph_contract, dict)
+        and str(glyph_contract.get("kind") or "").strip().lower() == "glyph_confirmed"
+        and int(glyph_contract.get("final_mask_pixels") or 0) > 0
+    )
+    residual = metrics.get("post_inpaint_glyph_residual") if isinstance(metrics, dict) else None
+    has_confirmed_residual = bool(isinstance(residual, dict) and residual.get("has_residual") is True)
+    if (
+        "same_balloon_spatial_continuation_merged" in flags
+        and "ocr_split_spatial_line_clusters" in flags
+        and glyph_confirmed
+        and not has_confirmed_residual
+        and "raw_text_evidence_missing" not in flags
+    ):
+        # A split spatial body is rejoined only after both pieces have glyph
+        # evidence. This is not the unsafe broad merge the fallback guards.
+        return False
     source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
     translated = str(text.get("translated") or text.get("traduzido") or text.get("text") or "").strip()
     if (
@@ -5924,11 +5943,19 @@ def _linked_duplicate_child(parent: dict, child: dict) -> bool:
     return _text_duplicate_signal(parent, child)
 
 
+def _is_ocr_assignment_quarantined(text: dict) -> bool:
+    return isinstance(text.get("_ocr_assignment_quarantine"), dict) or (
+        "ocr_low_confidence_crop_fallback_quarantined" in _qa_flags_set(text)
+    )
+
+
 def _apply_duplicate_child_residual_merges(texts: list[dict]) -> None:
     if len(texts) < 2:
         return
     for parent in texts:
         if not isinstance(parent, dict):
+            continue
+        if _is_ocr_assignment_quarantined(parent):
             continue
         parent_route_action = str(parent.get("route_action") or "").strip().lower()
         parent_render_policy = str(parent.get("render_policy") or "").strip().lower()
@@ -5944,6 +5971,8 @@ def _apply_duplicate_child_residual_merges(texts: list[dict]) -> None:
             continue
         for child in texts:
             if child is parent or not isinstance(child, dict):
+                continue
+            if _is_ocr_assignment_quarantined(child):
                 continue
             child_route_action = str(child.get("route_action") or "").strip().lower()
             child_render_policy = str(child.get("render_policy") or "").strip().lower()
@@ -5968,7 +5997,36 @@ def _apply_duplicate_child_residual_merges(texts: list[dict]) -> None:
             break
 
 
+_UNSAFE_WHITE_GLYPH_PRESERVATION_REASONS = {
+    "missing_raw_glyph_evidence",
+    "missing_safe_balloon_limit",
+    "raw_glyph_mask_outside_safe_balloon_limit",
+    "glyph_fill_residual_after_local_redetect",
+}
+
+
+def _is_unsafe_white_glyph_preservation(text: dict) -> bool:
+    """Return whether an unsafe glyph-only cleanup must keep the source untouched."""
+
+    if str(text.get("route_action") or "").strip().lower() != "preserve_original":
+        return False
+    if str(text.get("render_policy") or "").strip().lower() != "preserve_original":
+        return False
+    if not (bool(text.get("skip_processing")) and bool(text.get("preserve_original"))):
+        return False
+    if str(text.get("route_reason") or "").strip().lower() not in _UNSAFE_WHITE_GLYPH_PRESERVATION_REASONS:
+        return False
+    flags = {str(flag or "").strip().lower() for flag in text.get("qa_flags") or []}
+    if "unsafe_white_glyph_evidence_missing" not in flags:
+        return False
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    fill = metrics.get("unsafe_white_balloon_glyph_fill") if isinstance(metrics, dict) else {}
+    return isinstance(fill, dict) and str(fill.get("decision") or "").strip().lower() == "preserved_original"
+
+
 def _neutralize_removed_render_decision_fields(text: dict) -> dict:
+    if _is_unsafe_white_glyph_preservation(text):
+        return text
     route_action = str(text.get("route_action") or "").strip().lower()
     content_class = str(text.get("content_class") or "").strip().lower()
     if route_action == "translate_sfx_inpaint_render" or content_class == "sfx":
@@ -6237,7 +6295,35 @@ def _is_art_fragment_review(text: dict) -> bool:
     )
 
 
+def _has_confirmed_source_glyph_residual(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if "glyph_confirmed_residual_after_inpaint" not in flags:
+        return False
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    residual = metrics.get("post_inpaint_glyph_residual") if isinstance(metrics, dict) else None
+    return bool(
+        isinstance(residual, dict)
+        and residual.get("has_residual") is True
+        and residual.get("fallback_eligible") is True
+        and str(residual.get("confirmation") or "").strip() == "strong_raw_glyph_overlap"
+    )
+
+
 def _prepare_special_content_render_block(text: dict) -> dict | None:
+    if _is_unsafe_white_glyph_preservation(text):
+        text["visible"] = False
+        return None
+    if _has_confirmed_source_glyph_residual(text):
+        _merge_qa_flags(text, ["confirmed_source_glyph_residual_preserved"])
+        text["visible"] = False
+        text["preserve_original"] = True
+        text["skip_processing"] = True
+        text["render_policy"] = "preserve_original"
+        text["route_action"] = "review_required"
+        text["route_reason"] = "confirmed_source_glyph_residual"
+        return None
     _neutralize_removed_render_decision_fields(text)
     if _is_suppressed_scanlation_credit(text):
         text["visible"] = False
@@ -7788,6 +7874,8 @@ def build_render_blocks(
     blocks = []
     for text in texts:
         if text.get("_skip_render_duplicate_child_parent"):
+            continue
+        if _is_ocr_assignment_quarantined(text):
             continue
         if _should_skip_dark_connected_combined_fragment(text, texts):
             text["visible"] = False
