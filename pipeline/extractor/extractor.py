@@ -10,6 +10,9 @@ após o typesetting estar completo.
 import zipfile
 import shutil
 from pathlib import Path
+from pathlib import PurePosixPath
+import re
+import unicodedata
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
@@ -88,23 +91,32 @@ def _extract_archive(archive_path: Path, dest_dir: Path) -> None:
     _raise_if_traduzai_project_archive(archive_path)
 
     with zipfile.ZipFile(archive_path, "r") as zf:
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
-            ext = Path(info.filename).suffix.lower()
-            if ext not in IMAGE_EXTS:
-                continue
-            basename = Path(info.filename).name
-            data = zf.read(info.filename)
-            (dest_dir / basename).write_bytes(data)
+        members = [
+            (info, _safe_relative_image_path(info.filename))
+            for info in zf.infolist()
+            if not info.is_dir() and Path(info.filename).suffix.lower() in IMAGE_EXTS
+        ]
+        _require_unique_relative_paths([relative for _, relative in members])
+        for info, relative in members:
+            destination = dest_dir / Path(*relative.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as source, destination.open("wb") as target:
+                shutil.copyfileobj(source, target)
 
 
 def _copy_directory(source_dir: Path, dest_dir: Path) -> None:
     _raise_if_traduzai_project_directory(source_dir)
 
-    for f in sorted(source_dir.rglob("*")):
-        if f.suffix.lower() in IMAGE_EXTS:
-            shutil.copy2(f, dest_dir / f.name)
+    files = sorted(
+        (path for path in source_dir.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_EXTS),
+        key=lambda path: path.relative_to(source_dir).as_posix(),
+    )
+    relatives = [_safe_relative_image_path(path.relative_to(source_dir).as_posix()) for path in files]
+    _require_unique_relative_paths(relatives)
+    for source, relative in zip(files, relatives, strict=True):
+        destination = dest_dir / Path(*relative.parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
 
 
 def _raise_if_traduzai_project_directory(source_dir: Path) -> None:
@@ -128,5 +140,26 @@ def _raise_if_traduzai_project_archive(archive_path: Path) -> None:
 
 
 def _sorted_images(directory: Path) -> list[Path]:
-    files = [f for f in directory.iterdir() if f.suffix.lower() in IMAGE_EXTS]
-    return sorted(files, key=lambda p: p.name)
+    files = [f for f in directory.rglob("*") if f.is_file() and f.suffix.lower() in IMAGE_EXTS]
+    return sorted(files, key=lambda path: path.relative_to(directory).as_posix())
+
+
+def _safe_relative_image_path(value: str) -> PurePosixPath:
+    raw = str(value or "")
+    if not raw or "\\" in raw or raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
+        raise ValueError(f"Caminho inseguro no arquivo de origem: {raw!r}")
+    relative = PurePosixPath(raw)
+    if any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError(f"Caminho inseguro no arquivo de origem: {raw!r}")
+    if relative.as_posix() != raw:
+        raise ValueError(f"Caminho não canônico no arquivo de origem: {raw!r}")
+    return relative
+
+
+def _require_unique_relative_paths(paths: list[PurePosixPath]) -> None:
+    seen: set[str] = set()
+    for path in paths:
+        key = unicodedata.normalize("NFC", path.as_posix()).casefold()
+        if key in seen:
+            raise ValueError(f"Colisão de caminho no arquivo de origem: {path.as_posix()}")
+        seen.add(key)

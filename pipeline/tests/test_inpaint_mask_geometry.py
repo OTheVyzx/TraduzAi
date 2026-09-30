@@ -1,5 +1,6 @@
 import numpy as np
 import cv2
+import pytest
 from copy import deepcopy
 from unittest.mock import patch
 import sys
@@ -29,6 +30,75 @@ from inpainter import (
 )
 from vision_stack.cjk_segmentation_mask import build_manhwa_manhua_roi_segmentation_mask
 from vision_stack.runtime import vision_blocks_to_mask
+
+
+def _owner_mask_fixture_owner():
+    from ownership.model import TextOwner
+
+    return TextOwner(
+        owner_id="own_page_001_body",
+        page_id="page_001",
+        component_ids=["cmp_body"],
+        observation_ids=["obs_body"],
+        selected_observation_ids=["obs_body"],
+        semantic_role="dialogue_body",
+        source_payload="SOURCE",
+        translated_payload="DESTINO",
+        disposition="owned",
+        state="translated",
+        route_action="translate_inpaint_render",
+        execution_tile_id="tile_executor",
+    )
+
+
+def test_action_mask_and_protected_art_mask_are_disjoint():
+    from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
+
+    image = np.full((32, 40, 3), 230, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[10:18, 8:28] = 255
+    protected = np.zeros(image.shape[:2], dtype=np.uint8)
+    protected[18:24, 28:34] = 255
+
+    plan = build_owner_mask_plan(
+        image,
+        _owner_mask_fixture_owner(),
+        [
+            OwnerMaskEvidence(
+                evidence_id="touching_glyph",
+                component_id="cmp_body",
+                glyph_mask=glyph,
+                protected_art_mask=protected,
+            )
+        ],
+    )
+
+    assert not np.any((plan.action_mask > 0) & (plan.protected_art_mask > 0))
+    assert int(plan.action_mask[14, 25]) == 255
+    assert int(plan.protected_art_mask[20, 30]) == 255
+
+
+def test_missing_safe_mask_moves_owner_to_review_without_bbox_fallback():
+    from inpainter.owner_mask import UnsafeOwnerMaskError, build_owner_mask_plan
+
+    owner = _owner_mask_fixture_owner()
+    image = np.full((32, 40, 3), 230, dtype=np.uint8)
+
+    with pytest.raises(UnsafeOwnerMaskError, match="safe|mask|evidence"):
+        build_owner_mask_plan(
+            image,
+            owner,
+            [
+                {
+                    "evidence_id": "bbox_only",
+                    "component_id": "cmp_body",
+                    "bbox": [8, 10, 28, 18],
+                }
+            ],
+        )
+
+    assert owner.state == "review_required"
+    assert owner.route_action == "review_required"
 
 
 def test_polygon_to_mask_fills_polygon_in_page_space():

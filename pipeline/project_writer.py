@@ -2,17 +2,69 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import time
 from pathlib import Path
 from typing import Any
 
+from ownership.project import require_owner_project_consistency
+
+
+_FINAL_PIXEL_CONTRACTS = {
+    "source_coverage_contract",
+    "owner_graph_contract",
+    "route_state_contract",
+    "pixel_ownership_contract",
+    "final_language_contract",
+    "qa_integrity_contract",
+}
+
+
+def _validate_final_pixel_reports(project: dict[str, Any]) -> None:
+    qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
+    reports = qa.get("final_pixel_reports")
+    if reports is None:
+        return
+    if not isinstance(reports, list):
+        raise ValueError("qa.final_pixel_reports precisa ser lista")
+    seen: set[str] = set()
+    for report in reports:
+        if not isinstance(report, dict):
+            raise ValueError("qa.final_pixel_reports contem relatorio invalido")
+        page_id = str(report.get("page_id") or "").strip()
+        if not page_id or page_id in seen:
+            raise ValueError("qa.final_pixel_reports exige page_id unico")
+        seen.add(page_id)
+        contracts = report.get("contracts")
+        if not isinstance(contracts, dict) or not _FINAL_PIXEL_CONTRACTS.issubset(contracts):
+            raise ValueError(f"final pixel contracts incompletos: {page_id}")
+        if not isinstance(report.get("issues"), list):
+            raise ValueError(f"final pixel issues invalidos: {page_id}")
+
+    export_gate = qa.get("export_gate") if isinstance(qa.get("export_gate"), dict) else {}
+    if str(export_gate.get("status") or "").upper() != "PASS":
+        return
+    for report in reports:
+        artifact_path = Path(str(report.get("artifact_path") or ""))
+        expected_hash = str(report.get("persisted_sha256") or "").strip().lower()
+        try:
+            actual_hash = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"final pixel artifact indisponivel: {report['page_id']}") from exc
+        if actual_hash != expected_hash:
+            raise ValueError(f"final pixel artifact mudou apos o gate: {report['page_id']}")
+
 
 def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
     route_action = str(layer.get("route_action") or "").strip().lower()
     content_class = str(layer.get("content_class") or "").strip().lower()
-    if route_action == "translate_sfx_inpaint_render" or content_class == "sfx" or isinstance(layer.get("sfx"), dict):
+    if (
+        route_action == "translate_sfx_inpaint_render"
+        or content_class == "sfx"
+        or isinstance(layer.get("sfx"), dict)
+    ):
         layer["tipo"] = "sfx"
         layer["content_class"] = "sfx"
         layer["skip_processing"] = False
@@ -36,11 +88,16 @@ def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
                 layer["sfx"] = sfx
             return
         layer["preserve_original"] = False
-        if str(layer.get("translate_policy") or "").strip().lower() in {"", "translate"}:
+        if str(layer.get("translate_policy") or "").strip().lower() in {
+            "",
+            "translate",
+        }:
             layer["translate_policy"] = "adapt_sfx"
         if str(layer.get("render_policy") or "").strip().lower() in {"", "normal"}:
             layer["render_policy"] = "sfx_style"
-        layer["route_action"] = layer.get("route_action") or "translate_sfx_inpaint_render"
+        layer["route_action"] = (
+            layer.get("route_action") or "translate_sfx_inpaint_render"
+        )
         return
     layer["tipo"] = "text"
     layer["content_class"] = "text"
@@ -53,7 +110,9 @@ def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
     layer.pop("skip_reason", None)
 
 
-def neutralize_project_compatibility_metadata(project: dict[str, Any]) -> dict[str, Any]:
+def neutralize_project_compatibility_metadata(
+    project: dict[str, Any],
+) -> dict[str, Any]:
     for page in project.get("paginas") or []:
         if not isinstance(page, dict):
             continue
@@ -68,9 +127,13 @@ def validate_project_consistency(project: dict[str, Any]) -> None:
     pages = project.get("paginas")
     if not isinstance(pages, list):
         raise ValueError("project.json invalido: 'paginas' precisa ser lista")
+    require_owner_project_consistency(project)
+    _validate_final_pixel_reports(project)
     stats = project.get("estatisticas") or {}
     if "total_paginas" in stats and int(stats["total_paginas"]) != len(pages):
-        raise ValueError("summary mismatch: estatisticas.total_paginas nao bate com paginas")
+        raise ValueError(
+            "summary mismatch: estatisticas.total_paginas nao bate com paginas"
+        )
     qa = project.get("qa") or {}
     summary = qa.get("summary")
     if summary:
@@ -86,7 +149,13 @@ def validate_project_consistency(project: dict[str, Any]) -> None:
         from structured_logger import build_log_summary
 
         expected = build_log_summary(project)
-        for key in ("actual_pages", "processed_pages", "translated_regions", "qa_flags", "critical_flags"):
+        for key in (
+            "actual_pages",
+            "processed_pages",
+            "translated_regions",
+            "qa_flags",
+            "critical_flags",
+        ):
             if log_summary.get(key) != expected.get(key):
                 raise ValueError(f"log.summary nao bate com project.json: {key}")
 

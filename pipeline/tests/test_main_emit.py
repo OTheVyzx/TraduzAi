@@ -1575,6 +1575,9 @@ class MainEmitTests(unittest.TestCase):
             stale = np.zeros((5, 6, 3), dtype=np.uint8)
             stale[:, :] = [180, 20, 20]
             cv2.imwrite(str(final_bands / "page_001_band_000.png"), stale)
+            clean_source = debug_root / "page_001_band_000" / "post_copyback.png"
+            clean_source.parent.mkdir(parents=True)
+            cv2.imwrite(str(clean_source), stale)
             (debug_root / "final_band_crops.jsonl").write_text(
                 json.dumps(
                     {
@@ -2122,13 +2125,13 @@ class MainEmitTests(unittest.TestCase):
                 project,
                 root,
                 after_final_project_image_rerender=False,
-                after_late_render_contract_repair=True,
+                after_late_render_contract_repair=False,
             )
 
             final_crop = cv2.imread(str(final_bands / "page_001_band_000.jpg"), cv2.IMREAD_COLOR)
             self.assertEqual(audit["refresh"]["refreshed_count"], 0)
             self.assertTrue(audit["refresh"]["skipped_no_final_rerender"])
-            self.assertTrue(audit["refresh"]["after_late_render_contract_repair"])
+            self.assertFalse(audit["refresh"]["after_late_render_contract_repair"])
             self.assertLessEqual(float(np.mean(np.abs(final_crop.astype(np.int16) - original_final.astype(np.int16)))), 3.0)
 
     def test_final_rerender_visual_qa_flags_dark_bubble_failures(self) -> None:
@@ -2683,9 +2686,16 @@ class MainEmitTests(unittest.TestCase):
                                 "tipo": "sfx",
                                 "content_class": "sfx",
                                 "script": "hangul",
+                                "confidence": 0.9,
+                                "sfx_promotion_score": 0.9,
                                 "route_action": "translate_sfx_inpaint_render",
                                 "translate_policy": "adapt_sfx",
                                 "render_policy": "sfx_style",
+                                "sfx": {
+                                    "promotion_score": 0.9,
+                                    "source_text": "쿵",
+                                    "adapted_text": "쿵",
+                                },
                             },
                             {
                                 "id": "dialogue-1",
@@ -2728,9 +2738,11 @@ class MainEmitTests(unittest.TestCase):
 
             self.assertEqual(sfx_layer["content_class"], "sfx")
             self.assertEqual(sfx_layer["script"], "hangul")
-            self.assertEqual(sfx_layer["route_action"], "translate_sfx_inpaint_render")
-            self.assertEqual(sfx_layer["translate_policy"], "adapt_sfx")
-            self.assertEqual(sfx_layer["render_policy"], "sfx_style")
+            self.assertEqual(sfx_layer["route_action"], "review_required")
+            self.assertEqual(sfx_layer["route_reason"], "sfx_preserved")
+            self.assertEqual(sfx_layer["translate_policy"], "skip_translation")
+            self.assertEqual(sfx_layer["render_policy"], "preserve_original")
+            self.assertTrue(sfx_layer["preserve_original"])
             self.assertEqual(sfx_layer["translated"], "TUM")
             self.assertEqual(sfx_layer["traduzido"], "TUM")
             self.assertEqual(sfx_layer["sfx"]["source_text"], "\ucff5")
@@ -4022,7 +4034,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertFalse(layer["estilo"]["glow"])
         self.assertFalse(layer["estilo"]["sombra"])
 
-    def test_build_text_layer_applies_high_confidence_source_style_evidence(self) -> None:
+    def test_build_text_layer_keeps_unpromoted_sfx_style_evidence_for_review(self) -> None:
         evidence = {
             "source": "pixel_analysis",
             "text_color": "#FFFFFF",
@@ -4051,17 +4063,17 @@ class MainEmitTests(unittest.TestCase):
             corpus_textual_benchmark={},
         )
 
-        self.assertEqual(layer["style_origin"], "source_detected")
+        self.assertEqual(layer["style_origin"], "auto")
         self.assertEqual(layer["style_confidence"], 0.82)
         self.assertEqual(layer["style_source"], "pixel_analysis")
         self.assertEqual(layer["style_evidence"], evidence)
         self.assertIs(layer["style"], layer["estilo"])
-        self.assertEqual(layer["estilo"]["style_origin"], "source_detected")
+        self.assertEqual(layer["route_action"], "review_required")
+        self.assertEqual(layer["estilo"]["style_origin"], "auto")
         self.assertEqual(layer["estilo"]["style_source"], "pixel_analysis")
-        self.assertEqual(layer["estilo"]["fonte"], "KOMIKAX_.ttf")
-        self.assertEqual(layer["estilo"]["cor"], "#FFFFFF")
-        self.assertEqual(layer["estilo"]["contorno"], "#000000")
-        self.assertEqual(layer["estilo"]["contorno_px"], 3)
+        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["contorno"], "")
+        self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
     def test_build_text_layer_extracts_source_style_evidence_from_image_crop(self) -> None:
         import numpy as np
@@ -4075,6 +4087,9 @@ class MainEmitTests(unittest.TestCase):
             "stroke_color": "#000000",
             "stroke_width_px": 2,
             "stroke_confidence": 0.78,
+            "gradient": True,
+            "gradient_colors": ["#FFFFFF", "#78D7FF"],
+            "gradient_confidence": 0.91,
         }
         crop_shapes = []
 
@@ -4194,13 +4209,9 @@ class MainEmitTests(unittest.TestCase):
                 source_image_rgb=source_image_rgb,
             )
 
-        self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["style_confidence"], 0.86)
-        self.assertEqual(layer["style_evidence"], evidence)
-        self.assertEqual(layer["estilo"]["cor"], "#FFFFFF")
-        self.assertTrue(layer["estilo"]["glow"])
-        self.assertEqual(layer["estilo"]["glow_cor"], "#74D7FF")
-        self.assertEqual(layer["estilo"]["glow_px"], 4)
+        self.assertEqual(layer["style_origin"], "auto")
+        self.assertNotIn("style_evidence", layer)
+        self.assertFalse(layer["estilo"]["glow"])
 
     def test_build_text_layer_applies_high_confidence_shadow_glow_style_evidence(self) -> None:
         evidence = {
@@ -4214,6 +4225,9 @@ class MainEmitTests(unittest.TestCase):
             "glow": True,
             "glow_confidence": 0.76,
             "glow_px": 4,
+            "gradient": True,
+            "gradient_colors": ["#F8E8FF", "#8A5CFF"],
+            "gradient_confidence": 0.91,
         }
 
         layer = main.build_text_layer(
@@ -4225,6 +4239,10 @@ class MainEmitTests(unittest.TestCase):
                 "bbox": [0, 0, 100, 100],
                 "tipo": "sfx",
                 "confidence": 0.92,
+                "content_class": "sfx",
+                "route_action": "translate_sfx_inpaint_render",
+                "render_policy": "sfx_style",
+                "sfx_promotion_score": 0.92,
                 "background_rgb": [30, 30, 30],
                 "style_evidence": evidence,
             },
@@ -4234,13 +4252,13 @@ class MainEmitTests(unittest.TestCase):
         )
 
         self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["style_confidence"], 0.76)
+        self.assertEqual(layer["style_confidence"], 0.91)
         self.assertEqual(layer["style_evidence"], evidence)
         self.assertTrue(layer["estilo"]["sombra"])
         self.assertEqual(layer["estilo"]["sombra_cor"], "#111111")
         self.assertEqual(layer["estilo"]["sombra_offset"], [3, 4])
         self.assertTrue(layer["estilo"]["glow"])
-        self.assertEqual(layer["estilo"]["glow_cor"], "#F8E8FF")
+        self.assertEqual(layer["estilo"]["glow_cor"], "#FFFFFF")
         self.assertEqual(layer["estilo"]["glow_px"], 4)
 
     def test_build_text_layer_keeps_visual_sfx_style_evidence_but_does_not_apply_without_text(self) -> None:
@@ -4511,7 +4529,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
-    def test_build_text_layer_allows_large_dark_text_with_light_outline_without_ocr(self) -> None:
+    def test_build_text_layer_keeps_large_dark_text_with_light_outline_for_review_without_ocr(self) -> None:
         evidence = {
             "source": "pixel_analysis",
             "text_color": "#010100",
@@ -4548,11 +4566,13 @@ class MainEmitTests(unittest.TestCase):
             corpus_textual_benchmark={},
         )
 
-        self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["estilo"]["fonte"], "KOMIKAX_.ttf")
-        self.assertEqual(layer["estilo"]["cor"], "#010100")
-        self.assertEqual(layer["estilo"]["contorno"], "#FFFFFE")
-        self.assertEqual(layer["estilo"]["contorno_px"], 2)
+        self.assertEqual(layer["style_origin"], "auto")
+        self.assertEqual(layer["style_evidence"], evidence)
+        self.assertEqual(layer["route_action"], "review_required")
+        self.assertEqual(layer["render_policy"], "review_required")
+        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["contorno"], "")
+        self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
     def test_build_text_layer_does_not_extract_evidence_for_large_review_sfx_visual(self) -> None:
         import numpy as np
@@ -4675,10 +4695,13 @@ class MainEmitTests(unittest.TestCase):
             "stroke_confidence": 0.92,
             "font_name": "KOMIKAX_.ttf",
             "font_confidence": 0.74,
+            "gradient": True,
+            "gradient_colors": ["#010100", "#404040"],
+            "gradient_confidence": 0.92,
         }
         crop_shapes = []
 
-        def fake_extract(crop):
+        def fake_extract(crop, **_kwargs):
             crop_shapes.append(tuple(crop.shape))
             return evidence
 
@@ -4713,7 +4736,19 @@ class MainEmitTests(unittest.TestCase):
 
         self.assertEqual(crop_shapes, [(90, 250, 3)])
         self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["estilo"]["fonte"], "KOMIKAX_.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["cor"], "#010100")
+        self.assertEqual(
+            layer["estilo"]["cor_gradiente"],
+            {
+                "kind": "linear",
+                "colors": ["#010100", "#404040"],
+                "stops": [0.0, 1.0],
+                "start": [0.5, 0.0],
+                "end": [0.5, 1.0],
+                "coordinate_space": "glyph_bbox_normalized",
+            },
+        )
         self.assertEqual(layer["estilo"]["contorno"], "#FFFFFE")
 
     def test_build_text_layer_skips_source_style_for_low_confidence_promoted_sfx_detector(self) -> None:
@@ -4845,6 +4880,9 @@ class MainEmitTests(unittest.TestCase):
             "shadow_confidence": 0.7,
             "glow": True,
             "glow_confidence": 0.7,
+            "gradient": True,
+            "gradient_colors": ["#FFFFFF", "#78D7FF"],
+            "gradient_confidence": 0.91,
         }
 
         layer = main.build_text_layer(
@@ -4856,6 +4894,10 @@ class MainEmitTests(unittest.TestCase):
                 "bbox": [0, 0, 100, 100],
                 "tipo": "sfx",
                 "confidence": 0.92,
+                "content_class": "sfx",
+                "route_action": "translate_sfx_inpaint_render",
+                "render_policy": "sfx_style",
+                "sfx_promotion_score": 0.92,
                 "background_rgb": [30, 30, 30],
                 "style_evidence": evidence,
             },
@@ -4865,7 +4907,7 @@ class MainEmitTests(unittest.TestCase):
         )
 
         self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["style_confidence"], 0.7)
+        self.assertEqual(layer["style_confidence"], 0.91)
         self.assertTrue(layer["estilo"]["sombra"])
         self.assertEqual(layer["estilo"]["sombra_cor"], "#000000")
         self.assertEqual(layer["estilo"]["sombra_offset"], [2, 2])
@@ -4882,6 +4924,9 @@ class MainEmitTests(unittest.TestCase):
             "curve_direction": "arc_up",
             "curve_amount": 0.36,
             "curve_confidence": 0.82,
+            "gradient": True,
+            "gradient_colors": ["#111111", "#666666"],
+            "gradient_confidence": 0.91,
         }
 
         layer = main.build_text_layer(
@@ -4893,6 +4938,10 @@ class MainEmitTests(unittest.TestCase):
                 "bbox": [0, 0, 180, 90],
                 "tipo": "sfx",
                 "confidence": 0.92,
+                "content_class": "sfx",
+                "route_action": "translate_sfx_inpaint_render",
+                "render_policy": "sfx_style",
+                "sfx_promotion_score": 0.92,
                 "background_rgb": [255, 255, 255],
                 "style_evidence": evidence,
             },
@@ -4902,11 +4951,22 @@ class MainEmitTests(unittest.TestCase):
         )
 
         self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["style_confidence"], 0.82)
+        self.assertEqual(layer["style_confidence"], 0.91)
         self.assertEqual(layer["style_evidence"], evidence)
-        self.assertTrue(layer["estilo"]["curva"])
-        self.assertEqual(layer["estilo"]["curva_direcao"], "arc_up")
-        self.assertEqual(layer["estilo"]["curva_intensidade"], 0.36)
+        self.assertFalse(layer["estilo"]["curva"])
+        self.assertEqual(layer["estilo"]["curva_direcao"], "")
+        self.assertEqual(layer["estilo"]["curva_intensidade"], 0.0)
+        self.assertEqual(
+            layer["estilo"]["cor_gradiente"],
+            {
+                "kind": "linear",
+                "colors": ["#111111", "#666666"],
+                "stops": [0.0, 1.0],
+                "start": [0.5, 0.0],
+                "end": [0.5, 1.0],
+                "coordinate_space": "glyph_bbox_normalized",
+            },
+        )
 
     def test_build_text_layer_keeps_low_confidence_style_evidence_but_uses_auto_style(self) -> None:
         evidence = {
@@ -9685,6 +9745,24 @@ class MainEmitTests(unittest.TestCase):
             crops_dir.mkdir(parents=True)
             rendered_bands_dir = work_dir / "debug" / "e2e" / "09_typeset" / "rendered_bands"
             rendered_bands_dir.mkdir(parents=True)
+            (work_dir / "debug" / "e2e" / "09_typeset" / "render_plan_final.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": "ocr_001",
+                        "text_id": "ocr_001",
+                        "trace_id": "ocr_001@page_002_band_023",
+                        "band_id": "page_002_band_023",
+                        "translated": "VOCE CRESCEU EM UM ORFANATO",
+                        "source_text_mask_bbox": [4, 4, 12, 12],
+                        "render_bbox": [4, 4, 12, 12],
+                        "safe_text_box": [4, 4, 12, 12],
+                        "_render_bbox_from_repaired_safe_text_box": True,
+                        "qa_flags": ["dark_connected_component_safe_partition"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             positive_band = np.zeros((20, 20, 3), dtype=np.uint8)
             positive_band[:, :] = (10, 20, 30)
             positive_band[3:8, 3:8, :] = (245, 245, 245)
@@ -9741,12 +9819,20 @@ class MainEmitTests(unittest.TestCase):
             self.assertEqual(audit["pages_checked"], 1)
             self.assertEqual(audit["pages_rerendered"], 1)
             self.assertEqual(audit["rows_rerendered"], 1)
-            self.assertEqual(audit["positive_band_base_used"], 1)
-            self.assertGreaterEqual(audit["stale_text_regions_scrubbed"], 1)
+            self.assertEqual(audit["positive_band_base_used"], 0)
+            self.assertEqual(audit["clean_band_source_used"], 1)
+            self.assertEqual(audit["clean_band_final_mismatch_count"], 0)
+            self.assertEqual(len(audit["clean_band_final_checks"]), 1)
+            self.assertEqual(audit["rendered_band_direct_copy_used"], 1)
+            self.assertEqual(audit["render_plan_layers_used"], 0)
+            self.assertEqual(audit["stale_text_regions_scrubbed"], 0)
             self.assertTrue(audit["strip_reassembled_output_rerender_allowed"])
-            render_band.assert_called_once()
-            self.assertFalse(np.any(render_band.call_args.args[0] == 245))
-            self.assertTrue((work_dir / "debug" / "e2e" / "10_copyback_reassemble" / "final_bands" / "page_002_band_023.jpg").exists())
+            render_band.assert_not_called()
+            final_path = work_dir / "debug" / "e2e" / "10_copyback_reassemble" / "final_bands" / "page_002_band_023.jpg"
+            self.assertTrue(final_path.exists())
+            final_band = cv2.imread(str(final_path), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(final_band)
+            self.assertTrue(np.any(final_band == 245))
             self.assertNotIn("_work_dir", project)
 
     def test_debug_render_metadata_hydration_preserves_final_layout_contract(self) -> None:
@@ -10181,6 +10267,1524 @@ class MainEmitTests(unittest.TestCase):
 
         self.assertEqual(page["textos"][0]["bbox"], [14, 18, 72, 86])
         self.assertEqual(page["textos"][0]["content_class"], "text")
+
+
+    def test_style_from_evidence_preserves_approved_directional_gradient(self) -> None:
+        gradient = {
+            "kind": "linear",
+            "colors": ["#6633CC", "#08080A"],
+            "stops": [0.0, 1.0],
+            "start": [0.2, 0.1],
+            "end": [0.8, 0.9],
+            "coordinate_space": "glyph_bbox_normalized",
+        }
+        evidence_v2 = SimpleNamespace(
+            attributes={"gradient": SimpleNamespace(confidence=0.94)}
+        )
+        decision = SimpleNamespace(
+            status="applied",
+            applied_attributes={"gradient": gradient},
+        )
+
+        with patch.object(main, "style_evidence_v2_from_v1", return_value=evidence_v2), patch.object(
+            main, "decide_style_copy_v2", return_value=decision
+        ):
+            style, origin, _confidence, _source = main._style_from_evidence(
+                {"cor": "#000000"},
+                {"source": "pixel_analysis", "gradient_confidence": 0.94},
+                {"route_action": "translate_inpaint_render"},
+            )
+
+        self.assertEqual(origin, "source_detected")
+        self.assertEqual(style["cor_gradiente"], gradient)
+        self.assertEqual(style["cor"], "#6633CC")
+
+
+    def test_acceptance_bundle_publishes_pipeline_execution_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            bundle_path = root / "acceptance_bundle.json"
+            bundle_path.write_text(json.dumps({
+                "acceptance_bundle_id": "b" * 64,
+                "revision_sha256": "r" * 64,
+                "source_manifest_sha256": "s" * 64,
+            }), encoding="utf-8")
+            project = {"qa": {}}
+            verified = {"schema_version": 1, "status": "PASS", "loaded_sources": {}}
+
+            with patch("qa.execution_source_guard.finalize_execution_source_ledger", return_value=verified):
+                ledger = main._publish_acceptance_execution_ledger(
+                    project, root, environ={"TRADUZAI_ACCEPTANCE_BUNDLE": str(bundle_path)}
+                )
+
+            self.assertEqual(ledger["acceptance_bundle_id"], "b" * 64)
+            self.assertTrue((root / "execution_source_ledger.json").is_file())
+            self.assertEqual(project["qa"]["acceptance_execution"]["producer_run_id"], f"pipeline:{root.name}")
+
+
+    def test_project_json_publishes_logical_and_frame_dimensions(self) -> None:
+        from strip.page_surface_geometry import PageSurfaceGeometry
+
+        geometry = PageSurfaceGeometry.build(
+            logical_width=690,
+            logical_height=1600,
+            frame_width=800,
+            frame_height=1600,
+            content_origin_xy=(55, 0),
+        )
+        project = main.build_project_json(
+            {},
+            {},
+            [{"texts": []}],
+            [{"texts": []}],
+            [Path("001.png")],
+            1,
+            0.1,
+            output_pages=[SimpleNamespace(page_surface_geometry=geometry)],
+        )
+
+        page = project["paginas"][0]
+        self.assertEqual((page["logical_width"], page["frame_width"]), (690, 800))
+        self.assertEqual((page["logical_height"], page["frame_height"]), (1600, 1600))
+        self.assertEqual(page["page_surface_geometry"]["content_bbox_frame"], [55, 0, 745, 1600])
+        self.assertEqual(page["page_surface_geometry_sha256"], geometry.geometry_sha256)
+
+
+    def test_default_text_style_uses_bold_for_plain_dialogue(self) -> None:
+        style = main._default_text_style()
+
+        self.assertEqual(style["fonte"], "ComicNeue-Bold.ttf")
+        self.assertTrue(style["bold"])
+        self.assertEqual(style["cor"], "#000000")
+        self.assertEqual(style["contorno"], "")
+        self.assertEqual(style["contorno_px"], 0)
+
+
+    def test_style_audit_exception_becomes_qa_integrity_failure_in_enforce(self) -> None:
+        project = {"qa": {}}
+        functional = {"status": "PASS", "allowed": True, "issues": []}
+
+        with patch("qa.style_fidelity.audit_style_fidelity", side_effect=RuntimeError("boom")):
+            gate = main._compose_runtime_export_gate(
+                project,
+                Path("."),
+                {"style_copy_mode": "enforce"},
+                functional,
+            )
+
+        self.assertEqual(gate["status"], "BLOCK")
+        self.assertIn(
+            "qa_integrity_failure",
+            {issue.get("code") for issue in gate["issues"]},
+        )
+        self.assertEqual(project["qa"]["functional_export_gate"]["status"], "PASS")
+        self.assertEqual(project["qa"]["style_fidelity"]["gate"]["status"], "BLOCK")
+
+
+    def test_no_image_writer_runs_after_final_pixel_observer(self) -> None:
+        events = []
+
+        result = main._run_final_pixel_gate_sequence(
+            page_ids=["page_001", "page_002"],
+            persist_page=lambda page_id: events.append(("persist", page_id)),
+            observe_page=lambda page_id: events.append(("observe", page_id))
+            or {"page_id": page_id},
+            evaluate_gate=lambda reports: events.append(("gate", len(reports)))
+            or {"status": "PASS"},
+        )
+
+        self.assertEqual(
+            events,
+            [
+                ("persist", "page_001"),
+                ("persist", "page_002"),
+                ("observe", "page_001"),
+                ("observe", "page_002"),
+                ("gate", 2),
+            ],
+        )
+        self.assertEqual(result["status"], "PASS")
+
+
+    def test_verified_owner_runtime_observes_each_persisted_final_page(self) -> None:
+        from dataclasses import replace
+        from test_final_pixel_qa import _composition, _graph, _observation
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact = Path(tmpdir) / "translated" / "001.jpg"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"persisted-final-page")
+            graph = _graph()
+            observation = replace(
+                _observation(),
+                image_path=artifact,
+                persisted_sha256="a" * 64,
+                expected_source_challenge_count=len(graph.components),
+                completed_source_challenge_count=len(graph.components),
+                coverage_complete=True,
+            )
+
+            class Observer:
+                def __init__(self):
+                    self.calls = []
+
+                def observe(self, image_path, *, source_language, **kwargs):
+                    self.calls.append((Path(image_path), source_language, kwargs))
+                    return observation
+
+            observer = Observer()
+            composition = _composition()
+            output_page = SimpleNamespace(
+                owner_graph=graph,
+                owner_composition=composition,
+                page_surface_geometry=composition.page_surface_geometry,
+            )
+            project = {
+                "_work_dir": tmpdir,
+                "owner_graph_status": "verified",
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "page_id": "page_001",
+                        "image_layers": {
+                            "rendered": {"path": "translated/001.jpg"}
+                        },
+                    }
+                ],
+            }
+
+            reports = main._observe_verified_owner_final_pages(
+                project_data=project,
+                output_pages=[output_page],
+                observer=observer,
+                source_language="en",
+            )
+
+        self.assertEqual(observer.calls[0][0:2], (artifact, "en"))
+        self.assertEqual(observer.calls[0][2]["page_id"], "page_001")
+        self.assertEqual(reports[0]["page_id"], "page_001")
+        self.assertEqual(reports[0]["artifact_path"], str(artifact))
+        self.assertEqual(reports[0]["persisted_sha256"], "a" * 64)
+        self.assertTrue(reports[0]["observer_available"])
+        self.assertTrue(reports[0]["observation_complete"])
+        self.assertEqual(reports[0]["observer"], "Observer")
+        self.assertIn("ocr_records", reports[0])
+
+
+    def test_main_does_not_mark_empty_probe_complete(self) -> None:
+        from dataclasses import replace
+        from test_final_pixel_qa import _composition, _graph, _observation
+
+        observation = replace(_observation())
+        object.__setattr__(observation, "coverage_complete", False)
+        object.__setattr__(observation, "coverage_failures", ("empty_material_probe",))
+        observer = SimpleNamespace(observe=lambda *_args, **_kwargs: observation)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact = Path(tmpdir) / "translated" / "001.jpg"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"persisted")
+            project = {
+                "_work_dir": tmpdir,
+                "owner_graph_status": "verified",
+                "paginas": [{
+                    "numero": 1,
+                    "page_id": "page_001",
+                    "image_layers": {"rendered": {"path": "translated/001.jpg"}},
+                }],
+            }
+            reports = main._observe_verified_owner_final_pages(
+                project_data=project,
+                output_pages=[SimpleNamespace(
+                    owner_graph=_graph(),
+                    owner_composition=(composition := _composition()),
+                    page_surface_geometry=composition.page_surface_geometry,
+                )],
+                observer=observer,
+                source_language="en",
+            )
+
+        self.assertFalse(reports[0]["observation_complete"])
+        self.assertEqual(reports[0]["coverage_failures"], ["empty_material_probe"])
+
+
+    def test_main_strip_runtime_exposes_final_probe_bridge(self) -> None:
+        import inspect
+
+        source = inspect.getsource(main._run_pipeline)
+        start = source.index("def run_final_pixel_ocr_probe")
+        bridge = source[start:source.index("def run_ocr_stage", start)]
+
+        self.assertIn("page_surface_geometry,", bridge)
+        self.assertIn("page_surface_geometry=page_surface_geometry", bridge)
+
+
+    def test_automatic_owner_mode_rejects_implicit_legacy(self) -> None:
+        self.assertEqual(main._automatic_owner_graph_mode({}), "enforce")
+        with self.assertRaisesRegex(ValueError, "legacy_unverified"):
+            main._automatic_owner_graph_mode({"owner_graph_mode": "legacy"})
+
+
+    def test_verified_owner_output_disables_legacy_main_pixel_writers(self) -> None:
+        pages = [
+            SimpleNamespace(
+                owner_graph=object(),
+                owner_composition=object(),
+                ocr_result={"_owner_graph_mode": "enforce"},
+            )
+        ]
+
+        self.assertTrue(main._owner_pages_have_final_pixel_authority(pages))
+        self.assertFalse(
+            main._owner_pages_have_final_pixel_authority(
+                [SimpleNamespace(ocr_result={"_owner_graph_mode": "shadow"})]
+            )
+        )
+
+
+    def test_write_rgb_jpeg_preserves_asymmetric_red_blue_channels(self) -> None:
+        image_rgb = np.full((12, 18, 3), [233, 41, 7], dtype=np.uint8)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "rgb.jpg"
+            main._write_rgb_jpeg(target, image_rgb, quality=100)
+
+            persisted_bgr = cv2.imread(str(target), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(persisted_bgr)
+            np.testing.assert_allclose(persisted_bgr[6, 9], [7, 41, 233], atol=3)
+
+
+    def test_write_rgb_jpeg_uses_lossless_encoding_for_png_target(self) -> None:
+        image_rgb = np.zeros((12, 18, 3), dtype=np.uint8)
+        image_rgb[:, :, 0] = np.arange(18, dtype=np.uint8)
+        image_rgb[:, :, 1] = np.arange(12, dtype=np.uint8)[:, None]
+        image_rgb[:, :, 2] = 197
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "rgb.png"
+            main._write_rgb_jpeg(target, image_rgb)
+
+            persisted_bgr = cv2.imread(str(target), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(persisted_bgr)
+            persisted_rgb = cv2.cvtColor(persisted_bgr, cv2.COLOR_BGR2RGB)
+            np.testing.assert_array_equal(persisted_rgb, image_rgb)
+
+
+    def test_owner_cli_defaults_preserve_loaded_modes_without_hardcoded_chapter(self) -> None:
+        args = main.parse_cli_args(["--input", "source", "--output", "out"])
+
+        self.assertIsNone(args.chapter)
+        self.assertIsNone(args.owner_graph_mode)
+        self.assertIsNone(args.style_copy_mode)
+        self.assertIsNone(args.replay_owner_artifacts)
+        resolved = main.resolve_runner_config_from_cli(
+            args,
+            loaded_config={
+                "capitulo": 7,
+                "owner_graph_mode": "shadow",
+                "style_copy_mode": "off",
+                "replay_owner_artifacts": "parent-run",
+            },
+        )
+        self.assertEqual(resolved["capitulo"], 7)
+        self.assertEqual(resolved["owner_graph_mode"], "shadow")
+        self.assertEqual(resolved["style_copy_mode"], "off")
+        self.assertEqual(Path(resolved["replay_owner_artifacts"]), Path("parent-run").resolve())
+
+
+    def test_owner_cli_exact_off_and_render_arguments_reach_runtime_config(self) -> None:
+        base = [
+            "--input", "source", "--work", "Mitch Items", "--chapter", "39",
+            "--source-lang", "en", "--target", "pt-BR", "--mode", "real",
+            "--output", "out", "--debug", "--strict", "--export-mode", "strict",
+            "--owner-graph-mode", "enforce",
+        ]
+        off = main.resolve_runner_config_from_cli(
+            main.parse_cli_args([*base, "--style-copy-mode", "off"]), loaded_config={}
+        )
+        render = main.resolve_runner_config_from_cli(
+            main.parse_cli_args([
+                *base, "--style-copy-mode", "render",
+                "--replay-owner-artifacts", "off-run",
+            ]),
+            loaded_config={},
+        )
+
+        self.assertEqual((off["capitulo"], off["owner_graph_mode"], off["style_copy_mode"]), (39, "enforce", "off"))
+        self.assertIsNone(off["replay_owner_artifacts"])
+        self.assertEqual(render["style_copy_mode"], "render")
+        self.assertEqual(Path(render["replay_owner_artifacts"]), Path("off-run").resolve())
+
+
+    def test_runner_cli_preserves_resolved_chapter_and_real_mode_in_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = Path(tmp) / "original"
+            output_dir = Path(tmp) / "out"
+            input_dir.mkdir()
+            (input_dir / "001.png").write_bytes(b"fake image")
+            resolved = main.resolve_runner_config_from_cli(
+                main.parse_cli_args(
+                    [
+                        "--input", str(input_dir),
+                        "--work", "Mitch Items",
+                        "--chapter", "39",
+                        "--source-lang", "en",
+                        "--target", "pt-BR",
+                        "--mode", "real",
+                        "--output", str(output_dir),
+                    ]
+                ),
+                loaded_config={},
+            )
+
+            with patch.object(main, "_run_pipeline") as run_pipeline:
+                exit_code = main._run_pipeline_runner_cli(resolved)
+
+            self.assertEqual(exit_code, 0)
+            run_pipeline.assert_called_once()
+            config = json.loads((output_dir / "runner_config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["capitulo"], 39)
+            self.assertEqual(config["mode"], "real")
+
+
+    def test_main_debug_artifact_preserves_owner_render_quality_metrics(self) -> None:
+        quality = {
+            "schema_version": 1,
+            "status": "ok",
+            "font_size_final": 28,
+            "minimum_legible_font_px": 14,
+            "source_ink_height_px": 22.0,
+            "render_ink_height_px": 22,
+            "source_x_height_px": 15.4,
+            "render_x_height_px": 15.4,
+            "source_scale_ratio": 1.0,
+            "x_height_ratio": 1.0,
+            "rendered_line_core_heights_px": [22],
+            "safe_height_occupancy": 0.4,
+            "safe_area_occupancy": 0.16,
+            "wrapped_line_count": 1,
+            "containment_status": "ok",
+            "outside_safe_pixels": 0,
+            "page_width": 360,
+            "page_height": 280,
+            "reasons": [],
+        }
+        row = main._project_render_plan_row(
+            {"numero": 1},
+            {
+                "id": "owner_001",
+                "owner_id": "owner_001",
+                "translated": "TEXTO",
+                "render_bbox": [40, 40, 120, 70],
+                "safe_text_box": [20, 20, 140, 90],
+                "owner_render_quality": quality,
+                "qa_metrics": {"owner_render_quality": quality},
+                "render_layout_contract": {"owner_render_quality": quality},
+            },
+            0,
+        )
+
+        self.assertEqual(row["owner_render_quality"], quality)
+        self.assertEqual(row["qa_metrics"]["owner_render_quality"], quality)
+        self.assertEqual(
+            row["render_layout_contract"]["owner_render_quality"], quality
+        )
+
+
+    def test_refresh_debug_final_band_crops_resyncs_overlapping_crops_from_final_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            cv2.imwrite(str(translated_dir / "001.png"), np.zeros((10, 6, 3), dtype=np.uint8))
+
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_dir = debug_root / "final_bands"
+            final_dir.mkdir(parents=True)
+            upper = np.full((6, 6, 3), (20, 40, 60), dtype=np.uint8)
+            lower = np.full((6, 6, 3), (80, 100, 120), dtype=np.uint8)
+            rows = []
+            for band_id, bbox, clean in (
+                ("page_001_band_000", [0, 0, 6, 6], upper),
+                ("page_001_band_001", [0, 4, 6, 10], lower),
+            ):
+                post_dir = debug_root / band_id
+                post_dir.mkdir(parents=True)
+                cv2.imwrite(str(post_dir / "post_copyback.png"), clean)
+                rows.append(
+                    {
+                        "band_id": band_id,
+                        "translated_output_page": "001.png",
+                        "crop_bbox_in_translated_page": bbox,
+                        "final_crop_path": f"10_copyback_reassemble/final_bands/{band_id}.png",
+                        "post_copyback_path": f"10_copyback_reassemble/{band_id}/post_copyback.png",
+                        "trace_ids": [f"ocr@{band_id}"],
+                    }
+                )
+            (debug_root / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            recorder = DebugRecorder(root, enabled=True, run_id="run-overlap")
+
+            audit = main._refresh_debug_final_band_crops_from_translated(recorder, root)
+
+            translated = cv2.imread(str(translated_dir / "001.png"), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(translated)
+            self.assertEqual(audit["translated_page_band_consistency"]["rows_failed"], 0)
+            for row in rows:
+                x1, y1, x2, y2 = row["crop_bbox_in_translated_page"]
+                final = cv2.imread(str(root / "debug" / "e2e" / row["final_crop_path"]), cv2.IMREAD_COLOR)
+                self.assertIsNotNone(final)
+                self.assertTrue(np.array_equal(final, translated[y1:y2, x1:x2]), row["band_id"])
+
+
+    def test_translated_page_band_consistency_does_not_double_encode_jpeg_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            rng = np.random.default_rng(42)
+            source = rng.integers(0, 256, size=(200, 200, 3), dtype=np.uint8)
+            page_path = translated_dir / "001.jpg"
+            cv2.imwrite(str(page_path), source, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            persisted = cv2.imread(str(page_path), cv2.IMREAD_COLOR)
+
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_path = debug_root / "final_bands" / "page_001_band_000.jpg"
+            final_path.parent.mkdir(parents=True)
+            cv2.imwrite(str(final_path), persisted, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            (debug_root / "final_band_crops.jsonl").write_text(
+                json.dumps(
+                    {
+                        "band_id": "page_001_band_000",
+                        "translated_output_page": "001.jpg",
+                        "crop_bbox_in_translated_page": [0, 0, 200, 200],
+                        "final_crop_path": "10_copyback_reassemble/final_bands/page_001_band_000.jpg",
+                        "trace_ids": ["ocr@page_001_band_000"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            audit = main._audit_translated_page_band_consistency(root)
+
+            self.assertEqual(audit["rows_compared"], 1)
+            self.assertEqual(audit["rows_failed"], 0)
+
+
+    def test_post_rerender_visual_contract_refreshes_crops_from_translated_after_rerender(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            image = np.zeros((10, 12, 3), dtype=np.uint8)
+            image[:, :] = [20, 20, 20]
+            image[1:6, 2:8] = [32, 96, 220]
+            cv2.imwrite(str(translated_dir / "001.jpg"), image, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_bands = debug_root / "final_bands"
+            final_bands.mkdir(parents=True)
+            stale = np.zeros((5, 6, 3), dtype=np.uint8)
+            stale[:, :] = [180, 20, 20]
+            cv2.imwrite(str(final_bands / "page_001_band_000.jpg"), stale, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            (debug_root / "final_band_crops.jsonl").write_text(
+                json.dumps(
+                    {
+                        "band_id": "page_001_band_000",
+                        "translated_output_page": "001.jpg",
+                        "crop_bbox_in_translated_page": [2, 1, 8, 6],
+                        "final_crop_path": "10_copyback_reassemble/final_bands/page_001_band_000.jpg",
+                        "trace_ids": ["ocr_001@page_001_band_000"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            project = {
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_traduzido": "translated/001.jpg",
+                        "text_layers": [
+                            {
+                                "id": "ocr_001",
+                                "text_id": "ocr_001",
+                                "trace_id": "ocr_001@page_001_band_000",
+                                "band_id": "page_001_band_000",
+                                "translated": "Ola",
+                                "text_pixel_bbox": [3, 2, 7, 5],
+                                "render_bbox": [3, 2, 7, 5],
+                                "safe_text_box": [2, 1, 8, 6],
+                                "balloon_bbox": [2, 1, 8, 6],
+                                "qa_flags": [],
+                            }
+                        ],
+                    }
+                ]
+            }
+            recorder = DebugRecorder(root, enabled=True, run_id="run-test")
+
+            audit = main._run_post_rerender_final_visual_contract(
+                recorder,
+                project,
+                root,
+                after_final_project_image_rerender=True,
+                after_late_render_contract_repair=True,
+            )
+
+            final_crop = cv2.imread(str(final_bands / "page_001_band_000.jpg"), cv2.IMREAD_COLOR)
+            translated = cv2.imread(str(translated_dir / "001.jpg"), cv2.IMREAD_COLOR)
+            self.assertEqual(audit["refresh"]["source"], "translated_after_final_project_rerender")
+            self.assertTrue(audit["refresh"]["after_final_project_image_rerender"])
+            self.assertTrue(audit["refresh"]["after_late_render_contract_repair"])
+            self.assertLessEqual(float(np.mean(np.abs(final_crop.astype(np.int16) - translated[1:6, 2:8].astype(np.int16)))), 8.0)
+            self.assertTrue((root / "debug" / "e2e" / "11_qa_export_gate" / "final_rerender_visual_qa.json").exists())
+            self.assertTrue((root / "debug" / "e2e" / "11_qa_export_gate" / "final_rerender_visual_qa.jsonl").exists())
+
+
+    def test_post_rerender_visual_contract_refreshes_after_late_render_contract_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            translated_dir = root / "translated"
+            translated_dir.mkdir(parents=True)
+            translated = np.zeros((10, 12, 3), dtype=np.uint8)
+            translated[:, :] = [20, 20, 20]
+            translated[1:6, 2:8] = [32, 96, 220]
+            cv2.imwrite(str(translated_dir / "001.jpg"), translated, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            debug_root = root / "debug" / "e2e" / "10_copyback_reassemble"
+            final_bands = debug_root / "final_bands"
+            final_bands.mkdir(parents=True)
+            original_final = np.zeros((5, 6, 3), dtype=np.uint8)
+            original_final[:, :] = [180, 20, 20]
+            cv2.imwrite(str(final_bands / "page_001_band_000.jpg"), original_final, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            (debug_root / "final_band_crops.jsonl").write_text(
+                json.dumps(
+                    {
+                        "band_id": "page_001_band_000",
+                        "translated_output_page": "001.jpg",
+                        "crop_bbox_in_translated_page": [2, 1, 8, 6],
+                        "final_crop_path": "10_copyback_reassemble/final_bands/page_001_band_000.jpg",
+                        "trace_ids": ["ocr_001@page_001_band_000"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            project = {
+                "paginas": [
+                    {
+                        "numero": 1,
+                        "arquivo_traduzido": "translated/001.jpg",
+                        "text_layers": [
+                            {
+                                "id": "ocr_001",
+                                "text_id": "ocr_001",
+                                "trace_id": "ocr_001@page_001_band_000",
+                                "band_id": "page_001_band_000",
+                                "translated": "Ola",
+                                "text_pixel_bbox": [3, 2, 7, 5],
+                                "render_bbox": [3, 2, 7, 5],
+                                "safe_text_box": [2, 1, 8, 6],
+                                "balloon_bbox": [2, 1, 8, 6],
+                                "qa_flags": [],
+                            }
+                        ],
+                    }
+                ]
+            }
+            recorder = DebugRecorder(root, enabled=True, run_id="run-test")
+
+            audit = main._run_post_rerender_final_visual_contract(
+                recorder,
+                project,
+                root,
+                after_final_project_image_rerender=False,
+                after_late_render_contract_repair=True,
+            )
+
+            final_crop = cv2.imread(str(final_bands / "page_001_band_000.jpg"), cv2.IMREAD_COLOR)
+            translated_loaded = cv2.imread(str(translated_dir / "001.jpg"), cv2.IMREAD_COLOR)
+            self.assertEqual(audit["refresh"]["refreshed_count"], 1)
+            self.assertFalse(audit["refresh"].get("skipped_no_final_rerender", False))
+            self.assertTrue(audit["refresh"]["after_late_render_contract_repair"])
+            self.assertLessEqual(float(np.mean(np.abs(final_crop.astype(np.int16) - translated_loaded[1:6, 2:8].astype(np.int16)))), 8.0)
+
+
+    def test_final_rerender_visual_qa_ignores_legacy_band_crops_for_verified_page_owners(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            recorder = DebugRecorder(root, enabled=True, run_id="run-owner")
+            audit = main._qa_translated_final_crops_against_layers(
+                recorder,
+                {
+                    "owner_graph_status": "verified",
+                    "page_owner_graphs": [{"page_id": "page_001"}],
+                    "paginas": [
+                        {
+                            "numero": 1,
+                            "text_layers": [
+                                {
+                                    "id": "owner_a",
+                                    "owner_id": "owner_a",
+                                    "_owner_mode": True,
+                                    "state": "rendered",
+                                    "owner_render_quality": {
+                                        "status": "ok",
+                                        "outside_safe_pixels": 0,
+                                        "rendered_line_core_heights_px": [18],
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+                root,
+            )
+
+            self.assertEqual(audit["source"], "verified_page_owner_composition")
+            self.assertEqual(audit["row_count"], 1)
+            self.assertEqual(audit["pass_count"], 1)
+            self.assertEqual(audit["rows"][0]["owner_id"], "owner_a")
+            self.assertEqual(audit["rows"][0]["metrics"]["coordinate_space"], "page")
+            self.assertEqual(audit["fail_count"], 0)
+
+
+    def test_build_text_layer_uses_normal_style_without_gradient_evidence(self) -> None:
+        evidence = {
+            "source": "pixel_analysis",
+            "text_color": "#FFFFFF",
+            "text_color_confidence": 0.82,
+            "stroke_color": "#000000",
+            "stroke_width_px": 3,
+            "stroke_confidence": 0.78,
+            "font_name": "KOMIKAX_.ttf",
+            "font_confidence": 0.74,
+        }
+
+        layer = main.build_text_layer(
+            page_number=1,
+            layer_index=0,
+            ocr_text={
+                "id": "tl_001_001",
+                "text": "BOOM",
+                "bbox": [0, 0, 100, 100],
+                "tipo": "sfx",
+                "confidence": 0.92,
+                "content_class": "sfx",
+                "route_action": "translate_sfx_inpaint_render",
+                "render_policy": "sfx_style",
+                "sfx_promotion_score": 0.92,
+                "background_rgb": [30, 30, 30],
+                "style_evidence": evidence,
+            },
+            translated="BUM",
+            corpus_visual_benchmark={},
+            corpus_textual_benchmark={},
+        )
+
+        self.assertEqual(layer["style_origin"], "auto")
+        self.assertEqual(layer["style_confidence"], 0.82)
+        self.assertEqual(layer["style_source"], "pixel_analysis")
+        self.assertEqual(layer["style_evidence"], evidence)
+        self.assertIs(layer["style"], layer["estilo"])
+        self.assertEqual(layer["estilo"]["style_origin"], "auto")
+        self.assertEqual(layer["estilo"]["style_source"], "pixel_analysis")
+        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["cor"], "#FFFFFF")
+        self.assertEqual(layer["estilo"]["contorno"], "")
+        self.assertEqual(layer["estilo"]["contorno_px"], 0)
+
+
+    def test_neutralize_rejects_preexisting_source_style_without_gradient(self) -> None:
+        layer = {
+            "style_origin": "source_detected",
+            "style_confidence": 0.96,
+            "background_rgb": [245, 245, 245],
+            "estilo": {
+                "style_origin": "source_detected",
+                "style_confidence": 0.96,
+                "fonte": "KOMIKAX_.ttf",
+                "cor": "#FFFFFF",
+                "contorno": "#000000",
+                "contorno_px": 3,
+                "glow": True,
+            },
+        }
+
+        normalized = main._neutralize_unallowed_source_style(layer)
+
+        self.assertEqual(normalized["style_origin"], "auto")
+        self.assertEqual(normalized["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(normalized["estilo"]["contorno_px"], 0)
+        self.assertFalse(normalized["estilo"]["glow"])
+
+
+    def test_build_text_layer_does_not_copy_large_outline_style_without_ocr_or_gradient(self) -> None:
+        evidence = {
+            "source": "pixel_analysis",
+            "text_color": "#010100",
+            "text_color_confidence": 0.99,
+            "stroke_color": "#FFFFFE",
+            "stroke_width_px": 2,
+            "stroke_confidence": 0.99,
+            "font_name": "KOMIKAX_.ttf",
+            "font_confidence": 0.5,
+        }
+
+        layer = main.build_text_layer(
+            page_number=1,
+            layer_index=0,
+            ocr_text={
+                "id": "sfx_visual_large_outline_text",
+                "text": "",
+                "bbox": [60, 5600, 490, 5800],
+                "content_class": "sfx",
+                "tipo": "sfx",
+                "detector": "sfx_visual",
+                "route_action": "review_required",
+                "render_policy": "review_required",
+                "style_evidence": evidence,
+                "sfx": {
+                    "visual_detector": "sfx_text_detector",
+                    "source_text": "",
+                    "adapted_text": "",
+                    "inpaint_allowed": False,
+                },
+            },
+            translated="",
+            corpus_visual_benchmark={},
+            corpus_textual_benchmark={},
+        )
+
+        self.assertEqual(layer["style_origin"], "auto")
+        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["contorno"], "")
+        self.assertEqual(layer["estilo"]["contorno_px"], 0)
+
+
+    def test_text_layers_reference_owner_and_component_ids(self) -> None:
+        layer = main.build_text_layer(
+            page_number=1,
+            layer_index=0,
+            ocr_text={
+                "id": "own_page_001_body",
+                "owner_id": "own_page_001_body",
+                "page_id": "page_001",
+                "component_ids": ["cmp_page_001_body"],
+                "observation_ids": ["obs_page_001_body"],
+                "semantic_role": "dialogue_body",
+                "route_action": "translate_inpaint_render",
+                "action_mask_ref": "layers/owner-mask/own_page_001_body.png",
+                "layout_region_ids": ["layout_page_001_body"],
+                "text": "HELLO THERE",
+                "bbox": [10, 20, 110, 80],
+                "confidence": 0.97,
+            },
+            translated="OLÁ",
+            corpus_visual_benchmark={},
+            corpus_textual_benchmark={},
+        )
+
+        self.assertEqual(layer["owner_id"], "own_page_001_body")
+        self.assertEqual(layer["component_ids"], ["cmp_page_001_body"])
+        self.assertEqual(layer["observation_ids"], ["obs_page_001_body"])
+        self.assertEqual(layer["semantic_role"], "dialogue_body")
+        self.assertEqual(layer["route_action"], "translate_inpaint_render")
+        self.assertEqual(layer["action_mask_ref"], "layers/owner-mask/own_page_001_body.png")
+        self.assertEqual(layer["layout_region_ids"], ["layout_page_001_body"])
+        self.assertTrue(layer["estilo"]["force_upper"])
+
+
+    def test_merge_same_balloon_fragment_layers_keeps_item_card_children_separate(self) -> None:
+        project = {
+            "paginas": [
+                {
+                    "numero": 2,
+                    "text_layers": [
+                        {
+                            "id": "ocr_002",
+                            "trace_id": "ocr_002@page_002_band_033",
+                            "band_id": "page_002_band_033",
+                            "translated": "NOTA: B+ AUMENTA A AGILIDADE",
+                            "bbox": [208, 6857, 517, 6918],
+                            "layout_category": "item_card",
+                            "card_panel_id": "item_card:ocr_002@page_002_band_033",
+                            "source_trace_ids": ["ocr_002@page_002_band_033", "ocr_003@page_002_band_033"],
+                        },
+                        {
+                            "id": "ocr_003",
+                            "trace_id": "ocr_003@page_002_band_033",
+                            "band_id": "page_002_band_033",
+                            "translated": "O USO PELA PRIMEIRA VEZ AUMENTA A FLEXIBILIDADE",
+                            "bbox": [151, 6965, 572, 7095],
+                            "layout_category": "item_card",
+                            "card_panel_id": "item_card:ocr_002@page_002_band_033",
+                        },
+                    ],
+                }
+            ]
+        }
+
+        merged = main._merge_same_balloon_fragment_layers(project)
+
+        first, second = project["paginas"][0]["text_layers"]
+        self.assertEqual(merged, 0)
+        self.assertTrue(first.get("visible", True))
+        self.assertTrue(second.get("visible", True))
+        self.assertEqual(first["translated"], "NOTA: B+ AUMENTA A AGILIDADE")
+        self.assertEqual(second["translated"], "O USO PELA PRIMEIRA VEZ AUMENTA A FLEXIBILIDADE")
+
+
+    def test_ensure_project_render_contract_hides_review_layer_below_minimum(self) -> None:
+        layer = {
+            "id": "cardocr_003",
+            "trace_id": "cardocr_003@page_001_band_020",
+            "translated": "REQUISITO DE NIVEL",
+            "visible": True,
+            "route_action": "review_required",
+            "route_reason": "atomic_inpaint_render_rollback",
+            "render_policy": "normal",
+            "render_completed": False,
+            "fit_status": "below_minimum_legible",
+            "font_size_final": 11,
+            "minimum_legible_font_px": 12,
+            "qa_flags": ["fit_below_minimum_legible", "pure_inpaint_unresolved"],
+        }
+        project = {"paginas": [{"text_layers": [layer]}]}
+
+        audit = main._ensure_project_render_contract(project)
+
+        self.assertFalse(layer["visible"])
+        self.assertEqual(audit["hidden_unsafe_review_layer_count"], 1)
+
+
+    def test_debug_qa_propagation_drops_stale_texture_flattening_flag(self) -> None:
+        project = {
+            "_work_dir": "dummy",
+            "paginas": [
+                {
+                    "text_layers": [
+                        {
+                            "id": "ocr_001",
+                            "trace_id": "ocr_001@page_004_band_094",
+                            "qa_flags": ["inpaint_texture_flattened"],
+                        }
+                    ]
+                }
+            ],
+        }
+
+        with patch.object(main, "_debug_root_from_project", return_value=Path("dummy-debug")):
+            with patch.object(main, "_collect_render_plan_qa_flags", return_value=[]):
+                with patch.object(main, "_collect_mask_decision_qa_flags", return_value=[]):
+                    with patch.object(main, "_collect_inpaint_decision_qa_flags", return_value=[]):
+                        audit = main._propagate_debug_qa_flags_to_project(project)
+
+        layer = project["paginas"][0]["text_layers"][0]
+        self.assertEqual(layer["qa_flags"], [])
+        self.assertEqual(audit["summary"]["project_layer_flags"], 0)
+
+
+    def test_collect_inpaint_flags_drops_texture_flag_when_final_metric_is_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            debug_root = Path(tmp_dir)
+            decision_dir = debug_root / "08_inpaint" / "page_004_band_094"
+            decision_dir.mkdir(parents=True)
+            (decision_dir / "inpaint_decision.json").write_text(
+                json.dumps(
+                    {
+                        "band_id": "page_004_band_094",
+                        "trace_ids": ["ocr_001@page_004_band_094"],
+                        "flags": ["inpaint_texture_flattened"],
+                        "texture_flattening": {"flattened": False},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            claims = main._collect_inpaint_decision_qa_flags(debug_root)
+
+        self.assertEqual(claims, [])
+
+
+    def test_collect_render_flags_defers_texture_flag_to_final_inpaint_metric(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            debug_root = Path(tmp_dir)
+            render_plan = debug_root / "09_typeset" / "render_plan_final.jsonl"
+            render_plan.parent.mkdir(parents=True)
+            render_plan.write_text(
+                json.dumps(
+                    {
+                        "band_id": "page_004_band_094",
+                        "trace_id": "ocr_001@page_004_band_094",
+                        "qa_flags": ["inpaint_texture_flattened"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            decision_dir = debug_root / "08_inpaint" / "page_004_band_094"
+            decision_dir.mkdir(parents=True)
+            (decision_dir / "inpaint_decision.json").write_text(
+                json.dumps({"texture_flattening": {"flattened": False}}),
+                encoding="utf-8",
+            )
+
+            claims = main._collect_render_plan_qa_flags(debug_root)
+
+        self.assertEqual(claims, [])
+
+
+    def test_final_project_rerender_keeps_clean_post_copyback_for_regression_bands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            (work_dir / "translated").mkdir(parents=True)
+            (work_dir / "images").mkdir(parents=True)
+            page = np.zeros((140, 48, 3), dtype=np.uint8)
+            page[:, :] = (4, 4, 4)
+            cv2.imwrite(str(work_dir / "translated" / "002.png"), page)
+            cv2.imwrite(str(work_dir / "images" / "002.png"), page)
+
+            crops_dir = work_dir / "debug" / "e2e" / "10_copyback_reassemble"
+            final_dir = crops_dir / "final_bands"
+            final_dir.mkdir(parents=True)
+            rows = []
+            bands = [
+                "page_002_band_007",
+                "page_003_band_034",
+                "page_004_band_055",
+                "page_005_band_078",
+            ]
+            for index, band_id in enumerate(bands):
+                y1 = index * 32
+                y2 = y1 + 28
+                clean = np.zeros((28, 48, 3), dtype=np.uint8)
+                clean[:, :] = (10 + index, 20 + index, 30 + index)
+                clean[8:20, 12:36] = (220 - index, 180, 40 + index)
+                post_dir = crops_dir / band_id
+                post_dir.mkdir(parents=True)
+                cv2.imwrite(str(post_dir / "post_copyback.png"), clean)
+                stale = np.zeros((28, 48, 3), dtype=np.uint8)
+                stale[:, :] = (0, 0, 0)
+                stale[2:26, 2:46] = (255, 255, 255)
+                cv2.imwrite(str(final_dir / f"{band_id}.png"), stale)
+                rows.append(
+                    {
+                        "band_id": band_id,
+                        "translated_output_page": "002.png",
+                        "output_page_number": 2,
+                        "crop_bbox_in_translated_page": [0, y1, 48, y2],
+                        "final_crop_path": f"10_copyback_reassemble/final_bands/{band_id}.png",
+                        "post_copyback_path": f"10_copyback_reassemble/{band_id}/post_copyback.png",
+                        "rendered_band_path": f"09_typeset/rendered_bands/{band_id}.jpg",
+                        "trace_ids": [f"ocr_{index:03}@{band_id}"],
+                    }
+                )
+            (crops_dir / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            project = {
+                "qa": {"post_style_component_safe_partition_count": 1},
+                "paginas": [
+                    {
+                        "numero": 2,
+                        "arquivo_original": "originals/002.jpg",
+                        "arquivo_traduzido": "translated/002.png",
+                        "text_layers": [
+                            {
+                                "id": f"ocr_{index:03}",
+                                "trace_id": f"ocr_{index:03}@{band_id}",
+                                "band_id": band_id,
+                                "translated": "METADATA ANTIGA",
+                                "bbox": [0, 0, 48, 140],
+                                "render_bbox": [0, 0, 48, 140],
+                                "safe_text_box": [0, 0, 48, 140],
+                                "_render_bbox_from_repaired_safe_text_box": True,
+                                "qa_flags": ["dark_connected_component_safe_partition"],
+                            }
+                            for index, band_id in enumerate(bands)
+                        ],
+                    }
+                ],
+            }
+
+            with patch("typesetter.renderer.render_band_image") as render_band:
+                audit = main._rerender_final_project_images_from_metadata(project, work_dir)
+
+            self.assertEqual(audit["rows_rerendered"], 4)
+            self.assertEqual(audit["clean_band_source_used"], 4)
+            self.assertEqual(audit["clean_band_final_mismatch_count"], 0)
+            self.assertEqual(len(audit["clean_band_final_checks"]), 4)
+            self.assertEqual(audit["stale_text_regions_scrubbed"], 0)
+            render_band.assert_not_called()
+
+            translated = cv2.imread(str(work_dir / "translated" / "002.png"), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(translated)
+            for row in rows:
+                band_id = row["band_id"]
+                source = cv2.imread(str(work_dir / "debug" / "e2e" / "10_copyback_reassemble" / band_id / "post_copyback.png"), cv2.IMREAD_COLOR)
+                final = cv2.imread(str(work_dir / "debug" / "e2e" / row["final_crop_path"]), cv2.IMREAD_COLOR)
+                x1, y1, x2, y2 = row["crop_bbox_in_translated_page"]
+                crop = translated[y1:y2, x1:x2]
+                self.assertIsNotNone(source)
+                self.assertIsNotNone(final)
+                for observed in (final, crop):
+                    diff = np.abs(observed.astype(np.int16) - source.astype(np.int16))
+                    self.assertLessEqual(int(diff.max()), 12, band_id)
+                    self.assertEqual(int((diff > 12).sum()), 0, band_id)
+
+
+    def test_final_project_rerender_pastes_upper_clean_band_over_lower_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            (work_dir / "translated").mkdir(parents=True)
+            (work_dir / "images").mkdir(parents=True)
+            page = np.zeros((80, 40, 3), dtype=np.uint8)
+            cv2.imwrite(str(work_dir / "translated" / "002.png"), page)
+            cv2.imwrite(str(work_dir / "images" / "002.png"), page)
+
+            crops_dir = work_dir / "debug" / "e2e" / "10_copyback_reassemble"
+            final_dir = crops_dir / "final_bands"
+            final_dir.mkdir(parents=True)
+
+            upper = np.zeros((35, 40, 3), dtype=np.uint8)
+            upper[:, :] = (20, 40, 60)
+            upper[25:35, :, :] = (200, 50, 50)
+            lower = np.zeros((35, 40, 3), dtype=np.uint8)
+            lower[:, :] = (70, 90, 110)
+            lower[0:10, :, :] = (10, 220, 10)
+
+            for band_id, image in {
+                "page_003_band_034": upper,
+                "page_003_band_035": lower,
+            }.items():
+                post_dir = crops_dir / band_id
+                post_dir.mkdir(parents=True)
+                cv2.imwrite(str(post_dir / "post_copyback.png"), image)
+
+            rows = [
+                {
+                    "band_id": "page_003_band_034",
+                    "translated_output_page": "002.png",
+                    "output_page_number": 2,
+                    "crop_bbox_in_translated_page": [0, 20, 40, 55],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_034.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_003_band_034/post_copyback.png",
+                    "trace_ids": ["ocr_upper@page_003_band_034"],
+                },
+                {
+                    "band_id": "page_003_band_035",
+                    "translated_output_page": "002.png",
+                    "output_page_number": 2,
+                    "crop_bbox_in_translated_page": [0, 45, 40, 80],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_035.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_003_band_035/post_copyback.png",
+                    "trace_ids": ["ocr_lower@page_003_band_035"],
+                },
+            ]
+            (crops_dir / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            project = {
+                "qa": {"post_style_component_safe_partition_count": 1},
+                "paginas": [
+                    {
+                        "numero": 2,
+                        "arquivo_original": "originals/002.jpg",
+                        "arquivo_traduzido": "translated/002.png",
+                        "text_layers": [
+                            {
+                                "id": "ocr_stale",
+                                "trace_id": "ocr_stale@page_003_band_035",
+                                "band_id": "page_003_band_035",
+                                "translated": "STALE",
+                                "render_bbox": [0, 0, 40, 80],
+                                "safe_text_box": [0, 0, 40, 80],
+                                "_render_bbox_from_repaired_safe_text_box": True,
+                                "qa_flags": ["dark_connected_component_safe_partition"],
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            with patch("typesetter.renderer.render_band_image") as render_band:
+                audit = main._rerender_final_project_images_from_metadata(project, work_dir)
+
+            self.assertEqual(audit["clean_band_source_used"], 2)
+            self.assertEqual(audit["clean_band_final_mismatch_count"], 0)
+            render_band.assert_not_called()
+            translated = cv2.imread(str(work_dir / "translated" / "002.png"), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(translated)
+            # The overlap 45:55 belongs to the upper crop after composition.
+            expected_overlap = upper[25:35, :, :]
+            observed_overlap = translated[45:55, :, :]
+            self.assertTrue(np.array_equal(observed_overlap, expected_overlap))
+            self.assertEqual(audit["translated_page_band_consistency"]["rows_failed"], 0)
+            for row in rows:
+                x1, y1, x2, y2 = row["crop_bbox_in_translated_page"]
+                final = cv2.imread(str(work_dir / "debug" / "e2e" / row["final_crop_path"]), cv2.IMREAD_COLOR)
+                self.assertIsNotNone(final)
+                self.assertTrue(np.array_equal(final, translated[y1:y2, x1:x2]), row["band_id"])
+
+
+    def test_final_project_rerender_does_not_restore_unchanged_source_text_from_upper_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            (work_dir / "translated").mkdir(parents=True)
+            (work_dir / "images").mkdir(parents=True)
+            crops_dir = work_dir / "debug" / "e2e" / "10_copyback_reassemble"
+            (crops_dir / "final_bands").mkdir(parents=True)
+
+            original = np.zeros((80, 40, 3), dtype=np.uint8)
+            original[45:55, 5:35, :] = (245, 245, 245)
+            translated = np.full_like(original, (7, 5, 3))
+            translated[45:55, 5:35, :] = (80, 100, 120)
+            cv2.imwrite(str(work_dir / "images" / "002.png"), original)
+            cv2.imwrite(str(work_dir / "translated" / "002.png"), translated)
+
+            upper = original[20:55].copy()
+            upper[5:15, 2:12, :] = (20, 200, 60)
+            lower = original[45:80].copy()
+            lower[0:10, 5:35, :] = (80, 100, 120)
+            for band_id, image in {
+                "page_002_band_043": upper,
+                "page_002_band_044": lower,
+            }.items():
+                post_dir = crops_dir / band_id
+                post_dir.mkdir(parents=True)
+                cv2.imwrite(str(post_dir / "post_copyback.png"), image)
+
+            rows = [
+                {
+                    "band_id": "page_002_band_043",
+                    "translated_output_page": "002.png",
+                    "crop_bbox_in_translated_page": [0, 20, 40, 55],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_002_band_043.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_002_band_043/post_copyback.png",
+                    "trace_ids": ["title@page_002_band_043"],
+                },
+                {
+                    "band_id": "page_002_band_044",
+                    "translated_output_page": "002.png",
+                    "crop_bbox_in_translated_page": [0, 45, 40, 80],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_002_band_044.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_002_band_044/post_copyback.png",
+                    "trace_ids": ["body@page_002_band_044"],
+                },
+            ]
+            (crops_dir / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            project = {
+                "qa": {"post_style_component_safe_partition_count": 1},
+                "paginas": [{"numero": 2, "arquivo_traduzido": "translated/002.png", "text_layers": []}],
+            }
+
+            main._rerender_final_project_images_from_metadata(project, work_dir)
+
+            observed = cv2.imread(str(work_dir / "translated" / "002.png"), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(observed)
+            self.assertTrue(np.array_equal(observed[45:55, 5:35, :], translated[45:55, 5:35, :]))
+            self.assertTrue(np.array_equal(observed[25:35, 2:12, :], upper[5:15, 2:12, :]))
+            self.assertTrue(np.array_equal(observed[60:75, :, :], original[60:75, :, :]))
+
+
+    def test_final_project_rerender_prevents_trace_empty_context_from_overwriting_text_band(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            (work_dir / "translated").mkdir(parents=True)
+            (work_dir / "images").mkdir(parents=True)
+            page = np.zeros((70, 50, 3), dtype=np.uint8)
+            cv2.imwrite(str(work_dir / "translated" / "003.png"), page)
+            cv2.imwrite(str(work_dir / "images" / "003.png"), page)
+
+            crops_dir = work_dir / "debug" / "e2e" / "10_copyback_reassemble"
+            final_dir = crops_dir / "final_bands"
+            final_dir.mkdir(parents=True)
+
+            stale_context = np.zeros((30, 50, 3), dtype=np.uint8)
+            stale_context[:, :] = (5, 5, 5)
+            stale_context[12:24, 5:45, :] = (255, 255, 255)
+            translated_text = np.zeros((35, 50, 3), dtype=np.uint8)
+            translated_text[:, :] = (10, 20, 30)
+            translated_text[10:22, 8:42, :] = (30, 220, 80)
+
+            for band_id, image in {
+                "page_003_band_045": stale_context,
+                "page_003_band_046": translated_text,
+            }.items():
+                post_dir = crops_dir / band_id
+                post_dir.mkdir(parents=True)
+                cv2.imwrite(str(post_dir / "post_copyback.png"), image)
+
+            rows = [
+                {
+                    "band_id": "page_003_band_045",
+                    "translated_output_page": "003.png",
+                    "output_page_number": 3,
+                    "crop_bbox_in_translated_page": [0, 10, 50, 40],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_045.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_003_band_045/post_copyback.png",
+                    "trace_ids": [],
+                },
+                {
+                    "band_id": "page_003_band_046",
+                    "translated_output_page": "003.png",
+                    "output_page_number": 3,
+                    "crop_bbox_in_translated_page": [0, 20, 50, 55],
+                    "final_crop_path": "10_copyback_reassemble/final_bands/page_003_band_046.png",
+                    "post_copyback_path": "10_copyback_reassemble/page_003_band_046/post_copyback.png",
+                    "trace_ids": ["ocr_001@page_003_band_046"],
+                },
+            ]
+            (crops_dir / "final_band_crops.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            project = {
+                "qa": {"post_style_component_safe_partition_count": 1},
+                "paginas": [
+                    {
+                        "numero": 3,
+                        "arquivo_original": "originals/003.jpg",
+                        "arquivo_traduzido": "translated/003.png",
+                        "text_layers": [],
+                    }
+                ],
+            }
+
+            with patch("typesetter.renderer.render_band_image") as render_band:
+                audit = main._rerender_final_project_images_from_metadata(project, work_dir)
+
+            render_band.assert_not_called()
+            self.assertEqual(audit["clean_band_source_used"], 2)
+            self.assertEqual(audit["translated_page_band_consistency"]["rows_failed"], 0)
+            translated = cv2.imread(str(work_dir / "translated" / "003.png"), cv2.IMREAD_COLOR)
+            self.assertIsNotNone(translated)
+            observed_overlap = translated[20:40, :, :]
+            expected_overlap = translated_text[0:20, :, :]
+            self.assertTrue(np.array_equal(observed_overlap, expected_overlap))
+            consistency_path = (
+                work_dir
+                / "debug"
+                / "e2e"
+                / "10_copyback_reassemble"
+                / "translated_page_band_consistency_audit.json"
+            )
+            self.assertTrue(consistency_path.exists())
+
+
+    def test_render_metadata_round_trip_preserves_minimum_legibility_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            typeset_dir = work_dir / "debug" / "e2e" / "09_typeset"
+            typeset_dir.mkdir(parents=True)
+            raw_entry = {
+                "text_id": "ocr_tiny",
+                "trace_id": "ocr_tiny@page_001_band_001",
+                "page_id": "page_001",
+                "band_id": "page_001_band_001",
+                "coordinate_space": "page",
+                "translated": "TEXTO LONGO",
+                "target_bbox": [10, 10, 90, 50],
+                "safe_text_box": [12, 12, 88, 48],
+                "render_bbox": [14, 14, 86, 46],
+                "text_pixel_bbox": [14, 14, 86, 46],
+                "font_size_final": 6,
+                "minimum_legible_font_px": 12,
+                "fit_status": "below_minimum_legible",
+                "fit_attempts": [{"font_px": 12, "lines": 4, "status": "overflow"}],
+                "qa_flags": ["fit_below_minimum_legible"],
+            }
+            (typeset_dir / "render_plan_raw.jsonl").write_text(
+                json.dumps(raw_entry, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            project = {
+                "_work_dir": str(work_dir),
+                "paginas": [{"numero": 1, "text_layers": [{
+                    "id": "ocr_tiny",
+                    "text_id": "ocr_tiny",
+                    "trace_id": "ocr_tiny@page_001_band_001",
+                    "band_id": "page_001_band_001",
+                    "route_action": "translate_inpaint_render",
+                    "translated": "TEXTO LONGO",
+                    "bbox": [14, 14, 86, 46],
+                    "text_pixel_bbox": [14, 14, 86, 46],
+                    "source_bbox": [14, 14, 86, 46],
+                }]}],
+            }
+
+            main._hydrate_project_render_metadata_from_debug_candidates(project)
+            layer = project["paginas"][0]["text_layers"][0]
+            final_row = main._project_render_plan_row({"numero": 1}, layer, 0)
+
+            self.assertEqual(layer["font_size_final"], 6)
+            self.assertEqual(layer["minimum_legible_font_px"], 12)
+            self.assertEqual(layer["fit_status"], "below_minimum_legible")
+            self.assertIn("fit_below_minimum_legible", layer["qa_flags"])
+            self.assertEqual(final_row["font_size_final"], 6)
+            self.assertEqual(final_row["minimum_legible_font_px"], 12)
+            self.assertEqual(final_row["fit_status"], "below_minimum_legible")
+
+
+    def test_build_project_json_includes_serialized_owner_graphs(self) -> None:
+        from ownership.hash_contract import sha256_text
+        from ownership.model import (
+            OWNER_GRAPH_SCHEMA_VERSION,
+            ComponentDisposition,
+            OwnerGraph,
+            SourceTextComponent,
+            TextObservation,
+            TextOwner,
+        )
+
+        graph = OwnerGraph(
+            schema_version=OWNER_GRAPH_SCHEMA_VERSION,
+            page_id="page_001",
+            run_id="run-main-emit",
+            origin_execution_id="execution-main-emit",
+            page_source_sha256="a" * 64,
+            components=[
+                SourceTextComponent(
+                    component_id="cmp_page_001_body",
+                    page_id="page_001",
+                    bbox_page=(10, 20, 110, 80),
+                    polygon_page=((10, 20), (110, 20), (110, 80), (10, 80)),
+                    detector_sources=("fixture",),
+                )
+            ],
+            observations=[
+                TextObservation(
+                    observation_id="obs_page_001_body",
+                    page_id="page_001",
+                    component_ids=("cmp_page_001_body",),
+                    text="HELLO THERE",
+                    confidence=0.97,
+                    provider="fixture",
+                    bbox_page=(10, 20, 110, 80),
+                    run_id="run-main-emit",
+                    origin_execution_id="execution-main-emit",
+                    invocation_id="invocation-main-emit-body",
+                    attempt_id="attempt-main-emit-body",
+                    provider_family="fixture",
+                    page_source_sha256="a" * 64,
+                    root_input_pixel_sha256="b" * 64,
+                    input_pixel_sha256="c" * 64,
+                    payload_sha256=sha256_text("HELLO THERE"),
+                )
+            ],
+            owners=[
+                TextOwner(
+                    owner_id="own_page_001_body",
+                    page_id="page_001",
+                    component_ids=["cmp_page_001_body"],
+                    observation_ids=["obs_page_001_body"],
+                    selected_observation_ids=["obs_page_001_body"],
+                    semantic_role="dialogue_body",
+                    source_payload="HELLO THERE",
+                    translated_payload=None,
+                    disposition="owned",
+                    state="owned",
+                    route_action="translate_inpaint_render",
+                    execution_tile_id=None,
+                )
+            ],
+            projections=[],
+            component_dispositions=[
+                ComponentDisposition(
+                    component_id="cmp_page_001_body",
+                    decision="owned",
+                    owner_id="own_page_001_body",
+                    reason="fixture",
+                )
+            ],
+        )
+
+        project = main.build_project_json(
+            {
+                "obra": "Fixture",
+                "capitulo": 1,
+                "idioma_origem": "en",
+                "idioma_destino": "pt-BR",
+            },
+            {},
+            [{"_owner_graph_snapshot": graph.to_dict(), "_vision_blocks": []}],
+            [
+                {
+                    "texts": [
+                        {
+                            "id": "own_page_001_body",
+                            "owner_id": "own_page_001_body",
+                            "page_id": "page_001",
+                            "component_ids": ["cmp_page_001_body"],
+                            "observation_ids": ["obs_page_001_body"],
+                            "semantic_role": "dialogue_body",
+                            "text": "HELLO THERE",
+                            "translated": "OLÁ",
+                            "bbox": [10, 20, 110, 80],
+                            "source_bbox": [10, 20, 110, 80],
+                            "route_action": "translate_inpaint_render",
+                        }
+                    ]
+                }
+            ],
+            [Path("001.png")],
+            1,
+            0.1,
+        )
+
+        self.assertEqual(project["owner_graph_schema_version"], OWNER_GRAPH_SCHEMA_VERSION)
+        self.assertEqual(project["owner_graph_status"], "verified")
+        self.assertEqual(project["page_owner_graphs"], [graph.to_dict()])
+        self.assertEqual(project["owner_invariant_summary"]["owner_count"], 1)
+        persisted_layer = project["paginas"][0]["text_layers"][0]
+        persisted_alias = project["paginas"][0]["textos"][0]
+        self.assertEqual(persisted_layer["owner_id"], "own_page_001_body")
+        self.assertEqual(persisted_layer["component_ids"], ["cmp_page_001_body"])
+        self.assertEqual(persisted_layer["observation_ids"], ["obs_page_001_body"])
+        self.assertEqual(persisted_layer["semantic_role"], "dialogue_body")
+        self.assertEqual(
+            persisted_layer["route_action"], "translate_inpaint_render"
+        )
+        self.assertIsNone(persisted_layer.get("action_mask_ref"))
+        self.assertEqual(persisted_layer.get("layout_region_ids", []), [])
+        for field in (
+            "owner_id",
+            "component_ids",
+            "observation_ids",
+            "semantic_role",
+            "route_action",
+            "action_mask_ref",
+            "layout_region_ids",
+        ):
+            self.assertEqual(persisted_alias.get(field), persisted_layer.get(field))
+
+        from project_writer import write_project_json_atomic
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = Path(tmp) / "project.json"
+            write_project_json_atomic(project_path, project)
+            loaded = json.loads(project_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(loaded["page_owner_graphs"], [graph.to_dict()])
+        self.assertEqual(
+            loaded["paginas"][0]["text_layers"][0]["owner_id"],
+            "own_page_001_body",
+        )
 
 
 if __name__ == "__main__":

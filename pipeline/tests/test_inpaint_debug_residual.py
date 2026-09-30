@@ -2,11 +2,22 @@ import json
 import os
 import sys
 from pathlib import Path
+
+# This module exercises the explicit legacy fast-fill paths. Runtime defaults
+# remain pure; tests that need direct fills opt in locally.
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+@pytest.fixture(autouse=True)
+def _legacy_fast_inpaint_profile(monkeypatch):
+    monkeypatch.setenv("TRADUZAI_INPAINT_POLICY", "fast")
+    monkeypatch.setenv("TRADUZAI_STRIP_FAST_DARK_PANEL_FILL", "1")
+    monkeypatch.setenv("TRADUZAI_STRIP_FAST_LOCAL_INPAINT", "1")
 
 
 def test_translator_note_text_mask_fills_with_dark_background_near_white_bubble():
@@ -142,8 +153,10 @@ def test_false_white_dark_bubble_with_preserved_clip_uses_local_dark_fill():
     assert float(np.mean(filled[changed])) < 48.0
 
 
-def test_broken_image_white_dark_bubble_cleans_bright_text_outside_false_bbox():
+def test_pure_mode_skips_dark_geometry_solid_fill(monkeypatch):
     from inpainter import _apply_fast_dark_panel_text_fill
+
+    monkeypatch.setenv("TRADUZAI_INPAINT_POLICY", "pure")
 
     image = np.full((330, 820, 3), 5, dtype=np.uint8)
     image[86:108, 388:692] = 244
@@ -164,12 +177,9 @@ def test_broken_image_white_dark_bubble_cleans_bright_text_outside_false_bbox():
 
     filled, remaining, stats = _apply_fast_dark_panel_text_fill(image, {"texts": [text]}, [dict(text)])
 
-    assert stats["dark_panel_fill_count"] == 1
-    assert remaining == []
-    assert float(np.mean(filled[86:108, 388:692])) < 48.0
-    assert float(np.mean(filled[130:152, 382:710])) < 48.0
-    assert float(np.mean(filled[176:198, 420:668])) < 48.0
-    assert float(np.mean(filled[222:244, 472:626])) < 48.0
+    assert stats["dark_panel_fill_count"] == 0
+    assert len(remaining) == 1
+    assert np.array_equal(filled, image)
 
 
 def test_image_dark_bubble_uses_local_dark_fill_when_global_fast_fill_disabled():
@@ -201,10 +211,12 @@ def test_image_dark_bubble_uses_local_dark_fill_when_global_fast_fill_disabled()
     assert float(np.mean(filled[changed])) < 48.0
 
 
-def test_image_dark_bubble_overbroad_fill_uses_visual_glyph_mask_and_preserves_outline():
+def test_pure_mode_skips_visual_item_card_forced_cleanup(monkeypatch):
     import cv2
 
     from inpainter import _apply_fast_dark_panel_text_fill
+
+    monkeypatch.setenv("TRADUZAI_INPAINT_POLICY", "pure")
 
     image = np.zeros((180, 360, 3), dtype=np.uint8)
     cv2.ellipse(image, (180, 90), (150, 62), 0, 0, 360, (2, 2, 2), -1)
@@ -257,17 +269,19 @@ def test_image_dark_bubble_overbroad_fill_uses_visual_glyph_mask_and_preserves_o
     metrics = text.get("qa_metrics") or {}
     override = metrics.get("dark_bubble_visual_fill_override") or {}
 
-    assert stats["dark_panel_fill_count"] == 1
-    assert remaining == []
-    assert override.get("reason") == "overbroad_dark_fill_mask"
-    assert int(np.count_nonzero(changed)) < int(override["current_pixels"])
+    assert stats["dark_panel_fill_count"] == 0
+    assert len(remaining) == 1
+    assert override == {}
+    assert int(np.count_nonzero(changed)) == 0
     assert int(np.count_nonzero(changed & (outline > 0))) == 0
 
 
-def test_dark_bubble_fast_fill_prefers_local_vision_geometry_for_visual_override():
+def test_pure_mode_keeps_local_vision_geometry_without_direct_fill(monkeypatch):
     import cv2
 
     from inpainter import _apply_fast_dark_panel_text_fill
+
+    monkeypatch.setenv("TRADUZAI_INPAINT_POLICY", "pure")
 
     image = np.zeros((180, 360, 3), dtype=np.uint8)
     cv2.ellipse(image, (180, 90), (150, 62), 0, 0, 360, (2, 2, 2), -1)
@@ -331,10 +345,10 @@ def test_dark_bubble_fast_fill_prefers_local_vision_geometry_for_visual_override
     changed = np.any(filled != image, axis=2)
     override = (page_text.get("qa_metrics") or {}).get("dark_bubble_visual_fill_override") or {}
 
-    assert stats["dark_panel_fill_count"] == 1
-    assert remaining == []
-    assert override.get("reason") == "overbroad_dark_fill_mask"
-    assert int(np.count_nonzero(changed)) < 10000
+    assert stats["dark_panel_fill_count"] == 0
+    assert len(remaining) == 1
+    assert override == {}
+    assert int(np.count_nonzero(changed)) == 0
 
 
 def test_dark_connected_bubble_visual_override_uses_compact_contract_bbox():
@@ -470,6 +484,21 @@ def test_detect_residual_text_uses_absolute_pixel_gate_for_large_regions():
     assert residual["has_residual"] is True
 
 
+def test_detect_residual_text_ignores_subglyph_noise_in_large_regions():
+    from qa.inpaint_residual import detect_residual_text
+
+    before = np.full((160, 240, 3), 245, dtype=np.uint8)
+    after = before.copy()
+    after[72:76, 90:100] = 48
+    mask = np.ones((160, 240), dtype=np.uint8) * 255
+
+    residual = detect_residual_text(before, after, mask)
+
+    assert residual["dark_residual_pixels"] == 40
+    assert residual["score"] < 0.01
+    assert residual["has_residual"] is False
+
+
 def test_detect_residual_text_flags_bright_remnants_on_colored_panel():
     from qa.inpaint_residual import detect_residual_text
 
@@ -495,6 +524,76 @@ def test_detect_residual_text_flags_bright_remnants_on_colored_panel():
     assert residual["has_residual"] is True
     assert residual["light_residual_pixels"] > 0
     assert "light_residual_pixels" in residual["flags"]
+
+
+def test_detect_residual_text_flags_faded_dark_glyphs_on_light_balloon():
+    from qa.inpaint_residual import detect_residual_text
+
+    import cv2
+
+    before = np.full((100, 220, 3), 242, dtype=np.uint8)
+    cv2.putText(
+        before,
+        "WHAT IS THIS?!",
+        (22, 59),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.72,
+        (22, 22, 22),
+        2,
+        cv2.LINE_AA,
+    )
+    after = before.copy()
+    source_dark = np.all(before <= 112, axis=2)
+    after[source_dark] = (166, 166, 166)
+    mask = np.zeros(before.shape[:2], dtype=np.uint8)
+    mask[30:72, 14:210] = 255
+
+    residual = detect_residual_text(
+        before,
+        after,
+        mask,
+        include_unchanged_dark=True,
+        include_light_residual=True,
+    )
+
+    assert residual["faded_dark_residual_pixels"] >= 64
+    assert residual["has_residual"] is True
+    assert "faded_dark_residual_pixels" in residual["flags"]
+
+
+def test_detect_residual_text_does_not_treat_white_balloon_as_dark_text_context():
+    from qa.inpaint_residual import detect_residual_text
+
+    import cv2
+
+    before = np.full((90, 180, 3), 252, dtype=np.uint8)
+    cv2.ellipse(before, (90, 45), (78, 36), 0, 0, 360, (35, 35, 35), 2)
+    cv2.putText(
+        before,
+        "READY?",
+        (47, 51),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (25, 25, 25),
+        2,
+        cv2.LINE_AA,
+    )
+    after = before.copy()
+    after[31:58, 38:145] = 252
+    mask = np.zeros((90, 180), dtype=np.uint8)
+    mask[29:60, 34:149] = 255
+
+    residual = detect_residual_text(
+        before,
+        after,
+        mask,
+        include_unchanged_dark=True,
+        include_light_residual=True,
+    )
+
+    assert residual["dark_background_context"] is False
+    assert residual["light_residual_pixels"] == 0
+    assert residual["has_residual"] is False
 
 
 def test_detect_residual_text_does_not_flag_removed_light_text_as_dark_residue():
@@ -841,5 +940,96 @@ def test_inpaint_band_image_records_decision_payload_with_active_debug_recorder(
     assert payload["used_fast_local_fill"] is False
     assert payload["used_real_inpaint"] is True
     assert payload["used_post_cleanup"] is True
-    assert payload["changed_outside_expanded_pixels"] > 0
+    assert payload["changed_outside_expanded_pixels"] == 0
     assert "has_residual" in payload["residual_text"]
+    assert payload["inpaint_policy"] == "fast"
+    assert "engine" in payload
+    assert "fallback_used" in payload
+    assert "texture_flattening" in payload
+
+
+def test_debug_image_writers_share_explicit_rgb_color_space(tmp_path):
+    from PIL import Image
+    from debug_tools import DebugRecorder
+    from inpainter import _save_rgb
+
+    image_rgb = np.array(
+        [[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [240, 180, 20]]],
+        dtype=np.uint8,
+    )
+    direct_path = tmp_path / "direct.png"
+    _save_rgb(direct_path, image_rgb)
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-color")
+    recorder.write_image("08_inpaint/color.png", image_rgb, color_space="RGB")
+
+    direct = np.asarray(Image.open(direct_path).convert("RGB"))
+    recorded = np.asarray(Image.open(tmp_path / "debug" / "e2e" / "08_inpaint" / "color.png").convert("RGB"))
+    assert np.array_equal(direct, image_rgb)
+    assert np.array_equal(recorded, image_rgb)
+
+
+def test_detect_inpaint_texture_flattening_flags_solid_fill_over_gradient():
+    from inpainter import _detect_inpaint_texture_flattening
+
+    height, width = 96, 128
+    yy, xx = np.mgrid[:height, :width]
+    base = np.stack(
+        [
+            40 + (xx * 120 // width),
+            55 + (yy * 100 // height),
+            70 + ((xx + yy) * 80 // (width + height)),
+        ],
+        axis=2,
+    ).astype(np.uint8)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    mask[24:72, 28:100] = 255
+    flattened = base.copy()
+    flattened[mask > 0] = [92, 92, 92]
+
+    metrics = _detect_inpaint_texture_flattening(base, flattened, mask)
+
+    assert metrics["flattened"] is True
+    assert metrics["flag"] == "inpaint_texture_flattened"
+    assert metrics["after_luminance_std"] < metrics["before_luminance_std"]
+    assert metrics["after_gradient_mean"] < metrics["before_gradient_mean"]
+
+
+def test_detect_inpaint_texture_flattening_accepts_continuous_texture():
+    from inpainter import _detect_inpaint_texture_flattening
+
+    height, width = 96, 128
+    yy, xx = np.mgrid[:height, :width]
+    base = np.stack(
+        [
+            35 + (xx * 130 // width),
+            50 + (yy * 110 // height),
+            65 + ((xx + yy) * 90 // (width + height)),
+        ],
+        axis=2,
+    ).astype(np.uint8)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    mask[24:72, 28:100] = 255
+    continued = base.copy()
+    continued[mask > 0] = np.clip(continued[mask > 0] + 2, 0, 255)
+
+    metrics = _detect_inpaint_texture_flattening(base, continued, mask)
+
+    assert metrics["flattened"] is False
+    assert metrics["flag"] == ""
+
+
+def test_detect_inpaint_texture_flattening_accepts_plain_balloon_text_removal():
+    from inpainter import _detect_inpaint_texture_flattening
+
+    before = np.full((96, 128, 3), 246, dtype=np.uint8)
+    mask = np.zeros((96, 128), dtype=np.uint8)
+    mask[28:68, 30:98] = 255
+    before[40:56, 44:84] = 12
+    after = before.copy()
+    after[mask > 0] = 246
+
+    metrics = _detect_inpaint_texture_flattening(before, after, mask)
+
+    assert metrics["ring_luminance_std"] < 8.0
+    assert metrics["flattened"] is False
+    assert metrics["flag"] == ""

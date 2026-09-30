@@ -457,6 +457,69 @@ class LayoutAnalysisTests(unittest.TestCase):
         self.assertEqual(text["layout_profile"], "dark_panel")
         self.assertEqual(text["layout_reason"], "existing_dark_panel_mask_bbox")
 
+    def test_enrich_page_layout_groups_visual_card_children_without_merging_their_text(self):
+        page = {
+            "width": 760,
+            "height": 420,
+            "texts": [
+                {
+                    "id": "ocr_002",
+                    "text": "GRADE: B+ PERMANENTLY INCREASES AGILITY",
+                    "translated": "NOTA: B+ AUMENTA PERMANENTEMENTE A AGILIDADE",
+                    "bbox": [208, 156, 517, 216],
+                    "text_pixel_bbox": [208, 156, 517, 216],
+                    "balloon_bbox": [146, 130, 548, 242],
+                    "bubble_mask_source": "derived_card_panel_mask",
+                    "layout_profile": "translucent_balloon",
+                    "background_rgb": [249, 210, 107],
+                    "qa_flags": ["visual_text_only_inpaint_contract"],
+                },
+                {
+                    "id": "ocr_003",
+                    "text": "FIRST-TIME USE SLIGHTLY INCREASES FLEXIBILITY",
+                    "translated": "O USO PELA PRIMEIRA VEZ AUMENTA A FLEXIBILIDADE",
+                    "bbox": [151, 231, 572, 360],
+                    "text_pixel_bbox": [151, 231, 572, 360],
+                    "balloon_bbox": [66, 220, 619, 386],
+                    "bubble_mask_source": "derived_card_panel_mask",
+                    "layout_profile": "translucent_balloon",
+                    "background_rgb": [244, 207, 105],
+                    "qa_flags": ["visual_text_only_inpaint_contract"],
+                },
+            ],
+        }
+
+        with patch("layout.balloon_layout.build_mask_regions", return_value=[]):
+            enriched = enrich_page_layout(page)
+
+        first, second = enriched["texts"]
+        self.assertEqual(first["layout_category"], "item_card")
+        self.assertEqual(second["layout_category"], "item_card")
+        self.assertEqual(first["card_panel_id"], second["card_panel_id"])
+        self.assertEqual(first["card_panel_bbox"], [66, 130, 619, 386])
+        self.assertEqual(second["card_panel_bbox"], [66, 130, 619, 386])
+        self.assertEqual(first["translated"], "NOTA: B+ AUMENTA PERMANENTEMENTE A AGILIDADE")
+        self.assertEqual(second["translated"], "O USO PELA PRIMEIRA VEZ AUMENTA A FLEXIBILIDADE")
+
+    def test_visual_item_card_row_never_runs_connected_balloon_detection(self):
+        text = {
+            "text": "STAT BY 4 UPON CONSUMPTION",
+            "bbox": [220, 540, 501, 561],
+            "layout_category": "item_card",
+            "card_panel_id": "item_card_125_257_605_780",
+            "layout_profile": "colored_status_panel",
+            "block_profile": "colored_status_panel",
+        }
+
+        self.assertFalse(
+            _can_try_connected_balloon_detection(
+                text,
+                balloon_bbox=[125, 257, 605, 780],
+                layout_shape="tall",
+                page_image=np.full((1030, 800, 3), 180, dtype=np.uint8),
+            )
+        )
+
     def test_connected_subregions_rich_skips_outline_for_dense_simple_candidate(self):
         image = np.full((260, 320, 3), 245, dtype=np.uint8)
 

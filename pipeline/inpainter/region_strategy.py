@@ -12,6 +12,7 @@ from sfx.inpaint_gate import evaluate_sfx_inpaint_gate
 REGION_STRATEGY = {
     "text": "component_roi_snap8",
     "white_balloon": "telea_fast",
+    "translucent_balloon": "lama_required",
     "colored_balloon": "lama_or_patchmatch",
     "caption_box": "preserve_borders",
     "solid_background": "telea_fast",
@@ -29,6 +30,9 @@ ROI_STRATEGY_KEYS = {"text"}
 
 
 def classify_region(region: dict[str, Any]) -> str:
+    profile = str(region.get("layout_profile") or region.get("block_profile") or "").strip()
+    if profile == "translucent_balloon":
+        return profile
     background_type = str(region.get("background_type") or "").strip()
     if background_type == "sfx_text":
         return "sfx_text"

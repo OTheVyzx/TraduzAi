@@ -1,0 +1,11 @@
+{
+  "run_id": "2026-07-24T02-43-27Z_regressed_genius_creates_mythic_items_ea1037",
+  "bad_bands": [25, 26, 28, 32, 40, 41, 42, 43, 45],
+  "control_bands": [35, 39],
+  "required_issue_codes": [
+    "cross_band_duplicate",
+    "render_bbox_missing",
+    "fit_below_minimum_legible",
+    "inpaint_texture_flattened"
+  ]
+}

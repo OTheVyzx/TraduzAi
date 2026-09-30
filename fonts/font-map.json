@@ -10,10 +10,11 @@
     "visual_card": { "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf", "force_upper": true }
   },
   "available": [
-    { "arquivo": "ComicNeue-Bold.ttf", "estilo": "comic-padrao", "serif": false, "detector": true },
-    { "arquivo": "KOMIKAX_.ttf", "estilo": "acao", "serif": false, "detector": true },
-    { "arquivo": "CCDaveGibbonsLower W00 Regular.ttf", "estilo": "comic-legado", "serif": false, "detector": true },
-    { "arquivo": "LeagueGothic-Regular-VariableFont_wdth.ttf", "estilo": "condensado-status", "serif": false, "detector": true }
+    { "arquivo": "ComicNeue-Bold.ttf", "estilo": "comic-padrao", "serif": false, "detector": true, "license_status": "OFL-1.1", "roles": ["dialogue_body", "thought", "narration"] },
+    { "arquivo": "ComicNeue-Regular.ttf", "estilo": "comic-regular", "serif": false, "detector": true, "license_status": "OFL-1.1", "roles": ["dialogue_body", "thought"] },
+    { "arquivo": "KOMIKAX_.ttf", "estilo": "acao", "serif": false, "detector": true, "license_status": "bundled-project-asset", "roles": ["sfx", "title"] },
+    { "arquivo": "CCDaveGibbonsLower W00 Regular.ttf", "estilo": "comic-legado", "serif": false, "detector": true, "license_status": "bundled-project-asset", "roles": ["dialogue_body", "sfx"] },
+    { "arquivo": "LeagueGothic-Regular-VariableFont_wdth.ttf", "estilo": "condensado-status", "serif": false, "detector": true, "license_status": "OFL-1.1", "roles": ["system_card", "card_title", "card_body", "card_value"] }
   ],
   "notes": "Detector restrito a Comic Neue Bold, KOMIKAX, CCDave e League Gothic para testes de copia de fonte/estilo."
 }

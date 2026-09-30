@@ -1,0 +1,55 @@
+{
+  "schema_version": 3,
+  "inputs_path": "../owner_visual_matrix/inputs.json",
+  "inspection_required": true,
+  "entries": [
+    {
+      "entry_id": "style_colored_cards_calibration",
+      "work_id": "regressed_genius_creates_mythic_items",
+      "chapter_id": "chapter_40",
+      "split": "calibration",
+      "config_path": "configs/colored_cards.style.json",
+      "config_sha256": "29b227e2f008b0f8295c708bc56f7c1e58a838587265205708a14f2ab6b63a07",
+      "input_key": "mythic_colored_cards",
+      "expected_input_sha256": "78242a961ff07fd1120b6da3156a015bc509a077b06fcc395b24d326071e06d3",
+      "work_dir": "style_colored_cards_calibration",
+      "targets": [
+        {"page_id":"page_001","owner_id":"owner_p001_024cf5ddf5ea","semantic_role":"card_body","is_speech":false,"component_ids":["region_p001_020_662f0a34c8"],"category":"colored_card","split":"calibration","minimum_count":1,"expected_artifact_space":"framed_page","source_crop":{"bbox_page":[246,10391,628,10542],"width":382,"height":151,"sha256":"2a2f55262ed94479e8ee1819a8eb5e932e7a1a5af5b56b5a6f984da0ba6b2404","coordinate_space":"logical_page"}},
+        {"page_id":"page_001","owner_id":"owner_p001_06c2c46ee27f","semantic_role":"card_body","is_speech":false,"component_ids":["region_p001_012_0b9665b217"],"category":"table_ranking","split":"calibration","minimum_count":1,"expected_artifact_space":"framed_page","source_crop":{"bbox_page":[340,4052,602,4180],"width":262,"height":128,"sha256":"8f17bc734c4946c6eea066e001a30e7900cb1fa54e4d0971f2bc4cd786ede261","coordinate_space":"logical_page"}},
+        {"page_id":"page_001","owner_id":"owner_p001_0dc05817313b","semantic_role":"dialogue_body","is_speech":true,"component_ids":["region_p001_015_b2177ba48b"],"category":"translucent_balloon","split":"calibration","minimum_count":1,"expected_artifact_space":"framed_page","source_crop":{"bbox_page":[198,6057,604,6242],"width":406,"height":185,"sha256":"4f145ec82428d6deb3c6b427baa450411e0af75774bdde0c3bdf26523c0b40dc","coordinate_space":"logical_page"}},
+        {"page_id":"page_001","owner_id":"owner_p001_0f39ce3adba0","semantic_role":"dialogue_body","is_speech":true,"component_ids":["region_p001_022_c1fb40dadf"],"category":"primary_ocr_omission","split":"calibration","minimum_count":1,"expected_artifact_space":"framed_page","source_crop":{"bbox_page":[169,11133,542,11247],"width":373,"height":114,"sha256":"00e896e3eabc1003c611cfd8fb5ac847534c1847c10a8bf99f5506229bdf4f23","coordinate_space":"logical_page"}}
+      ]
+    },
+    {
+      "entry_id": "style_cross_tile_holdout",
+      "work_id": "one_second",
+      "chapter_id": "chapter_5",
+      "split": "holdout",
+      "config_path": "configs/cross_tile_owners.style.json",
+      "config_sha256": "49fc1378be93651e4619a1e2dddc30d63714c1421e0704257e255566f6dfe40e",
+      "input_key": "one_second_cross_tile",
+      "expected_input_sha256": "bf8591406a1ed1639d3121178bb85c43383963098aa57b83e1d257e88225b40e",
+      "work_dir": "style_cross_tile_holdout",
+      "targets": [
+        {"page_id":"page_002","owner_id":"owner_p002_43752a8f8c08","semantic_role":"dialogue_body","is_speech":true,"component_ids":["region_p002_002_b57cf7b4b3"],"category":"white_balloon","split":"holdout","minimum_count":1,"expected_artifact_space":"framed_page","source_crop":{"bbox_page":[391,484,618,595],"width":227,"height":111,"sha256":"2c2147610a183eeb8e7500ce5d44c5aba4d0f43fc7f09682646345eb89b2ee10","coordinate_space":"logical_page"}},
+        {"page_id":"page_002","owner_id":"owner_p002_7227e479da0d","semantic_role":"dialogue_body","is_speech":true,"component_ids":["region_p002_001_a4093dafb7"],"category":"burst","split":"holdout","minimum_count":1,"expected_artifact_space":"framed_page","source_crop":{"bbox_page":[76,54,243,133],"width":167,"height":79,"sha256":"23aa55bd1525fab675a524e9856f5beea464a0eea07c87ab77508180c7048dbe","coordinate_space":"logical_page"}},
+        {"page_id":"page_002","owner_id":"owner_p002_d9afb32ef935","semantic_role":"dialogue_body","is_speech":true,"component_ids":["region_p002_003_8cd5da326a"],"category":"cross_tile_owner","split":"holdout","minimum_count":1,"expected_artifact_space":"framed_page","source_crop":{"bbox_page":[109,985,318,1104],"width":209,"height":119,"sha256":"e4c60408223dfef9a4f0236b41b07c603b983420e9ca5a3715a030ccb1532c31","coordinate_space":"logical_page"}}
+      ]
+    },
+    {
+      "entry_id": "style_dark_panels_holdout",
+      "work_id": "grand_finale",
+      "chapter_id": "chapter_35",
+      "split": "holdout",
+      "config_path": "configs/dark_panels.style.json",
+      "config_sha256": "136f63114c441ad8c826772c06f131c82dc68b8743cd5a04ecd033e20b59d005",
+      "input_key": "grand_finale_dark_panels",
+      "expected_input_sha256": "fd8ce2fec0e3453f7fae994ac97245ce716bcac2d34ca2e5ce8d1fbf699338af",
+      "work_dir": "style_dark_panels_holdout",
+      "targets": [
+        {"page_id":"page_002","owner_id":"owner_p002_5a6976dbbf65","semantic_role":"dialogue_body","is_speech":true,"component_ids":["region_p002_007_f313329712"],"category":"dark_panel","split":"holdout","minimum_count":1,"expected_artifact_space":"framed_page","source_crop":{"bbox_page":[107,1915,424,2114],"width":317,"height":199,"sha256":"3596b34910f6cb295478af3daa875224b742e8ebc250735e4c7db86e6b0aeeab","coordinate_space":"logical_page"}},
+        {"page_id":"page_003","owner_id":"owner_p003_98e72af0685a","semantic_role":"sfx","is_speech":false,"component_ids":["region_p003_004_8ffcf5433a","region_p003_006_60ed16c56f"],"category":"text_over_art","split":"holdout","minimum_count":1,"expected_artifact_space":"framed_page","source_crop":{"bbox_page":[183,572,514,682],"width":331,"height":110,"sha256":"054fe2c77ba95ef21ccc6c4f9d90975f2293938e10649419304a19b1efcfc5c3","coordinate_space":"logical_page"}}
+      ]
+    }
+  ]
+}

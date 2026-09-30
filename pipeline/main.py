@@ -14,9 +14,11 @@ import subprocess
 import sys
 import time
 import faulthandler
+import hashlib
 import logging
 import contextlib
 import importlib.util
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 # Adiciona o diretório da pipeline ao path para resolver imports locais no Pyright/Linter
@@ -27,7 +29,15 @@ if str(pipeline_root) not in sys.path:
 # Lazy imports are moved inside functions to allow fast --hardware-info and --list-supported-languages calls
 
 from utils.decision_log import configure_decision_trace, finalize_decision_trace
-from typesetter.style_policy import SOURCE_STYLE_CONFIDENCE_THRESHOLD, normalize_auto_typesetting_style
+from typesetter.style_contract import style_evidence_v2_from_v1
+from typesetter.gradient_model import canonicalize_linear_gradient
+from typesetter.style_policy import (
+    SOURCE_STYLE_CONFIDENCE_THRESHOLD,
+    decide_style_copy_v2,
+    normalize_auto_typesetting_style,
+    source_style_copy_allowed,
+    style_candidate_copy_allowed,
+)
 from layout.simple_text_geometry import normalize_text_geometry, resolve_text_anchor_bbox, sanitize_simple_text_geometry
 from ocr.postprocess import apply_language_guards, postprocess_ocr_fragments, split_sfx_inline
 from ocr.text_router import ROUTE_ACTIONS
@@ -40,8 +50,6 @@ _EMIT_STDOUT_FAILED = False
 _PIPELINE_FILE_HANDLER: logging.Handler | None = None
 logger = logging.getLogger(__name__)
 EDITOR_DETECT_OCR_CACHE_SCHEMA_VERSION = 7
-STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD = SOURCE_STYLE_CONFIDENCE_THRESHOLD
-STYLE_COPY_SFX_PROMOTION_THRESHOLD = 0.66
 DARK_PANEL_RECT_MAX_HALF_WIDTH_FROM_TEXT_CENTER = 116
 DARK_PANEL_RECT_MAX_HALF_HEIGHT_FROM_TEXT_CENTER = 64
 SUPPRESSED_OCR_ROUTE_REASONS = {
@@ -60,6 +68,68 @@ REMOVED_AUTOMATIC_DECISION_FIELDS = {
     "skip_processing",
     "preserve_original",
 }
+
+
+def _automatic_owner_graph_mode(config: dict) -> str:
+    requested = str(config.get("owner_graph_mode") or "enforce").strip().lower()
+    if requested not in {"enforce", "shadow", "legacy"}:
+        raise ValueError("owner_graph_mode must be enforce, shadow, or legacy")
+    if requested == "legacy" and str(config.get("owner_graph_status") or "") != "legacy_unverified":
+        raise ValueError("legacy mode requires an explicit legacy_unverified project")
+    return requested
+
+
+def _owner_private_execution_root(work_dir: Path, execution_id: str) -> Path:
+    """Keep canonical owner evidence outside mutable public output namespaces."""
+
+    return (Path(work_dir) / ".owner-private" / str(execution_id)).resolve()
+
+
+def _apply_owner_mode_project_repairs(project_data: dict) -> dict:
+    status = str(project_data.get("owner_graph_status") or "legacy_unverified")
+    if status == "verified":
+        return {
+            "owner_mode": "verified",
+            "legacy_helpers_called": [],
+            "same_balloon_fragments_merged": 0,
+            "cross_page_band_layers_rehomed": 0,
+        }
+    from ownership.legacy_adapter import LegacyUnverifiedAdapter
+
+    adapter = LegacyUnverifiedAdapter(project_data)
+    called = []
+    merged = adapter.call(_merge_same_balloon_fragment_layers, project_data)
+    called.append("_merge_same_balloon_fragment_layers")
+    rehomed = adapter.call(_rehome_cross_page_band_layers, project_data)
+    called.append("_rehome_cross_page_band_layers")
+    return {
+        "owner_mode": "legacy_unverified",
+        "legacy_helpers_called": called,
+        "same_balloon_fragments_merged": int(merged or 0),
+        "cross_page_band_layers_rehomed": int(rehomed or 0),
+    }
+
+
+def _write_rgb_jpeg(path: Path, image_rgb, *, quality: int = 92) -> None:
+    """Persist the pipeline's canonical RGB array through OpenCV."""
+    import cv2
+
+    image_bgr = cv2.cvtColor(image_rgb[:, :, :3], cv2.COLOR_RGB2BGR)
+    if not cv2.imwrite(str(path), image_bgr, [cv2.IMWRITE_JPEG_QUALITY, int(quality)]):
+        raise IOError(f"Falha ao gravar imagem RGB: {path}")
+
+
+def _owner_pages_have_final_pixel_authority(output_pages) -> bool:
+    """Return whether every runtime page is a committed owner composition."""
+
+    pages = list(output_pages or [])
+    return bool(pages) and all(
+        isinstance(getattr(page, "ocr_result", None), dict)
+        and page.ocr_result.get("_owner_graph_mode") == "enforce"
+        and getattr(page, "owner_graph", None) is not None
+        and getattr(page, "owner_composition", None) is not None
+        for page in pages
+    )
 
 
 def _is_art_fragment_review_layer(layer: dict) -> bool:
@@ -112,7 +182,8 @@ def neutralize_removed_decision_fields(layer: dict) -> dict:
     normalized["skip_processing"] = False
     normalized["preserve_original"] = False
     normalized["translate_policy"] = "translate"
-    normalized["route_action"] = normalized.get("route_action") or "translate_inpaint_render"
+    normalized["route_action"] = "translate_inpaint_render"
+    normalized["route_reason"] = "dialogue_balloon_with_english_text"
     if str(normalized.get("route_action") or "").strip().lower() == "review_required":
         normalized["render_policy"] = "review_required"
     else:
@@ -492,6 +563,10 @@ def _parse_runner_cli_args(args: list[str]) -> dict:
         "export_mode": "with_warnings",
         "work_dir": str(Path("debug") / "runs" / "pipeline_cli"),
         "mock_critical": False,
+        "chapter": None,
+        "owner_graph_mode": None,
+        "style_copy_mode": None,
+        "replay_owner_artifacts": None,
     }
     index = 0
     while index < len(args):
@@ -515,6 +590,33 @@ def _parse_runner_cli_args(args: list[str]) -> dict:
             continue
         if arg == "--engine-preset" and index + 1 < len(args):
             parsed["engine_preset_id"] = args[index + 1]
+            index += 2
+            continue
+        if arg == "--chapter" and index + 1 < len(args):
+            try:
+                parsed["chapter"] = int(args[index + 1])
+            except ValueError as exc:
+                raise ValueError("--chapter deve ser um inteiro positivo") from exc
+            if parsed["chapter"] <= 0:
+                raise ValueError("--chapter deve ser um inteiro positivo")
+            index += 2
+            continue
+        if arg == "--owner-graph-mode" and index + 1 < len(args):
+            mode = str(args[index + 1]).strip().lower()
+            if mode not in {"legacy", "shadow", "enforce"}:
+                raise ValueError("--owner-graph-mode deve ser legacy, shadow ou enforce")
+            parsed["owner_graph_mode"] = mode
+            index += 2
+            continue
+        if arg == "--style-copy-mode" and index + 1 < len(args):
+            mode = str(args[index + 1]).strip().lower()
+            if mode not in {"off", "shadow", "render", "enforce"}:
+                raise ValueError("--style-copy-mode deve ser off, shadow, render ou enforce")
+            parsed["style_copy_mode"] = mode
+            index += 2
+            continue
+        if arg == "--replay-owner-artifacts" and index + 1 < len(args):
+            parsed["replay_owner_artifacts"] = args[index + 1]
             index += 2
             continue
         if arg == "--mode" and index + 1 < len(args):
@@ -559,6 +661,47 @@ def _parse_runner_cli_args(args: list[str]) -> dict:
     return parsed
 
 
+def parse_cli_args(args: list[str]):
+    """Public typed view of runner CLI overrides."""
+
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**_parse_runner_cli_args(args))
+
+
+def resolve_runner_config_from_cli(args, *, loaded_config: dict) -> dict:
+    """Resolve CLI overrides over a loaded runtime config."""
+
+    supplied = vars(args) if hasattr(args, "__dict__") else dict(args)
+    resolved = dict(loaded_config or {})
+    for key, value in supplied.items():
+        if value is not None:
+            resolved[key] = value
+    chapter = supplied.get("chapter")
+    if chapter is not None:
+        resolved["capitulo"] = int(chapter)
+    else:
+        resolved["capitulo"] = int(
+            resolved.get("capitulo", resolved.get("chapter", 1)) or 1
+        )
+    resolved.pop("chapter", None)
+    resolved["owner_graph_mode"] = str(
+        supplied.get("owner_graph_mode")
+        or resolved.get("owner_graph_mode")
+        or "enforce"
+    ).strip().lower()
+    resolved["style_copy_mode"] = str(
+        supplied.get("style_copy_mode")
+        or resolved.get("style_copy_mode")
+        or "shadow"
+    ).strip().lower()
+    replay = supplied.get("replay_owner_artifacts")
+    if replay is None:
+        replay = resolved.get("replay_owner_artifacts")
+    resolved["replay_owner_artifacts"] = (
+        str(Path(replay).resolve()) if replay not in (None, "") else None
+    )
+    return resolved
 def _list_input_images(source_path: Path) -> list[Path]:
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
     if source_path.is_file() and source_path.suffix.lower() in image_exts:
@@ -1151,6 +1294,7 @@ def _merge_same_balloon_fragment_layers(project_data: dict) -> int:
             if layer.get("visible", True) is not False
             and str(layer.get("render_policy") or "") != "merged_into_primary"
             and not _is_low_containment_suppressed_fragment(layer)
+            and str(layer.get("layout_category") or "").strip().lower() != "item_card"
             and (
                 "same_balloon_fragment_merged" in {str(flag) for flag in layer.get("qa_flags") or []}
                 or layer_source_token_count > 1
@@ -1534,6 +1678,8 @@ def _suppress_same_identity_merged_fragments(project_data: dict) -> int:
             if not primaries:
                 continue
             for fragment in band_layers:
+                if str(fragment.get("layout_category") or "").strip().lower() == "item_card" or fragment.get("card_panel_id"):
+                    continue
                 if not _is_fragment_layer_id(fragment):
                     continue
                 if fragment.get("visible", True) is False:
@@ -1863,6 +2009,30 @@ def _is_project_bbox(value) -> bool:
     return x2 > x1 and y2 > y1
 
 
+def _has_legible_fit_evidence(layer: dict) -> bool:
+    """Return True only for a real fit attempt at or above the stored minimum."""
+    try:
+        final_font_px = int(layer.get("font_size_final", 0) or 0)
+        minimum_font_px = int(layer.get("minimum_legible_font_px", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    attempts = [item for item in list(layer.get("fit_attempts") or []) if isinstance(item, dict)]
+    has_ok_attempt = False
+    for item in attempts:
+        try:
+            attempt_font_px = int(item.get("font_px", 0) or 0)
+        except (TypeError, ValueError):
+            attempt_font_px = 0
+        if str(item.get("status") or "").strip().lower() == "ok" and attempt_font_px >= minimum_font_px:
+            has_ok_attempt = True
+            break
+    if minimum_font_px <= 0:
+        return has_ok_attempt
+    if final_font_px <= 0 and has_ok_attempt:
+        return True
+    return bool(final_font_px >= minimum_font_px and has_ok_attempt)
+
+
 def _ensure_project_render_contract(project_data: dict) -> dict:
     """Audit final render metadata for translated layers before export gate."""
 
@@ -1874,9 +2044,23 @@ def _ensure_project_render_contract(project_data: dict) -> dict:
         "dropped_stale_fit_flag_count": 0,
         "dropped_stale_render_background_flag_count": 0,
         "normalized_fit_status_count": 0,
+        "hidden_unsafe_review_layer_count": 0,
     }
     for layer in _iter_project_text_layers(project_data):
         route_action = str(layer.get("route_action") or "").strip()
+        layer_flags = {str(flag) for flag in layer.get("qa_flags") or []}
+        unsafe_review_layer = bool(
+            route_action == "review_required"
+            and (
+                layer.get("render_completed") is False
+                or str(layer.get("fit_status") or "").strip().lower() == "below_minimum_legible"
+                or "fit_below_minimum_legible" in layer_flags
+                or "pure_inpaint_unresolved" in layer_flags
+            )
+        )
+        if unsafe_review_layer and layer.get("visible", True):
+            layer["visible"] = False
+            audit["hidden_unsafe_review_layer_count"] += 1
         if str(layer.get("render_policy") or "").strip() == "merged_into_primary":
             continue
         if not route_action.startswith("translate_"):
@@ -1916,16 +2100,17 @@ def _ensure_project_render_contract(project_data: dict) -> dict:
                     if str(flag) != "missing_render_bbox"
                 ]
                 qa_flags = list(layer.get("qa_flags") or [])
-            attempts = [item for item in list(layer.get("fit_attempts") or []) if isinstance(item, dict)]
-            has_ok_attempt = any(str(item.get("status") or "").strip().lower() == "ok" for item in attempts)
             if (
                 str(layer.get("fit_status") or "").strip().lower() == "below_minimum_legible"
-                and has_ok_attempt
-                and _bbox_contains4_margin(layer.get("safe_text_box"), layer.get("render_bbox"))
+                and _has_legible_fit_evidence(layer)
             ):
                 layer["fit_status"] = "ok"
                 audit["normalized_fit_status_count"] += 1
-            if str(layer.get("fit_status") or "").strip().lower() == "ok" and "fit_below_minimum_legible" in qa_flags:
+            if (
+                str(layer.get("fit_status") or "").strip().lower() == "ok"
+                and "fit_below_minimum_legible" in qa_flags
+                and _has_legible_fit_evidence(layer)
+            ):
                 layer["qa_flags"] = [
                     flag
                     for flag in qa_flags
@@ -1942,16 +2127,7 @@ def _ensure_project_render_contract(project_data: dict) -> dict:
                 qa_flags = list(layer.get("qa_flags") or [])
                 audit["dropped_stale_render_background_flag_count"] += 1
             if not isinstance(layer.get("fit_attempts"), list):
-                layer["fit_attempts"] = [
-                    {
-                        "font_px": int(((layer.get("estilo") or {}).get("tamanho") or 0) or 0),
-                        "lines": len(layer.get("linhas") or layer.get("lines") or []) or 1,
-                        "status": "ok",
-                    }
-                ]
-                audit["filled_fit_metadata_count"] += 1
-            if not layer.get("fit_status"):
-                layer["fit_status"] = "ok"
+                layer["fit_attempts"] = []
                 audit["filled_fit_metadata_count"] += 1
     return audit
 
@@ -2317,6 +2493,10 @@ MASK_SYNCED_QA_FLAGS = {
     "glyph_mask_outside_bubble",
     "missing_real_bubble_mask",
     "source_glyph_area_ratio_critical",
+}
+
+INPAINT_SYNCED_QA_FLAGS = {
+    "inpaint_texture_flattened",
 }
 
 RENDER_GEOMETRY_QA_FLAGS = {"TEXT_CLIPPED", "TEXT_OVERFLOW", "render_outside_balloon"}
@@ -2692,6 +2872,17 @@ def _collect_render_plan_qa_flags(debug_root: Path) -> list[dict]:
         flags = {str(flag).strip() for flag in entry.get("qa_flags") or [] if str(flag).strip()}
         flags.update(_render_fit_qa_flags(entry))
         flags = {flag for flag in flags if flag not in MASK_SYNCED_QA_FLAGS}
+        if "inpaint_texture_flattened" in flags:
+            band_id = str(entry.get("band_id") or "").strip()
+            inpaint_decision = _load_inpaint_decision_for_band(debug_root, band_id)
+            texture_flattening = (
+                inpaint_decision.get("texture_flattening")
+                if isinstance(inpaint_decision, dict)
+                and isinstance(inpaint_decision.get("texture_flattening"), dict)
+                else {}
+            )
+            if texture_flattening.get("flattened") is False:
+                flags.discard("inpaint_texture_flattened")
         flags = _filter_render_plan_qa_flags(entry, flags)
         claim = _qa_flag_claim(entry, flags, "render_plan")
         if claim:
@@ -2741,6 +2932,13 @@ def _collect_inpaint_decision_qa_flags(debug_root: Path) -> list[dict]:
             logger.warning("Falha ao ler inpaint_decision %s: %s", path, exc)
             continue
         flags = {str(flag).strip() for flag in decision.get("flags") or [] if str(flag).strip()}
+        texture_flattening = (
+            decision.get("texture_flattening")
+            if isinstance(decision.get("texture_flattening"), dict)
+            else {}
+        )
+        if texture_flattening.get("flattened") is False:
+            flags.discard("inpaint_texture_flattened")
         flags = _blocking_or_review_flags(flags)
         if not flags:
             continue
@@ -5103,6 +5301,20 @@ def _repair_project_bubble_bboxes_from_debug_masks(project_data: dict) -> dict:
             )
             balloon_bbox = _clamp_page_bbox(balloon_unclamped, page_size)
             inner_bbox = _clamp_page_bbox(inner_unclamped, page_size)
+            decision = bboxes.get("decision") if isinstance(bboxes.get("decision"), dict) else {}
+            image_fallback = bool(decision.get("used_image_bubble_mask")) and not bool(
+                decision.get("used_real_bubble_mask")
+            )
+            if (
+                image_fallback
+                and balloon_unclamped is not None
+                and balloon_bbox is not None
+                and list(balloon_unclamped) != list(balloon_bbox)
+            ):
+                layer["layout_safe_reason"] = "debug_derived_bubble_mask_rejected"
+                layer["_debug_derived_bubble_bbox_rejected"] = "untrusted_fallback_bubble_mask"
+                _merge_layer_qa_flags(layer, ["debug_derived_bubble_mask_rejected"])
+                continue
             source_text_mask_local = None
             if str(bboxes.get("mask_debug_scope") or "") == "per_text":
                 for key in (
@@ -5164,7 +5376,6 @@ def _repair_project_bubble_bboxes_from_debug_masks(project_data: dict) -> dict:
             layer["_bubble_mask_bbox_unclamped"] = balloon_unclamped
             layer["_bubble_inner_bbox_unclamped"] = inner_unclamped
             layer["_safe_text_box_unclamped"] = safe_unclamped
-            decision = bboxes.get("decision") if isinstance(bboxes.get("decision"), dict) else {}
             layer["bubble_mask_source"] = str(decision.get("bubble_mask_source") or "real_bubble_mask")
             layer["layout_safe_bbox"] = safe_bbox
             layer["layout_safe_reason"] = "debug_derived_bubble_mask_unclamped"
@@ -5253,8 +5464,6 @@ def _repair_project_real_bubble_body_safe_areas(project_data: dict) -> dict:
     real_bubble_sources = {
         "real",
         "real_bubble_mask",
-        "image_contour_bubble_mask",
-        "image_white_bubble_mask",
         "debug_band_balloon_component",
     }
     for layer in _iter_project_text_layers(project_data):
@@ -5579,6 +5788,30 @@ def _copy_group_sibling_render_metadata(project_data: dict, candidates: list[dic
                 )
             )
             if not candidate_matches_primary_text:
+                for sibling in matched_layers:
+                    if (
+                        _optional_bbox4(sibling.get("render_bbox")) is not None
+                        and _optional_bbox4(sibling.get("safe_text_box")) is not None
+                    ):
+                        continue
+                    sibling_candidate = (
+                        candidate
+                        if _render_bbox_overlaps_layer_source_text(
+                            sibling, candidate.get("render_bbox")
+                        )
+                        else _render_candidate_with_layer_coordinates(candidate, sibling)
+                    )
+                    sibling_render = _optional_bbox4(sibling_candidate.get("render_bbox"))
+                    sibling_safe = _optional_bbox4(
+                        sibling_candidate.get("safe_text_box")
+                    ) or _optional_bbox4(sibling_candidate.get("_debug_safe_text_box"))
+                    if sibling_render is None or sibling_safe is None:
+                        continue
+                    sibling["render_bbox"] = sibling_render
+                    sibling["safe_text_box"] = sibling_safe
+                    sibling["_debug_safe_text_box"] = sibling_safe
+                    sibling["_render_metadata_group_sibling_geometry"] = True
+                    hydrated += 1
                 continue
             candidate_extends_primary_text = bool(
                 candidate_text
@@ -5588,6 +5821,30 @@ def _copy_group_sibling_render_metadata(project_data: dict, candidates: list[dic
             )
             should_apply_candidate_text = bool(source_texts_overlap or candidate_extends_primary_text)
             if not should_apply_candidate_text:
+                for sibling in matched_layers:
+                    if (
+                        _optional_bbox4(sibling.get("render_bbox")) is not None
+                        and _optional_bbox4(sibling.get("safe_text_box")) is not None
+                    ):
+                        continue
+                    sibling_candidate = (
+                        candidate
+                        if _render_bbox_overlaps_layer_source_text(
+                            sibling, candidate.get("render_bbox")
+                        )
+                        else _render_candidate_with_layer_coordinates(candidate, sibling)
+                    )
+                    sibling_render = _optional_bbox4(sibling_candidate.get("render_bbox"))
+                    sibling_safe = _optional_bbox4(
+                        sibling_candidate.get("safe_text_box")
+                    ) or _optional_bbox4(sibling_candidate.get("_debug_safe_text_box"))
+                    if sibling_render is None or sibling_safe is None:
+                        continue
+                    sibling["render_bbox"] = sibling_render
+                    sibling["safe_text_box"] = sibling_safe
+                    sibling["_debug_safe_text_box"] = sibling_safe
+                    sibling["_render_metadata_group_sibling_geometry"] = True
+                    hydrated += 1
                 continue
             if candidate_text and should_apply_candidate_text:
                 primary["translated"] = candidate_text
@@ -6301,6 +6558,9 @@ def _hydrate_project_render_metadata_from_debug_candidates(project_data: dict) -
         "restored_missing_candidate_layers": 0,
         "missing_debug_root": False,
     }
+    if str(project_data.get("owner_graph_status") or "") == "verified":
+        audit["skipped_verified_owner_project"] = True
+        return audit
     debug_root = _debug_root_from_project(project_data)
     if debug_root is None:
         audit["missing_debug_root"] = True
@@ -6692,6 +6952,9 @@ def _hydrate_project_render_metadata_from_debug_candidates(project_data: dict) -
             layer["fit_status"] = best.get("fit_status")
         if isinstance(best.get("fit_attempts"), list):
             layer["fit_attempts"] = best.get("fit_attempts")
+        for fit_key in ("font_size_final", "minimum_legible_font_px", "render_completed"):
+            if best.get(fit_key) is not None:
+                layer[fit_key] = best.get(fit_key)
         try:
             font_size_final = int(best.get("font_size_final") or 0)
         except (TypeError, ValueError):
@@ -6954,7 +7217,9 @@ def _propagate_debug_qa_flags_to_project(project_data: dict) -> dict:
     if debug_root:
         for layer in project_layers:
             layer["qa_flags"] = [
-                flag for flag in (layer.get("qa_flags") or []) if str(flag) not in MASK_SYNCED_QA_FLAGS
+                flag
+                for flag in (layer.get("qa_flags") or [])
+                if str(flag) not in MASK_SYNCED_QA_FLAGS | INPAINT_SYNCED_QA_FLAGS
             ]
 
     missing: list[dict] = []
@@ -7023,9 +7288,7 @@ def _filter_debug_claim_flags_for_project_layer(layer: dict, flags: set[str]) ->
         filtered.discard("missing_render_bbox")
     if "fit_below_minimum_legible" in filtered and has_render_geometry:
         fit_status = str(layer.get("fit_status") or "").strip().lower()
-        attempts = [item for item in list(layer.get("fit_attempts") or []) if isinstance(item, dict)]
-        has_ok_attempt = any(str(item.get("status") or "").strip().lower() == "ok" for item in attempts)
-        if fit_status == "ok" or (has_ok_attempt and _bbox_contains4_margin(safe_text_box, render_bbox)):
+        if fit_status == "ok":
             filtered.discard("fit_below_minimum_legible")
     if "render_on_art_suspected" in filtered and _render_background_art_flag_is_stale(layer):
         filtered.discard("render_on_art_suspected")
@@ -7060,15 +7323,7 @@ def _write_debug_jsonl_replace(recorder, rel_path: str, entries: list[dict]) -> 
     if not recorder:
         return
     try:
-        target = recorder._root / rel_path
-        stage = recorder._stage_from_rel(rel_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        lines = [
-            json.dumps(recorder._header(entry, stage=stage), ensure_ascii=False)
-            for entry in entries
-        ]
-        target.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
-        recorder.register_artifact(stage=stage, rel_path=rel_path, kind="jsonl")
+        recorder.write_jsonl_replace(rel_path, entries)
     except Exception as exc:
         try:
             recorder.event("qa_export_gate", "write_jsonl_replace_failed", {"rel_path": rel_path, "error": str(exc)})
@@ -7206,6 +7461,11 @@ def _project_render_plan_row(page: dict, layer: dict, page_index: int) -> dict |
         "qa_flags": _drop_resolved_pre_render_flags(layer, list(layer.get("qa_flags") or [])),
         "qa_metrics": dict(layer.get("qa_metrics") or {}),
         "warnings": list(layer.get("warnings") or []),
+        "fit_status": layer.get("fit_status"),
+        "font_size_final": layer.get("font_size_final"),
+        "minimum_legible_font_px": layer.get("minimum_legible_font_px"),
+        "render_completed": layer.get("render_completed"),
+        "owner_render_quality": copy.deepcopy(layer.get("owner_render_quality")),
     }
     style = layer.get("estilo") if isinstance(layer.get("estilo"), dict) else layer.get("style")
     if isinstance(style, dict):
@@ -7327,6 +7587,10 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
         "after_late_render_contract_repair": False,
         "seen_count": 0,
         "refreshed_count": 0,
+        "final_page_crop_resync_count": 0,
+        "clean_band_source_used": 0,
+        "clean_band_final_mismatch_count": 0,
+        "clean_band_final_checks": [],
         "missing_count": 0,
         "error_count": 0,
     }
@@ -7339,15 +7603,22 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
         crops_path = root / "10_copyback_reassemble" / "final_band_crops.jsonl"
         if not crops_path.exists():
             return audit
+        crop_rows: list[dict] = []
         for line in crops_path.read_text(encoding="utf-8", errors="replace").splitlines():
             if not line.strip():
                 continue
             audit["seen_count"] += 1
             try:
                 row = json.loads(line)
+                if isinstance(row, dict):
+                    crop_rows.append(row)
+                else:
+                    audit["error_count"] += 1
             except Exception:
                 audit["error_count"] += 1
                 continue
+        composition_coverage: dict[str, object] = {}
+        for row in sorted(crop_rows, key=_final_crop_page_composition_sort_key):
             translated_name = str(row.get("translated_output_page") or "").strip()
             final_rel = str(row.get("final_crop_path") or "").strip()
             bbox = row.get("crop_bbox_in_translated_page")
@@ -7377,10 +7648,116 @@ def _refresh_debug_final_band_crops_from_translated(recorder, work_dir: Path) ->
             if x2 <= x1 or y2 <= y1:
                 audit["missing_count"] += 1
                 continue
-            recorder.write_image(final_rel, image[y1:y2, x1:x2, :], quality=100)
+            crop_w = x2 - x1
+            crop_h = y2 - y1
+            clean_bgr, clean_path, clean_source = _preferred_clean_band_source_for_final_crop(
+                row,
+                work_dir,
+                (crop_w, crop_h),
+            )
+            if clean_bgr is not None:
+                final_path = _resolve_debug_e2e_artifact_path(work_dir, final_rel)
+                fallback_reference = cv2.imread(
+                    str(Path(work_dir) / "images" / Path(translated_name).name),
+                    cv2.IMREAD_COLOR,
+                )
+                if fallback_reference is not None and fallback_reference.shape[:2] == image.shape[:2]:
+                    fallback_reference = fallback_reference[y1:y2, x1:x2, :]
+                else:
+                    fallback_reference = None
+                changed_mask = _final_band_changed_mask_for_composition(
+                    row,
+                    work_dir,
+                    clean_bgr,
+                    fallback_reference_bgr=fallback_reference,
+                )
+                coverage = composition_coverage.get(str(translated_path))
+                if coverage is None or getattr(coverage, "shape", None) != image.shape[:2]:
+                    import numpy as np
+
+                    coverage = np.zeros(image.shape[:2], dtype=bool)
+                    composition_coverage[str(translated_path)] = coverage
+                covered_mask = coverage[y1:y2, x1:x2]
+                composed = _composite_final_band_candidate(
+                    image[y1:y2, x1:x2, :],
+                    clean_bgr,
+                    changed_mask,
+                    covered_mask,
+                )
+                image[y1:y2, x1:x2, :] = composed
+                coverage[y1:y2, x1:x2] = True
+                cv2.imwrite(str(translated_path), image, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                recorder.write_image(final_rel, composed, quality=100, color_space="BGR")
+                final_bgr = cv2.imread(str(final_path), cv2.IMREAD_COLOR) if final_path else None
+                diff_summary = _final_band_diff_summary(clean_bgr, final_bgr, changed_mask)
+                diff_summary.update(
+                    {
+                        "band_id": str(row.get("band_id") or ""),
+                        "source": clean_source,
+                        "source_path": str(clean_path) if clean_path else "",
+                        "final_path": str(final_path) if final_path else "",
+                    }
+                )
+                audit["clean_band_final_checks"].append(diff_summary)
+                if diff_summary.get("worse_than_clean_source"):
+                    audit["clean_band_final_mismatch_count"] += 1
+                row["final_band_clean_source"] = clean_source
+                row["final_band_clean_source_path"] = str(clean_path) if clean_path else ""
+                audit["clean_band_source_used"] += 1
+            else:
+                recorder.write_image(final_rel, image[y1:y2, x1:x2, :], quality=100, color_space="BGR")
             audit["refreshed_count"] += 1
+        # Adaptive bands may overlap. The composition loop above establishes the
+        # final ownership order on each translated page, so an earlier band crop
+        # can become stale when a later band writes into the shared area. Refresh
+        # every debug crop once more from the fully composed page before QA.
+        final_pages: dict[str, object] = {}
+        for row in crop_rows:
+            translated_name = str(row.get("translated_output_page") or "").strip()
+            final_rel = str(row.get("final_crop_path") or "").strip()
+            bbox = row.get("crop_bbox_in_translated_page")
+            if not translated_name or not final_rel or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                continue
+            translated_path = Path(translated_name)
+            if not translated_path.is_absolute():
+                if translated_path.parts and translated_path.parts[0].lower() == "translated":
+                    translated_path = Path(work_dir) / translated_path
+                else:
+                    translated_path = Path(work_dir) / "translated" / translated_path
+            page_key = str(translated_path)
+            if page_key not in final_pages:
+                final_pages[page_key] = cv2.imread(page_key, cv2.IMREAD_COLOR)
+            image = final_pages[page_key]
+            if image is None:
+                continue
+            try:
+                x1, y1, x2, y2 = [int(round(float(value))) for value in bbox[:4]]
+            except Exception:
+                continue
+            height, width = image.shape[:2]
+            x1 = max(0, min(width, x1))
+            x2 = max(0, min(width, x2))
+            y1 = max(0, min(height, y1))
+            y2 = max(0, min(height, y2))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            recorder.write_image(final_rel, image[y1:y2, x1:x2, :], quality=100, color_space="BGR")
+            audit["final_page_crop_resync_count"] += 1
         try:
             recorder.write_json("10_copyback_reassemble/final_band_crops_refresh.json", audit)
+        except Exception:
+            pass
+        try:
+            consistency_audit = _audit_translated_page_band_consistency(work_dir)
+            recorder.write_json(
+                "10_copyback_reassemble/translated_page_band_consistency_audit.json",
+                consistency_audit,
+            )
+            audit["translated_page_band_consistency"] = {
+                "rows_checked": consistency_audit.get("rows_checked", 0),
+                "rows_compared": consistency_audit.get("rows_compared", 0),
+                "rows_failed": consistency_audit.get("rows_failed", 0),
+            }
         except Exception:
             pass
     except Exception:
@@ -7411,7 +7788,6 @@ def _clean_final_band_source_for_crop_row(root: Path, work_dir: Path, row: dict)
         for name in ("post_copyback.jpg", "post_copyback.png", "post_copyback.jpeg"):
             candidates.append((post_dir / name, "post_copyback_convention"))
     candidates.append((_resolve_debug_e2e_path(work_dir, row.get("rendered_band_path")), "rendered_band_path"))
-    candidates.append((_resolve_debug_e2e_path(work_dir, row.get("final_crop_path")), "existing_final_band"))
     for path, source in candidates:
         if path and path.exists() and path.is_file():
             return path, source
@@ -7667,6 +8043,7 @@ def _restore_clean_final_bands_after_rerender(recorder, work_dir: Path) -> dict:
         "translated_crop_fallback_used": 0,
         "clean_band_final_mismatch_count": 0,
         "final_band_written_count": 0,
+        "refreshed_count": 0,
         "translated_pages_recomposed_count": 0,
         "missing_count": 0,
         "error_count": 0,
@@ -7781,8 +8158,9 @@ def _restore_clean_final_bands_after_rerender(recorder, work_dir: Path) -> dict:
                     band_id=band_id,
                     color_space="bgr",
                 )
-                recorder.write_image(final_rel, image, quality=100)
+                recorder.write_image(final_rel, image, quality=100, color_space="BGR")
                 audit["final_band_written_count"] += 1
+                audit["refreshed_count"] += 1
             if band_id:
                 audit["sources_by_band"][band_id] = source_kind
             if translated_name:
@@ -7861,6 +8239,9 @@ def _restore_clean_final_bands_after_rerender(recorder, work_dir: Path) -> dict:
                 else:
                     cv2.imwrite(str(translated_path), page_image)
                 audit["translated_pages_recomposed_count"] += 1
+        if audit["clean_band_source_used"] == 0 and audit["translated_crop_fallback_used"] > 0:
+            audit["source"] = "translated_after_final_project_rerender"
+            audit["final_output_source"] = "translated_after_final_project_rerender"
         try:
             recorder.write_json("10_copyback_reassemble/final_band_crops_refresh.json", audit)
         except Exception:
@@ -7920,6 +8301,343 @@ def _final_rerender_layers_for_crop(row: dict, layers: list[dict]) -> list[dict]
         for layer in layers
         if band_id and str(layer.get("band_id") or "").strip() == band_id
     ]
+
+
+def _resolve_debug_e2e_artifact_path(work_dir: Path, rel_or_abs: str | None) -> Path | None:
+    raw = str(rel_or_abs or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    return Path(work_dir) / "debug" / "e2e" / path
+
+
+def _preferred_clean_band_source_for_final_crop(
+    row: dict,
+    work_dir: Path,
+    expected_size: tuple[int, int],
+):
+    """Return a clean already-rendered band source for final crop sync.
+
+    The strip path can have a good post-copyback/rendered band before later
+    project-level metadata is hydrated.  Final crops must not be regenerated
+    from stale text_layers when one of these clean artifacts exists.
+    """
+
+    try:
+        import cv2
+    except Exception:
+        return None, None, ""
+
+    band_id = str(row.get("band_id") or "").strip()
+    candidates: list[tuple[str, Path | None]] = [
+        ("post_copyback_path", _resolve_debug_e2e_artifact_path(work_dir, row.get("post_copyback_path"))),
+        (
+            "post_copyback_convention",
+            _resolve_debug_e2e_artifact_path(
+                work_dir,
+                f"10_copyback_reassemble/{band_id}/post_copyback.jpg" if band_id else "",
+            ),
+        ),
+        ("rendered_band_path", _resolve_debug_e2e_artifact_path(work_dir, row.get("rendered_band_path"))),
+    ]
+    expected_w, expected_h = expected_size
+    for source, path in candidates:
+        if path is None:
+            continue
+        if not path.exists():
+            continue
+        image_bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image_bgr is None:
+            continue
+        height, width = image_bgr.shape[:2]
+        if width == expected_w and height == expected_h:
+            return image_bgr, path, source
+    return None, None, ""
+
+
+def _final_band_diff_summary(reference_bgr, observed_bgr, visible_mask=None) -> dict:
+    if reference_bgr is None or observed_bgr is None:
+        return {"valid": False, "reason": "missing_image"}
+    if not hasattr(reference_bgr, "shape") or not hasattr(observed_bgr, "shape"):
+        return {"valid": False, "reason": "invalid_image"}
+    if reference_bgr.shape != observed_bgr.shape:
+        return {
+            "valid": False,
+            "reason": "shape_mismatch",
+            "reference_shape": list(reference_bgr.shape),
+            "observed_shape": list(observed_bgr.shape),
+        }
+    try:
+        import numpy as np
+
+        diff = np.abs(reference_bgr.astype(np.int16) - observed_bgr.astype(np.int16))
+        if visible_mask is not None:
+            mask = np.asarray(visible_mask, dtype=bool)
+            if mask.shape == diff.shape[:2] and np.any(mask):
+                diff = diff[mask]
+        max_diff = int(diff.max()) if diff.size else 0
+        changed_gt8 = int((diff > 8).sum()) if diff.size else 0
+        return {
+            "valid": True,
+            "max_diff": max_diff,
+            "changed_gt8": changed_gt8,
+            "mean_diff": float(diff.mean()) if diff.size else 0.0,
+            "worse_than_clean_source": bool(max_diff > 12 and changed_gt8 > 0),
+        }
+    except Exception as exc:
+        return {"valid": False, "reason": "diff_failed", "error": str(exc)}
+
+
+def _final_band_changed_mask_for_composition(
+    row: dict,
+    work_dir: Path,
+    candidate_bgr,
+    *,
+    fallback_reference_bgr=None,
+):
+    """Return only pixels owned by this band, excluding unchanged overlap context."""
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return None
+    if candidate_bgr is None or not hasattr(candidate_bgr, "shape"):
+        return None
+    band_id = str(row.get("band_id") or "").strip()
+    reference = None
+    if band_id:
+        reference_path = Path(work_dir) / "debug_inpaint" / band_id / "00_band_original.jpg"
+        if reference_path.exists():
+            reference = cv2.imread(str(reference_path), cv2.IMREAD_COLOR)
+    if reference is None or reference.shape != candidate_bgr.shape:
+        reference = fallback_reference_bgr
+    if reference is None or not hasattr(reference, "shape") or reference.shape != candidate_bgr.shape:
+        return None
+    direct_delta = np.max(np.abs(candidate_bgr.astype(np.int16) - reference.astype(np.int16)), axis=2)
+    if reference.ndim == 3 and reference.shape[2] == 3:
+        swapped = reference[:, :, ::-1]
+        swapped_delta = np.max(np.abs(candidate_bgr.astype(np.int16) - swapped.astype(np.int16)), axis=2)
+        if float(np.median(swapped_delta)) + 2.0 < float(np.median(direct_delta)):
+            reference = swapped
+    delta = np.max(np.abs(candidate_bgr.astype(np.int16) - reference.astype(np.int16)), axis=2)
+    changed = delta > 12
+    return changed if np.any(changed) else np.zeros(candidate_bgr.shape[:2], dtype=bool)
+
+
+def _final_band_overlap_mask_for_composition(row: dict, rows: list[dict]):
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = [int(value) for value in bbox]
+    overlap = np.zeros((y2 - y1, x2 - x1), dtype=bool)
+    page = str(row.get("translated_output_page") or "")
+    band_id = str(row.get("band_id") or "")
+    for other in rows:
+        if other is row or str(other.get("band_id") or "") == band_id:
+            continue
+        if str(other.get("translated_output_page") or "") != page:
+            continue
+        other_bbox = _optional_bbox4(other.get("crop_bbox_in_translated_page"))
+        if other_bbox is None:
+            continue
+        ox1, oy1, ox2, oy2 = [int(value) for value in other_bbox]
+        ix1, iy1 = max(x1, ox1), max(y1, oy1)
+        ix2, iy2 = min(x2, ox2), min(y2, oy2)
+        if ix2 > ix1 and iy2 > iy1:
+            overlap[iy1 - y1 : iy2 - y1, ix1 - x1 : ix2 - x1] = True
+    return overlap
+
+
+def _composite_final_band_candidate(page_region_bgr, candidate_bgr, changed_mask, covered_mask=None):
+    if changed_mask is None or covered_mask is None:
+        return candidate_bgr.copy()
+    composed = page_region_bgr.copy()
+    if changed_mask.shape == composed.shape[:2] and covered_mask.shape == composed.shape[:2]:
+        owned = (~covered_mask) | changed_mask
+        composed[owned] = candidate_bgr[owned]
+    return composed
+
+
+def _band_visible_mask_for_final_composition(row_index: int, rows: list[dict]) -> object | None:
+    try:
+        import numpy as np
+    except Exception:
+        return None
+
+    row = rows[row_index]
+    bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+    if bbox is None:
+        return None
+    x1, y1, x2, y2 = [int(value) for value in bbox]
+    if x2 <= x1 or y2 <= y1:
+        return None
+    mask = np.ones((y2 - y1, x2 - x1), dtype=bool)
+    page = str(row.get("translated_output_page") or "")
+    for later in rows[row_index + 1:]:
+        if str(later.get("translated_output_page") or "") != page:
+            continue
+        other = _optional_bbox4(later.get("crop_bbox_in_translated_page"))
+        if other is None:
+            continue
+        ox1, oy1, ox2, oy2 = [int(value) for value in other]
+        ix1 = max(x1, ox1)
+        iy1 = max(y1, oy1)
+        ix2 = min(x2, ox2)
+        iy2 = min(y2, oy2)
+        if ix2 <= ix1 or iy2 <= iy1:
+            continue
+        mask[iy1 - y1:iy2 - y1, ix1 - x1:ix2 - x1] = False
+    return mask
+
+
+def _audit_translated_page_band_consistency(work_dir: Path) -> dict:
+    audit: dict = {
+        "schema_version": 1,
+        "source": "final_band_vs_translated_visible_crop",
+        "rows_checked": 0,
+        "rows_compared": 0,
+        "rows_failed": 0,
+        "rows_skipped": 0,
+        "failures": [],
+        "checks": [],
+        "max_allowed_diff": 12,
+        "jpeg_edge_max_allowed_diff": 24,
+        "changed_gt8_allowed": 256,
+        "changed_gt8_visible_ratio_allowed": 0.001,
+    }
+    try:
+        import cv2
+        import numpy as np
+    except Exception as exc:
+        audit["errors"] = [{"stage": "import", "error": str(exc)}]
+        return audit
+
+    crops_path = Path(work_dir) / "debug" / "e2e" / "10_copyback_reassemble" / "final_band_crops.jsonl"
+    rows = [row for row in _load_debug_jsonl(crops_path) if isinstance(row, dict)]
+    rows = sorted(rows, key=_final_crop_page_composition_sort_key)
+    translated_cache: dict[Path, object] = {}
+    for index, row in enumerate(rows):
+        audit["rows_checked"] += 1
+        bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+        final_rel = str(row.get("final_crop_path") or "").strip()
+        translated_name = str(row.get("translated_output_page") or "").strip()
+        if bbox is None or not final_rel or not translated_name:
+            audit["rows_skipped"] += 1
+            continue
+        x1, y1, x2, y2 = [int(value) for value in bbox]
+        final_path = _resolve_debug_e2e_artifact_path(work_dir, final_rel)
+        translated_path = _final_rerender_resolve_translated_path(work_dir, translated_name)
+        if final_path is None:
+            audit["rows_skipped"] += 1
+            continue
+        final_bgr = cv2.imread(str(final_path), cv2.IMREAD_COLOR)
+        if translated_path not in translated_cache:
+            translated_cache[translated_path] = cv2.imread(str(translated_path), cv2.IMREAD_COLOR)
+        page_bgr = translated_cache.get(translated_path)
+        if final_bgr is None or page_bgr is None:
+            audit["rows_skipped"] += 1
+            continue
+        page_h, page_w = page_bgr.shape[:2]
+        x1c = max(0, min(page_w, x1))
+        x2c = max(0, min(page_w, x2))
+        y1c = max(0, min(page_h, y1))
+        y2c = max(0, min(page_h, y2))
+        if x1c != x1 or x2c != x2 or y1c != y1 or y2c != y2:
+            audit["rows_skipped"] += 1
+            continue
+        crop_bgr = page_bgr[y1:y2, x1:x2, :]
+        if crop_bgr.shape != final_bgr.shape:
+            audit["rows_skipped"] += 1
+            audit["failures"].append(
+                {
+                    "band_id": str(row.get("band_id") or ""),
+                    "reason": "shape_mismatch",
+                    "final_shape": list(final_bgr.shape),
+                    "translated_crop_shape": list(crop_bgr.shape),
+                }
+            )
+            continue
+        visible = _band_visible_mask_for_final_composition(index, rows)
+        if visible is None or int(np.count_nonzero(visible)) <= 0:
+            audit["rows_skipped"] += 1
+            continue
+        reference_bgr = crop_bgr
+        if translated_path.suffix.lower() in {".jpg", ".jpeg"}:
+            try:
+                # final_band is a JPEG encoding of the already-decoded page
+                # crop. Encode that crop once to model the expected artifact;
+                # re-encoding final_bgr would incorrectly compare generation
+                # two against the page's decoded generation zero.
+                ok, encoded = cv2.imencode(".jpg", crop_bgr, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                if ok:
+                    decoded = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+                    if decoded is not None and decoded.shape == crop_bgr.shape:
+                        reference_bgr = decoded
+            except Exception:
+                reference_bgr = crop_bgr
+        diff = np.abs(reference_bgr.astype(np.int16) - final_bgr.astype(np.int16))
+        visible_diff = diff[visible]
+        max_diff = int(visible_diff.max()) if visible_diff.size else 0
+        changed_gt8 = int((visible_diff > 8).sum()) if visible_diff.size else 0
+        visible_pixels = int(np.count_nonzero(visible))
+        changed_limit = max(256, int(round(visible_pixels * 0.001)))
+        passed = bool(max_diff <= 12 or (max_diff <= 24 and changed_gt8 <= changed_limit))
+        check = {
+            "band_id": str(row.get("band_id") or ""),
+            "translated_output_page": translated_name,
+            "final_crop_path": final_rel,
+            "visible_pixels": visible_pixels,
+            "max_diff": max_diff,
+            "changed_gt8": changed_gt8,
+            "changed_gt8_limit": changed_limit,
+            "has_text_trace": _final_crop_has_text_trace(row),
+            "passed": passed,
+        }
+        audit["checks"].append(check)
+        audit["rows_compared"] += 1
+        if not check["passed"]:
+            audit["rows_failed"] += 1
+            audit["failures"].append(check)
+    return audit
+
+
+def _final_crop_has_text_trace(row: dict) -> bool:
+    trace_ids = row.get("trace_ids")
+    if not isinstance(trace_ids, list):
+        return False
+    return any(str(trace_id or "").strip() for trace_id in trace_ids)
+
+
+def _final_crop_page_composition_sort_key(row: dict) -> tuple[str, int, int, int, str]:
+    """Paste context first, then lower text crops so upper text crops own seams."""
+
+    bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+    y1 = int(bbox[1]) if bbox is not None else -1
+    y2 = int(bbox[3]) if bbox is not None else -1
+    return (
+        str(row.get("translated_output_page") or ""),
+        1 if _final_crop_has_text_trace(row) else 0,
+        -y1,
+        -y2,
+        str(row.get("band_id") or ""),
+    )
+
+
+def _load_final_rerender_render_plan_layers(work_dir: Path) -> list[dict]:
+    plan_path = (
+        Path(work_dir)
+        / "debug"
+        / "e2e"
+        / "09_typeset"
+        / "render_plan_final.jsonl"
+    )
+    return [entry for entry in _load_debug_jsonl(plan_path) if isinstance(entry, dict)]
 
 
 def _final_rerender_resolve_translated_path(work_dir: Path, translated_name: str) -> Path:
@@ -8094,6 +8812,19 @@ def _qa_translated_final_crops_against_layers(recorder, project_data: dict, work
     root = Path(work_dir) / "debug" / "e2e"
     crop_rows = _load_debug_jsonl(root / "10_copyback_reassemble" / "final_band_crops.jsonl")
     project_layers = [layer for layer in _iter_project_text_layers(project_data) if isinstance(layer, dict)]
+    verified_page_owner_composition = bool(
+        str(project_data.get("owner_graph_status") or "").strip().lower() == "verified"
+        and project_data.get("page_owner_graphs")
+        and project_layers
+        and all(str(layer.get("owner_id") or "").strip() for layer in project_layers)
+    )
+    if verified_page_owner_composition:
+        # Final-band crops belong to the superseded tile writer.  Comparing
+        # them with the canonical page-owner composition produces false P0s
+        # (`no_matching_project_layer` / crop mismatch) by construction.  The
+        # owner path is audited by its pixel maps and final-pixel observer.
+        audit["source"] = "verified_page_owner_composition"
+        crop_rows = []
     dark_group_sizes: dict[str, int] = {}
     for layer in project_layers:
         if not _layer_is_dark_final_rerender_subject(layer):
@@ -8103,6 +8834,62 @@ def _qa_translated_final_crops_against_layers(recorder, project_data: dict, work
             dark_group_sizes[group_key] = dark_group_sizes.get(group_key, 0) + 1
 
     rows: list[dict] = []
+    if verified_page_owner_composition:
+        for layer in project_layers:
+            owner_id = str(layer.get("owner_id") or "").strip()
+            if not owner_id:
+                continue
+            quality = layer.get("owner_render_quality")
+            if not isinstance(quality, dict):
+                layout_contract = layer.get("render_layout_contract")
+                quality = (
+                    layout_contract.get("owner_render_quality")
+                    if isinstance(layout_contract, dict)
+                    else None
+                )
+            residual = layer.get("residual_cleanup_contract")
+            protected = layer.get("protected_art_contract")
+            owner_flags: list[str] = []
+            if not isinstance(quality, dict):
+                owner_flags.append("missing_owner_render_quality_contract")
+            else:
+                status = str(quality.get("status") or "").strip()
+                if status != "ok":
+                    owner_flags.append(status or "invalid_owner_render_quality_contract")
+                if int(quality.get("outside_safe_pixels", 0) or 0) > 0:
+                    owner_flags.append("core_pixels_outside_safe_polygon")
+                if not quality.get("rendered_line_core_heights_px"):
+                    owner_flags.append("missing_rendered_line_core_metrics")
+            if str(layer.get("route_action") or "") in {
+                "translate_inpaint_render",
+                "translate_sfx_inpaint_render",
+            }:
+                if not isinstance(residual, dict) or residual.get("residual_verified") is not True:
+                    owner_flags.append("unverified_owner_residual")
+                if not isinstance(protected, dict):
+                    owner_flags.append("missing_protected_art_contract")
+                elif (
+                    int(protected.get("protected_art_changed_pixels", 0) or 0) > 0
+                    or int(protected.get("action_protected_overlap_pixels", 0) or 0) > 0
+                ):
+                    owner_flags.append("protected_art_contract_violation")
+            rows.append(
+                {
+                    "band_id": str(layer.get("band_id") or ""),
+                    "page_id": str(layer.get("page_id") or ""),
+                    "owner_id": owner_id,
+                    "translated_output_page": str(layer.get("translated_output_page") or ""),
+                    "trace_ids": [str(layer.get("trace_id") or f"owner:{owner_id}:page_space")],
+                    "status": "fail" if owner_flags else "pass",
+                    "flags": list(dict.fromkeys(owner_flags)),
+                    "metrics": {
+                        "coordinate_space": "page",
+                        "owner_render_quality": quality,
+                        "residual_cleanup_contract": residual,
+                        "protected_art_contract": protected,
+                    },
+                }
+            )
     for crop_row in crop_rows:
         band_id = str(crop_row.get("band_id") or "").strip()
         translated_name = str(crop_row.get("translated_output_page") or "").strip()
@@ -8332,7 +9119,11 @@ def _run_post_rerender_final_visual_contract(
     after_final_project_image_rerender: bool,
     after_late_render_contract_repair: bool,
 ) -> dict:
-    should_refresh_crops = bool(after_final_project_image_rerender)
+    verified_owner_project = str(project_data.get("owner_graph_status") or "") == "verified"
+    should_refresh_crops = bool(
+        not verified_owner_project
+        and (after_final_project_image_rerender or after_late_render_contract_repair)
+    )
     if should_refresh_crops:
         refresh_audit = _restore_clean_final_bands_after_rerender(recorder, work_dir)
     else:
@@ -8347,6 +9138,7 @@ def _run_post_rerender_final_visual_contract(
             "missing_count": 0,
             "error_count": 0,
             "skipped_no_final_rerender": True,
+            "skipped_verified_owner_project": verified_owner_project,
         }
     refresh_audit["source"] = str(refresh_audit.get("source") or "clean_final_bands_after_all_rerenders")
     refresh_audit["after_final_project_image_rerender"] = bool(after_final_project_image_rerender)
@@ -8370,6 +9162,28 @@ def _write_debug_export_gate_artifacts(recorder, project_data: dict) -> dict:
         qa = {}
     summary = qa.get("summary") if isinstance(qa.get("summary"), dict) else {}
     export_gate = qa.get("export_gate") if isinstance(qa.get("export_gate"), dict) else {}
+    gate_rows = [
+        issue
+        for issue in export_gate.get("issues") or []
+        if isinstance(issue, dict)
+    ]
+    owner_first_rows = [
+        issue
+        for issue in gate_rows
+        if issue.get("owner_id") is not None or issue.get("source") == "final_pixel_qa"
+    ]
+    if gate_rows:
+        from ownership.artifacts import validate_gate_integrity
+        from qa.export_gate import append_qa_integrity_failure
+
+        integrity_failures = validate_gate_integrity(
+            summary=summary,
+            gate=export_gate,
+            rows=gate_rows,
+            row_contract_rows=owner_first_rows,
+        )
+        if integrity_failures:
+            append_qa_integrity_failure(export_gate, integrity_failures)
     summary_critical_flags = int(summary.get("critical_flag_count", summary.get("critical_count", 0)) or 0)
     summary_critical_issues = int(
         summary.get("critical_issue_count", export_gate.get("critical_issue_count", 0)) or 0
@@ -8409,6 +9223,20 @@ def _write_debug_export_gate_artifacts(recorder, project_data: dict) -> dict:
         if isinstance(issue, dict)
     ]
     visual_blockers = [issue for issue in issues if issue.get("severity") == "critical"]
+    final_pixel_reports = qa.get("final_pixel_reports")
+    if isinstance(final_pixel_reports, list):
+        from ownership.artifacts import OwnerArtifactPublisher
+
+        graph_payloads = [
+            graph
+            for graph in project_data.get("page_owner_graphs") or []
+            if isinstance(graph, dict) and str(graph.get("page_id") or "").strip()
+        ]
+        OwnerArtifactPublisher(recorder).publish(
+            graphs={str(graph["page_id"]): graph for graph in graph_payloads},
+            final_pixel_reports=final_pixel_reports,
+            export_gate=export_gate,
+        )
     recorder.write_json("11_qa_export_gate/export_gate.json", export_gate)
     _write_debug_jsonl_replace(recorder, "11_qa_export_gate/qa_issues.jsonl", issues)
     _write_debug_jsonl_replace(recorder, "11_qa_export_gate/visual_blockers.jsonl", visual_blockers)
@@ -8420,6 +9248,101 @@ def _write_debug_export_gate_artifacts(recorder, project_data: dict) -> dict:
     except Exception as exc:
         recorder.event("report", "debug_report_failed", {"error": str(exc)})
     return consistency
+
+
+def _synchronize_qa_summary_with_export_gate(project_data: dict) -> dict:
+    """Make persisted summary counts describe the same issues as the export gate."""
+    qa = project_data.setdefault("qa", {})
+    if not isinstance(qa, dict):
+        qa = {}
+        project_data["qa"] = qa
+    summary = qa.setdefault("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+        qa["summary"] = summary
+    gate = qa.get("export_gate")
+    if not isinstance(gate, dict):
+        return summary
+    critical_flags = int(gate.get("critical_flag_count", 0) or 0)
+    critical_issues = int(gate.get("critical_issue_count", 0) or 0)
+    blocking_issues = int(gate.get("blocking_issue_count", 0) or 0)
+    review_issues = int(gate.get("review_issue_count", 0) or 0)
+    summary.update(
+        {
+            "critical_count": critical_flags,
+            "critical_flag_count": critical_flags,
+            "critical_issue_count": critical_issues,
+            "blocking_issue_count": blocking_issues,
+            "highest_severity": "critical" if critical_flags else ("high" if review_issues else "none"),
+        }
+    )
+    return summary
+
+
+def _compose_runtime_export_gate(
+    project_data: dict,
+    work_dir: Path,
+    config: dict,
+    functional_gate: dict,
+) -> dict:
+    """Run the independent style audit and compose both subgates once."""
+
+    from qa.gate_composition import compose_export_gate, qa_integrity_issue
+    from qa.style_fidelity import audit_style_fidelity
+
+    qa = project_data.setdefault("qa", {})
+    style_mode = str(config.get("style_copy_mode") or "shadow").strip().lower()
+    if style_mode == "off":
+        style_fidelity = {
+            "schema_version": 2,
+            "mode": "off",
+            "owners": [],
+            "findings": [],
+            "gate": {
+                "status": "PASS",
+                "would_block": False,
+                "blocking_owner_ids": [],
+                "issues": [],
+            },
+        }
+        qa["functional_export_gate"] = copy.deepcopy(functional_gate)
+        qa["style_fidelity"] = style_fidelity
+        qa["export_gate"] = compose_export_gate(
+            functional_gate,
+            style_fidelity["gate"],
+            override=bool(config.get("allow_p0_export_override")),
+        )
+        return qa["export_gate"]
+    try:
+        style_fidelity = audit_style_fidelity(project_data, work_dir, mode=style_mode)
+        if not isinstance(style_fidelity, dict) or not isinstance(style_fidelity.get("gate"), dict):
+            raise ValueError("style fidelity report or gate is absent")
+    except Exception as exc:
+        enforce = style_mode == "enforce"
+        issue = qa_integrity_issue(exc, scope="style_fidelity")
+        if not enforce:
+            issue["severity"] = "warning"
+            issue["blocks_export"] = False
+        style_fidelity = {
+            "schema_version": 2,
+            "mode": style_mode,
+            "owners": [],
+            "findings": [copy.deepcopy(issue)],
+            "gate": {
+                "status": "BLOCK" if enforce else "PASS",
+                "would_block": True,
+                "blocking_owner_ids": [],
+                "issues": [issue],
+            },
+        }
+    qa["functional_export_gate"] = copy.deepcopy(functional_gate)
+    qa["style_fidelity"] = style_fidelity
+    qa["export_gate"] = compose_export_gate(
+        functional_gate,
+        style_fidelity["gate"],
+        override=bool(config.get("allow_p0_export_override")),
+    )
+    return qa["export_gate"]
 
 
 def _build_strip_inpainter_for_config(config: dict, real_inpaint_band_image):
@@ -8529,7 +9452,7 @@ def _run_mock_pipeline_runner(config: dict) -> int:
 
     project = {
         "obra": config.get("obra", ""),
-        "capitulo": 1,
+        "capitulo": int(config.get("capitulo", 1) or 1),
         "idioma_origem": config.get("idioma_origem", "en"),
         "idioma_destino": config.get("idioma_destino", "pt-BR"),
         "qualidade": "normal",
@@ -8613,16 +9536,19 @@ def _run_pipeline_runner_cli(config: dict) -> int:
         "work_dir": str(work_dir),
         "models_dir": str(pipeline_root / "models"),
         "obra": config.get("obra", ""),
-        "capitulo": 1,
+        "capitulo": int(config.get("capitulo", 1) or 1),
         "idioma_origem": config.get("idioma_origem", "en"),
         "idioma_destino": config.get("idioma_destino", "pt-BR"),
         "engine_preset_id": config.get("engine_preset_id", ""),
-        "mode": "manual" if config.get("skip_ocr") else "auto",
+        "mode": "manual" if config.get("skip_ocr") else str(config.get("mode") or "real"),
         "debug": config.get("debug", False),
         "skip_inpaint": config.get("skip_inpaint", False),
         "skip_ocr": config.get("skip_ocr", False),
         "strict": config.get("strict", False),
         "export_mode": config.get("export_mode", "with_warnings"),
+        "owner_graph_mode": config.get("owner_graph_mode", "enforce"),
+        "style_copy_mode": config.get("style_copy_mode", "shadow"),
+        "replay_owner_artifacts": config.get("replay_owner_artifacts"),
     }
     config_path = work_dir / "runner_config.json"
     config_path.write_text(json.dumps(runtime_config, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -8643,7 +9569,11 @@ def main():
         return
 
     if "--input" in sys.argv[1:]:
-        exit_code = _run_pipeline_runner_cli(_parse_runner_cli_args(sys.argv[1:]))
+        exit_code = _run_pipeline_runner_cli(
+            resolve_runner_config_from_cli(
+                parse_cli_args(sys.argv[1:]), loaded_config={}
+            )
+        )
         if exit_code:
             sys.exit(exit_code)
         return
@@ -8949,7 +9879,11 @@ def _run_pipeline(config_path: str):
             _page_texts_from_text_layers,
         )
         from vision_stack.runtime import warmup_visual_stack as _warmup_visual_stack
-        from vision_stack.runtime import _get_detector, run_ocr_stage
+        from vision_stack.runtime import (
+            _get_detector,
+            run_final_pixel_ocr_probe,
+            run_ocr_stage,
+        )
         from translator import translate as translator_mod
         from inpainter import inpaint_band_image
         from typesetter import renderer as typesetter_mod
@@ -9004,6 +9938,31 @@ def _run_pipeline(config_path: str):
                 return _get_detector("max").detect(img, conf_threshold=thresh)
                 
         class StripRuntime:
+            def run_final_pixel_ocr_probe(
+                self,
+                img,
+                *,
+                detected_blocks,
+                source_challenges,
+                page_id,
+                page_number,
+                source_language,
+                page_surface_geometry,
+                request_scoped=False,
+                root_input_pixel_sha256="",
+            ):
+                return run_final_pixel_ocr_probe(
+                    img,
+                    detected_blocks=detected_blocks,
+                    source_challenges=source_challenges,
+                    page_id=page_id,
+                    page_number=page_number,
+                    source_language=source_language,
+                    page_surface_geometry=page_surface_geometry,
+                    request_scoped=bool(request_scoped),
+                    root_input_pixel_sha256=str(root_input_pixel_sha256 or ""),
+                )
+
             def run_ocr_stage(
                 self,
                 img,
@@ -9105,13 +10064,56 @@ def _run_pipeline(config_path: str):
                 # Chamado internamente por process_band (OCR da banda)
                 pass 
 
+        strip_detector = StripDetector()
+        strip_runtime = StripRuntime()
         strip_chapter_telemetry: dict = {}
+        effective_owner_graph_mode = _automatic_owner_graph_mode(config)
+        verified_owner_source_manifest = None
+        verified_owner_private_root = None
+        verified_owner_replay = None
+        owner_run_id = None
+        owner_execution_id = None
+        owner_replay_of_execution_id = None
+        if effective_owner_graph_mode == "enforce":
+            import uuid
+
+            from ownership.chapter_contract import ChapterSourceManifest
+            from strip.page_pipeline import load_owner_content_replay
+
+            replay_root = config.get("replay_owner_artifacts")
+            if replay_root:
+                verified_owner_replay = load_owner_content_replay(replay_root)
+                owner_run_id = verified_owner_replay.run_id
+                owner_replay_of_execution_id = verified_owner_replay.execution_id
+            else:
+                owner_run_id = f"owner-run-{uuid.uuid4().hex}"
+            owner_execution_id = f"owner-execution-{uuid.uuid4().hex}"
+            extraction_root = Path(os.path.commonpath([str(Path(path).resolve()) for path in image_files]))
+            if extraction_root.is_file():
+                extraction_root = extraction_root.parent
+            verified_owner_source_manifest = ChapterSourceManifest.from_extracted_pages(
+                image_files,
+                extraction_root,
+                run_id=owner_run_id,
+                execution_id=owner_execution_id,
+                replay_of_execution_id=owner_replay_of_execution_id,
+            )
+            if (
+                verified_owner_replay is not None
+                and verified_owner_replay.verified_inputs.source_manifest.source_tree_sha256
+                != verified_owner_source_manifest.source_tree_sha256
+            ):
+                raise ValueError("style replay source tree differs from verified content run")
+            verified_owner_private_root = _owner_private_execution_root(
+                work_dir,
+                owner_execution_id,
+            )
         with pipeline_timing.measure("strip_run_chapter"):
             output_pages = run_chapter(
                 image_files=image_files,
                 output_dir=translated_dir,
-                detector=StripDetector(),
-                runtime=StripRuntime(),
+                detector=strip_detector,
+                runtime=strip_runtime,
                 translator=translator_mod,
                 inpainter=_build_strip_inpainter_for_config(config, inpaint_band_image),
                 typesetter=typesetter_mod,
@@ -9130,6 +10132,15 @@ def _run_pipeline(config_path: str):
                 translation_context=config.get("translation_context") or None,
                 chapter_telemetry=strip_chapter_telemetry,
                 skip_page_cleanup_rerender=bool(config.get("skip_inpaint")),
+                owner_graph_mode=effective_owner_graph_mode,
+                style_copy_mode=str(config.get("style_copy_mode") or "shadow"),
+                legacy_project_status=config.get("owner_graph_status"),
+                run_id=owner_run_id,
+                execution_id=owner_execution_id,
+                replay_of_execution_id=owner_replay_of_execution_id,
+                source_manifest=verified_owner_source_manifest,
+                artifact_root=verified_owner_private_root,
+                owner_content_replay=verified_owner_replay,
             )
         strip_chapter_telemetry["internal_unattributed_sec"] = round(
             max(
@@ -9147,6 +10158,9 @@ def _run_pipeline(config_path: str):
         ocr_results = [p.ocr_result for p in output_pages]
         page_text_layers = [p.text_layers for p in output_pages]
         total_pages = len(output_pages)
+        owner_pages_have_final_pixel_authority = _owner_pages_have_final_pixel_authority(
+            output_pages
+        )
 
         # Copia imagens processadas para images/ para que o editor as veja como base de inpaint
         with pipeline_timing.measure("sync_inpaint_images"):
@@ -9154,29 +10168,30 @@ def _run_pipeline(config_path: str):
             for p in output_pages:
                 inpaint_target = images_dir / p.path.name
                 if getattr(p, "inpainted_image", None) is not None:
-                    try:
-                        page_texts = _page_texts_from_text_layers(p.text_layers)
-                        fixed_clean, fixed_rendered, did_clamp = _clamp_page_inpaint_to_mask(
-                            original_image=getattr(p, "original_image", None),
-                            clean_image=p.inpainted_image,
-                            rendered_image=getattr(p, "image", None),
-                            page_texts=page_texts,
-                            inpaint_blocks=getattr(p, "inpaint_blocks", None),
-                        )
-                        if did_clamp:
-                            p.inpainted_image = fixed_clean
-                            p.image = fixed_rendered
-                            main_sync_page_clamp_count += 1
-                        dark_clean, dark_changed = _apply_dark_visual_text_geometry_cleanup(
-                            p.inpainted_image,
-                            page_texts,
-                        )
-                        if dark_changed:
-                            p.inpainted_image = dark_clean
-                            main_sync_page_clamp_count += 1
-                    except Exception:
-                        pass
-                    cv2.imwrite(str(inpaint_target), p.inpainted_image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    if not owner_pages_have_final_pixel_authority:
+                        try:
+                            page_texts = _page_texts_from_text_layers(p.text_layers)
+                            fixed_clean, fixed_rendered, did_clamp = _clamp_page_inpaint_to_mask(
+                                original_image=getattr(p, "original_image", None),
+                                clean_image=p.inpainted_image,
+                                rendered_image=getattr(p, "image", None),
+                                page_texts=page_texts,
+                                inpaint_blocks=getattr(p, "inpaint_blocks", None),
+                            )
+                            if did_clamp:
+                                p.inpainted_image = fixed_clean
+                                p.image = fixed_rendered
+                                main_sync_page_clamp_count += 1
+                            dark_clean, dark_changed = _apply_dark_visual_text_geometry_cleanup(
+                                p.inpainted_image,
+                                page_texts,
+                            )
+                            if dark_changed:
+                                p.inpainted_image = dark_clean
+                                main_sync_page_clamp_count += 1
+                        except Exception:
+                            pass
+                    _write_rgb_jpeg(inpaint_target, p.inpainted_image, quality=92)
                 else:
                     shutil.copy2(p.path, inpaint_target)
             strip_chapter_telemetry["main_sync_page_clamp_count"] = main_sync_page_clamp_count
@@ -9185,7 +10200,12 @@ def _run_pipeline(config_path: str):
             final_page_space_count = 0
             from PIL import Image as _PILImage
 
-            if bool(config.get("skip_final_page_space_typeset")) or not _main_final_page_space_typeset_enabled():
+            if owner_pages_have_final_pixel_authority:
+                strip_chapter_telemetry["main_final_page_space_typeset_skipped"] = True
+                strip_chapter_telemetry["main_final_page_space_typeset_skip_reason"] = (
+                    "owner_compositor_final_pixel_authority"
+                )
+            elif bool(config.get("skip_final_page_space_typeset")) or not _main_final_page_space_typeset_enabled():
                 strip_chapter_telemetry["main_final_page_space_typeset_skipped"] = True
                 if not bool(config.get("skip_final_page_space_typeset")):
                     strip_chapter_telemetry["main_final_page_space_typeset_skip_reason"] = "opt_in_disabled"
@@ -9267,7 +10287,7 @@ def _run_pipeline(config_path: str):
             for p in output_pages:
                 original_target = originals_dir / p.path.name
                 if getattr(p, "original_image", None) is not None:
-                    cv2.imwrite(str(original_target), p.original_image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    _write_rgb_jpeg(original_target, p.original_image, quality=92)
                 else:
                     shutil.copy2(p.path, original_target)
             for stale in originals_dir.glob("*"):
@@ -9308,7 +10328,16 @@ def _run_pipeline(config_path: str):
     # Wrap up
     emit_progress("typeset", 100, 98, message="Finalizando projeto...")
     with pipeline_timing.measure("build_project_json"):
-        project_data = build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, time.time()-start_time)
+        project_data = build_project_json(
+            config,
+            context,
+            ocr_results,
+            page_text_layers,
+            image_files,
+            total_pages,
+            time.time() - start_time,
+            output_pages=output_pages,
+        )
     with pipeline_timing.measure("normalize_project_render_geometry"):
         synced_render_bboxes = _normalize_project_render_balloon_bboxes(project_data)
         if synced_render_bboxes:
@@ -9316,7 +10345,11 @@ def _run_pipeline(config_path: str):
                 "render_balloon_bbox_sync_count"
             ] = synced_render_bboxes
     with pipeline_timing.measure("hydrate_project_render_metadata"):
-        render_metadata_hydration = _hydrate_project_render_metadata_from_debug_candidates(project_data)
+        render_metadata_hydration = (
+            {"skipped": True, "reason": "verified_owner_page_authority"}
+            if owner_pages_have_final_pixel_authority
+            else _hydrate_project_render_metadata_from_debug_candidates(project_data)
+        )
         project_data.setdefault("qa", {})["render_metadata_hydration"] = render_metadata_hydration
     with pipeline_timing.measure("ensure_route_action_contract"):
         route_contract_audit = _ensure_project_route_action_contract(project_data)
@@ -9372,7 +10405,11 @@ def _run_pipeline(config_path: str):
         from qa.translation_qa import summarize_flags
 
         with pipeline_timing.measure("normalize_final_project_page_space_layers"):
-            final_page_space_audit = _normalize_final_project_page_space_layers(project_data)
+            final_page_space_audit = (
+                {"skipped": True, "reason": "verified_owner_page_authority"}
+                if owner_pages_have_final_pixel_authority
+                else _normalize_final_project_page_space_layers(project_data)
+            )
             qa_summary = summarize_flags(
                 [
                     layer
@@ -9389,27 +10426,65 @@ def _run_pipeline(config_path: str):
         logger.warning("Falha ao normalizar camadas finais em page-space: %s", exc)
     try:
         with pipeline_timing.measure("hydrate_final_project_render_metadata"):
-            final_render_metadata_hydration = _hydrate_project_render_metadata_from_debug_candidates(project_data)
+            final_render_metadata_hydration = (
+                {"skipped": True, "reason": "verified_owner_page_authority"}
+                if owner_pages_have_final_pixel_authority
+                else _hydrate_project_render_metadata_from_debug_candidates(project_data)
+            )
             debug_mask_bbox_repair = _repair_project_bubble_bboxes_from_debug_masks(project_data)
             real_bubble_safe_area_repair = _repair_project_real_bubble_body_safe_areas(project_data)
-            same_balloon_fragments_merged = _merge_same_balloon_fragment_layers(project_data)
+            owner_mode_repairs = (
+                {
+                    "owner_mode": "verified", "legacy_helpers_called": [],
+                    "same_balloon_fragments_merged": 0,
+                    "cross_page_band_layers_rehomed": 0,
+                }
+                if owner_pages_have_final_pixel_authority
+                else _apply_owner_mode_project_repairs(project_data)
+            )
+            same_balloon_fragments_merged = owner_mode_repairs[
+                "same_balloon_fragments_merged"
+            ]
             distinct_dark_lobe_payload_merge_repairs = _repair_distinct_dark_lobe_project_payload_merges(
                 list(_iter_project_text_layers(project_data))
             )
             distinct_hidden_nonfragment_restored = _restore_hidden_distinct_nonfragment_layers(project_data)
             same_identity_fragments_suppressed = _suppress_same_identity_merged_fragments(project_data)
-            cross_page_band_layers_rehomed = _rehome_cross_page_band_layers(project_data)
+            cross_page_band_layers_rehomed = owner_mode_repairs[
+                "cross_page_band_layers_rehomed"
+            ]
             broad_fallback_layers_suppressed = _suppress_broad_fallback_merge_layers(project_data)
-            final_page_space_after_hydration = _normalize_final_project_page_space_layers(project_data)
-            post_page_space_render_metadata_hydration = _hydrate_project_render_metadata_from_debug_candidates(project_data)
+            final_page_space_after_hydration = (
+                {"skipped": True, "reason": "verified_owner_page_authority"}
+                if owner_pages_have_final_pixel_authority
+                else _normalize_final_project_page_space_layers(project_data)
+            )
+            post_page_space_render_metadata_hydration = (
+                {"skipped": True, "reason": "verified_owner_page_authority"}
+                if owner_pages_have_final_pixel_authority
+                else _hydrate_project_render_metadata_from_debug_candidates(project_data)
+            )
             post_page_space_real_bubble_safe_area_repair = _repair_project_real_bubble_body_safe_areas(project_data)
-            post_page_space_same_balloon_fragments_merged = _merge_same_balloon_fragment_layers(project_data)
+            post_owner_mode_repairs = (
+                {
+                    "owner_mode": "verified", "legacy_helpers_called": [],
+                    "same_balloon_fragments_merged": 0,
+                    "cross_page_band_layers_rehomed": 0,
+                }
+                if owner_pages_have_final_pixel_authority
+                else _apply_owner_mode_project_repairs(project_data)
+            )
+            post_page_space_same_balloon_fragments_merged = post_owner_mode_repairs[
+                "same_balloon_fragments_merged"
+            ]
             post_page_space_distinct_dark_lobe_payload_merge_repairs = _repair_distinct_dark_lobe_project_payload_merges(
                 list(_iter_project_text_layers(project_data))
             )
             post_page_space_distinct_hidden_nonfragment_restored = _restore_hidden_distinct_nonfragment_layers(project_data)
             post_page_space_same_identity_fragments_suppressed = _suppress_same_identity_merged_fragments(project_data)
-            post_page_space_cross_page_band_layers_rehomed = _rehome_cross_page_band_layers(project_data)
+            post_page_space_cross_page_band_layers_rehomed = post_owner_mode_repairs[
+                "cross_page_band_layers_rehomed"
+            ]
             scrubbed_local_auxiliary_bboxes = _scrub_project_local_auxiliary_bboxes(project_data)
             final_distinct_dark_lobe_geometry_repairs = _finalize_distinct_dark_lobe_project_geometry(
                 list(_iter_project_text_layers(project_data))
@@ -9561,17 +10636,31 @@ def _run_pipeline(config_path: str):
                     "skipped": True,
                     "skip_reason": "skip_final_page_space_typeset",
                 }
+                final_output_consistency_audit = {
+                    "pages_checked": 0,
+                    "pages_rerendered": 0,
+                    "errors": [],
+                    "skipped": True,
+                    "skip_reason": "skip_final_page_space_typeset",
+                }
             else:
                 post_rerender_contract_audit = _rerender_final_project_images_after_contract(project_data, work_dir)
+                final_output_consistency_audit = _rerender_final_project_images_from_metadata(project_data, work_dir)
             project_data.setdefault("qa", {}).setdefault("summary", {})[
                 "final_project_image_rerender"
             ] = final_rerender_audit
             project_data.setdefault("qa", {}).setdefault("summary", {})[
                 "post_rerender_contract_repair"
             ] = post_rerender_contract_audit
+            project_data.setdefault("qa", {}).setdefault("summary", {})[
+                "final_output_consistency_rerender"
+            ] = final_output_consistency_audit
             project_data.setdefault("qa", {})[
                 "post_rerender_contract_repair"
             ] = post_rerender_contract_audit
+            project_data.setdefault("qa")[
+                "final_output_consistency_rerender"
+            ] = final_output_consistency_audit
     except Exception as exc:
         logger.warning("Falha ao rerenderizar imagens finais a partir do project.json: %s", exc)
     try:
@@ -9648,14 +10737,55 @@ def _run_pipeline(config_path: str):
     except Exception as exc:
         logger.warning("Falha ao executar QA visual pós-rerender final: %s", exc)
     try:
+        with pipeline_timing.measure("final_translated_page_consistency_guard"):
+            final_translated_page_consistency_guard = _rerender_final_project_images_from_metadata(project_data, work_dir)
+            project_data.setdefault("qa", {})[
+                "final_translated_page_consistency_guard"
+            ] = final_translated_page_consistency_guard
+            project_data.setdefault("qa", {}).setdefault("summary", {})[
+                "final_translated_page_consistency_guard"
+            ] = final_translated_page_consistency_guard
+    except Exception as exc:
+        logger.warning("Falha ao aplicar guarda final de consistencia translated/final_band: %s", exc)
+    if str(project_data.get("owner_graph_status") or "") == "verified":
+        try:
+            from qa.final_pixel_observer import DetectorOcrFinalPixelObserver
+
+            with pipeline_timing.measure("final_pixel_observer"):
+                project_data.setdefault("qa", {})["final_pixel_reports"] = (
+                    _observe_verified_owner_final_pages(
+                        project_data=project_data,
+                        output_pages=output_pages,
+                        observer=DetectorOcrFinalPixelObserver(
+                            detector=strip_detector,
+                            runtime=strip_runtime,
+                        ),
+                        source_language=config.get("idioma_origem", "en"),
+                    )
+                )
+        except Exception as exc:
+            logger.warning("Falha ao observar pixels finais persistidos: %s", exc)
+            project_data.setdefault("qa", {})["final_pixel_reports"] = []
+    try:
         from qa.export_gate import evaluate_export_gate
+        from qa.gate_composition import qa_integrity_issue
 
         with pipeline_timing.measure("evaluate_export_gate"):
-            export_gate = evaluate_export_gate(
+            try:
+                functional_gate = evaluate_export_gate(project_data, override=False)
+            except Exception as exc:
+                functional_gate = {
+                    "status": "BLOCK",
+                    "allowed": False,
+                    "issues": [qa_integrity_issue(exc, scope="functional_export_gate")],
+                }
+            export_gate = _compose_runtime_export_gate(
                 project_data,
-                override=bool(config.get("allow_p0_export_override")),
+                work_dir,
+                config,
+                functional_gate,
             )
-            project_data["qa"]["export_gate"] = export_gate
+            _synchronize_qa_summary_with_export_gate(project_data)
             project_data["needs_review"] = export_gate["status"] == "BLOCK"
             project_data["output_review_state"] = _output_review_state_for_export_gate(export_gate)
             if debug_recorder:
@@ -9672,6 +10802,7 @@ def _run_pipeline(config_path: str):
         },
     )
     project_data.setdefault("qa", {})["timing"] = project_data["performance"]
+    _publish_acceptance_execution_ledger(project_data, work_dir)
     with pipeline_timing.measure("save_project_json"):
         _save_project_json(work_dir / "project.json", project_data)
     with pipeline_timing.measure("finalize_decision_trace"):
@@ -9724,13 +10855,28 @@ def _run_pipeline(config_path: str):
                 extra={"exit_code": 2, "export_gate_status": export_gate.get("status")},
             )
         sys.exit(2)
-    emit_progress("typeset", 100, 100, message="Concluido!")
-    emit("complete", output_path=str(work_dir))
     _finalize_debug_recorder(
         debug_recorder,
         config_snapshot=config,
         extra={"exit_code": 0, "export_gate_status": export_gate.get("status")},
     )
+    if locals().get("verified_owner_source_manifest") is not None:
+        from ownership.publication import PublicationTransaction
+
+        verified_inputs = _project_inputs_from_output_pages(
+            verified_owner_source_manifest,
+            output_pages,
+            private_execution_root=verified_owner_private_root,
+        )
+        bundle = _wrap_up_verified_owner_pages(
+            verified_inputs,
+            source_private_execution_root=verified_owner_private_root,
+        )
+        publication = PublicationTransaction.for_bundle(work_dir, bundle)
+        publication.stage(bundle)
+        publication.commit(bundle)
+    emit_progress("typeset", 100, 100, message="Concluido!")
+    emit("complete", output_path=str(work_dir))
 
 
 def _default_text_style() -> dict:
@@ -9911,58 +11057,18 @@ def _hex_luma(value: object) -> float:
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
-def _float_or_none(value) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _candidate_confidence_from_fields(record: dict, fields: tuple[str, ...]) -> float | None:
-    for field in fields:
-        value = _float_or_none(record.get(field))
-        if value is not None:
-            return value
-    return None
-
-
 def _primary_text_style_candidate_confident(ocr_text: dict) -> bool:
-    confidence = _candidate_confidence_from_fields(
-        ocr_text,
-        ("confidence", "ocr_confidence", "confianca_ocr"),
-    )
-    if confidence is None:
-        return True
-    return confidence >= STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD
+    return style_candidate_copy_allowed(ocr_text)
 
 
 def _sfx_style_candidate_confident(ocr_text: dict) -> bool:
-    sfx = ocr_text.get("sfx") if isinstance(ocr_text.get("sfx"), dict) else {}
-    sfx_ocr = ocr_text.get("sfx_ocr") if isinstance(ocr_text.get("sfx_ocr"), dict) else {}
-    confidence_values = [
-        _float_or_none(ocr_text.get("sfx_promotion_score")),
-        _float_or_none(sfx.get("promotion_score")),
-        _float_or_none(ocr_text.get("confidence")),
-        _float_or_none(ocr_text.get("ocr_confidence")),
-        _float_or_none(sfx.get("visual_confidence")),
-        _float_or_none(sfx_ocr.get("confidence")),
-        _float_or_none(sfx_ocr.get("ocr_confidence")),
-    ]
-    confidence_values = [value for value in confidence_values if value is not None]
-    if not confidence_values:
-        return True
-    promotion_score = _float_or_none(ocr_text.get("sfx_promotion_score"))
-    if promotion_score is None:
-        promotion_score = _float_or_none(sfx.get("promotion_score"))
-    if promotion_score is not None and promotion_score >= STYLE_COPY_SFX_PROMOTION_THRESHOLD:
-        return True
-    return max(confidence_values) >= STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD
+    return style_candidate_copy_allowed(ocr_text)
 
 
 def _style_evidence_allows_visual_text_without_ocr(ocr_text: dict, evidence: dict | None) -> bool:
     if not evidence:
+        return False
+    if not style_candidate_copy_allowed(ocr_text):
         return False
     route_action = str(ocr_text.get("route_action") or "").strip().lower()
     render_policy = str(ocr_text.get("render_policy") or "").strip().lower()
@@ -10008,18 +11114,8 @@ def _style_evidence_allows_review_text_style_copy(
     translated: str | None,
     evidence: dict | None,
 ) -> bool:
-    if not evidence:
-        return False
-    route_action = str(ocr_text.get("route_action") or "").strip().lower()
-    render_policy = str(ocr_text.get("render_policy") or "").strip().lower()
-    content_class = str(ocr_text.get("content_class") or "").strip().lower()
-    if content_class == "sfx":
-        return False
-    if route_action != "review_required" and render_policy != "review_required":
-        return False
-    if not _review_text_fields_look_renderable(ocr_text, translated):
-        return False
-    return _style_evidence_confidence(evidence) >= SOURCE_STYLE_CONFIDENCE_THRESHOLD
+    del translated, evidence
+    return style_candidate_copy_allowed(ocr_text)
 
 
 def _style_copy_allowed_for_text(ocr_text: dict, translated: str | None = None) -> bool:
@@ -10081,16 +11177,7 @@ def _style_copy_allowed_for_text(ocr_text: dict, translated: str | None = None) 
 
 
 def _style_source_scan_allowed_for_text(ocr_text: dict, translated: str | None = None) -> bool:
-    if _style_copy_allowed_for_text(ocr_text, translated):
-        return True
-    route_action = str(ocr_text.get("route_action") or "").strip().lower()
-    render_policy = str(ocr_text.get("render_policy") or "").strip().lower()
-    if route_action == "review_required" or render_policy == "review_required":
-        content_class = str(ocr_text.get("content_class") or "").strip().lower()
-        return content_class != "sfx" and _review_text_fields_look_renderable(ocr_text, translated)
-    if str(ocr_text.get("detector") or "").strip().lower() == "sfx_visual":
-        return False
-    return False
+    return _style_copy_allowed_for_text(ocr_text, translated)
 
 
 def _neutralize_unallowed_source_style(layer: dict, *, force_black_text: bool = False) -> dict:
@@ -10100,12 +11187,10 @@ def _neutralize_unallowed_source_style(layer: dict, *, force_black_text: bool = 
         style_confidence = 0.0
     if str(layer.get("style_origin") or "").strip().lower() in {"auto_dark_panel_glow", "inferred_visual_card"}:
         return layer
-    if (
-        str(layer.get("style_origin") or "").strip().lower() == "source_detected"
-        and style_confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD
-    ):
-        return layer
-    if _style_copy_allowed_for_text(layer, layer.get("translated")):
+    source_style = dict(layer.get("estilo") or layer.get("style") or {})
+    source_style.setdefault("style_origin", layer.get("style_origin"))
+    source_style.setdefault("style_confidence", style_confidence)
+    if source_style_copy_allowed(source_style):
         return layer
     evidence = _style_evidence_to_dict(layer.get("style_evidence"))
     if _style_evidence_allows_visual_text_without_ocr(layer, evidence):
@@ -10119,6 +11204,10 @@ def _neutralize_unallowed_source_style(layer: dict, *, force_black_text: bool = 
         style_input,
         _coerce_background_rgb(layer.get("background_rgb")),
         force_black_text=force_black_text,
+        semantic_role=layer.get("semantic_role"),
+        content_class=layer.get("content_class"),
+        layout_profile=style_input["layout_profile"],
+        preserve_case=_layer_is_translator_note(layer),
     )
     style["style_origin"] = "auto"
     style_confidence = _style_evidence_confidence(evidence)
@@ -10134,55 +11223,56 @@ def _neutralize_unallowed_source_style(layer: dict, *, force_black_text: bool = 
     return layer
 
 
-def _style_from_evidence(base_style: dict, evidence: dict | None) -> tuple[dict, str, float, str | None]:
+def _style_from_evidence(
+    base_style: dict,
+    evidence: dict | None,
+    candidate: dict | None = None,
+) -> tuple[dict, str, float, str | None]:
     style = dict(base_style)
     confidence = _style_evidence_confidence(evidence)
     source = str((evidence or {}).get("source") or "").strip() or None
-    origin = "source_detected" if confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD else "auto"
+    origin = "auto"
 
     if evidence:
-        if evidence.get("text_color"):
-            style["cor"] = evidence["text_color"]
-        if evidence.get("stroke_color"):
-            style["contorno"] = evidence["stroke_color"]
-        if evidence.get("stroke_width_px") is not None:
-            style["contorno_px"] = evidence["stroke_width_px"]
-        if evidence.get("font_name"):
-            style["fonte"] = evidence["font_name"]
-        if evidence.get("gradient") is True and evidence.get("gradient_colors"):
-            colors = evidence.get("gradient_colors")
-            if isinstance(colors, list) and len(colors) >= 2:
-                style["cor_gradiente"] = [str(colors[0]), str(colors[1])]
-                style["cor"] = str(colors[0])
-        try:
-            shadow_confidence = float(evidence.get("shadow_confidence") or 0.0)
-        except (TypeError, ValueError):
-            shadow_confidence = 0.0
-        if evidence.get("shadow") is True and shadow_confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD:
+        evidence_v2 = style_evidence_v2_from_v1(evidence)
+        decision = decide_style_copy_v2(candidate or {}, evidence_v2)
+        applied = decision.applied_attributes
+        applied_confidences = [
+            evidence_v2.attributes[name].confidence
+            for name in applied
+            if name in evidence_v2.attributes
+        ]
+        applied_confidence = max(applied_confidences, default=0.0)
+        origin = "source_detected" if decision.status == "applied" else "auto"
+        if "fill" in applied:
+            style["cor"] = applied["fill"]
+        if "stroke" in applied and isinstance(applied["stroke"], dict):
+            style["contorno"] = applied["stroke"].get("color") or ""
+            style["contorno_px"] = int(applied["stroke"].get("width_px") or 0)
+        if "font_name" in applied:
+            style["fonte"] = applied["font_name"]
+        gradient = canonicalize_linear_gradient(applied.get("gradient"))
+        if gradient is not None:
+            style["cor_gradiente"] = gradient
+            style["cor"] = str(gradient["colors"][0])
+        if "shadow" in applied and isinstance(applied["shadow"], dict):
             style["sombra"] = True
-            style["sombra_cor"] = evidence.get("shadow_color") or "#000000"
-            style["sombra_offset"] = evidence.get("shadow_offset") if evidence.get("shadow_offset") is not None else [2, 2]
-        try:
-            glow_confidence = float(evidence.get("glow_confidence") or 0.0)
-        except (TypeError, ValueError):
-            glow_confidence = 0.0
-        if evidence.get("glow") is True and glow_confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD:
+            style["sombra_cor"] = applied["shadow"].get("color") or "#000000"
+            style["sombra_offset"] = applied["shadow"].get("offset") or [2, 2]
+        if "glow" in applied and isinstance(applied["glow"], dict):
             style["glow"] = True
-            style["glow_cor"] = evidence.get("glow_color") or evidence.get("text_color") or "#FFFFFF"
-            style["glow_px"] = evidence.get("glow_px") if evidence.get("glow_px") is not None else 2
-        try:
-            curve_confidence = float(evidence.get("curve_confidence") or 0.0)
-        except (TypeError, ValueError):
-            curve_confidence = 0.0
-        if evidence.get("curved") is True and curve_confidence >= SOURCE_STYLE_CONFIDENCE_THRESHOLD:
+            style["glow_cor"] = applied["glow"].get("color") or applied.get("fill") or "#FFFFFF"
+            style["glow_px"] = int(applied["glow"].get("width_px") or 2)
+        if "curve" in applied and isinstance(applied["curve"], dict):
             style["curva"] = True
-            style["curva_direcao"] = evidence.get("curve_direction") or "arc_up"
-            try:
-                style["curva_intensidade"] = float(evidence.get("curve_amount") or 0.0)
-            except (TypeError, ValueError):
-                style["curva_intensidade"] = 0.0
+            style["curva_direcao"] = applied["curve"].get("direction") or "arc_up"
+            style["curva_intensidade"] = float(applied["curve"].get("amount") or 0.0)
+        if "rotation_deg" in applied:
+            style["rotacao"] = float(applied["rotation_deg"])
         style["style_origin"] = origin
-        style["style_confidence"] = confidence
+        style["style_confidence"] = (
+            applied_confidence if origin == "source_detected" else confidence
+        )
         if source:
             style["style_source"] = source
 
@@ -11603,11 +12693,32 @@ def build_text_layer(
 
     original_ocr_text = dict(ocr_text or {})
     ocr_text = normalize_ocr_record(ocr_text)
+    owner_id = original_ocr_text.get("owner_id") or ocr_text.get("owner_id")
+    component_ids = list(
+        original_ocr_text.get("component_ids") or ocr_text.get("component_ids") or []
+    )
+    observation_ids = list(
+        original_ocr_text.get("observation_ids") or ocr_text.get("observation_ids") or []
+    )
+    layout_region_ids = list(
+        original_ocr_text.get("layout_region_ids")
+        or ocr_text.get("layout_region_ids")
+        or []
+    )
     if (
         str(original_ocr_text.get("route_action") or "").strip().lower() == "translate_sfx_inpaint_render"
         or str(original_ocr_text.get("content_class") or "").strip().lower() == "sfx"
     ):
-        for key in ("content_class", "script", "translate_policy", "render_policy", "route_action", "route_reason", "sfx"):
+        for key in (
+            "content_class",
+            "script",
+            "translate_policy",
+            "render_policy",
+            "route_action",
+            "route_reason",
+            "sfx_promotion_score",
+            "sfx",
+        ):
             if original_ocr_text.get(key) is not None:
                 ocr_text[key] = copy.deepcopy(original_ocr_text[key])
     layer_id = ocr_text.get("id") or f"tl_{page_number:03}_{layer_index + 1:03}"
@@ -11647,18 +12758,32 @@ def build_text_layer(
     style_input, style_origin, style_confidence, style_source = _style_from_evidence(
         _merge_style(ocr_text.get("estilo")),
         applied_style_evidence,
+        ocr_text,
     )
     if not style_copy_allowed and style_evidence:
         style_origin = "auto"
         style_confidence = _style_evidence_confidence(style_evidence)
         style_source = str(style_evidence.get("source") or "").strip() or style_source
     style_input["tipo"] = ocr_text.get("tipo", "fala")
-    style_input["layout_profile"] = ocr_text.get("layout_profile") or ocr_text.get("block_profile")
+    semantic_role = original_ocr_text.get("semantic_role") or ocr_text.get("semantic_role")
+    style_layout_profile = (
+        "ui_form"
+        if isinstance(ocr_text.get("ui_layout_evidence"), dict)
+        else (ocr_text.get("layout_profile") or ocr_text.get("block_profile"))
+    )
+    style_input["layout_profile"] = style_layout_profile
+    case_policy_layer = dict(original_ocr_text)
+    case_policy_layer.update(ocr_text)
+    case_policy_layer["translated"] = translated
     background_rgb = _coerce_background_rgb(ocr_text.get("background_rgb"))
     style = normalize_auto_typesetting_style(
         style_input,
         background_rgb,
         force_black_text=force_black_text,
+        semantic_role=semantic_role,
+        content_class=ocr_text.get("content_class"),
+        layout_profile=style_layout_profile,
+        preserve_case=_layer_is_translator_note(case_policy_layer),
     )
     style_policy_text = dict(ocr_text)
     style_policy_text["style_origin"] = style_origin
@@ -11714,6 +12839,14 @@ def build_text_layer(
         "merge_reason": ocr_text.get("merge_reason"),
         "ocr_merged_source_count": ocr_text.get("ocr_merged_source_count"),
         "text_instance_id": ocr_text.get("text_instance_id"),
+        "owner_id": owner_id,
+        "component_ids": component_ids,
+        "observation_ids": observation_ids,
+        "semantic_role": original_ocr_text.get("semantic_role")
+        or ocr_text.get("semantic_role"),
+        "action_mask_ref": original_ocr_text.get("action_mask_ref")
+        or ocr_text.get("action_mask_ref"),
+        "layout_region_ids": layout_region_ids,
         "page_id": ocr_text.get("page_id"),
         "band_id": ocr_text.get("band_id"),
         "coordinate_space": ocr_text.get("coordinate_space"),
@@ -11770,7 +12903,11 @@ def build_text_layer(
         "script": ocr_text.get("script"),
         "translate_policy": _sfx_policy_or_default(ocr_text, "translate_policy", "translate"),
         "render_policy": _sfx_policy_or_default(ocr_text, "render_policy", "normal"),
-        "route_action": ocr_text.get("route_action"),
+        "route_action": (
+            original_ocr_text.get("route_action")
+            if owner_id
+            else ocr_text.get("route_action")
+        ),
         "route_reason": ocr_text.get("route_reason"),
         "is_watermark": bool(ocr_text.get("is_watermark", False)),
         "is_non_english": bool(ocr_text.get("is_non_english", False)),
@@ -11842,7 +12979,8 @@ def build_text_layer(
         layer["qa_flags"] = flags
     if style_evidence_for_layer is not None:
         layer["style_evidence"] = style_evidence_for_layer
-    return _neutralize_unallowed_source_style(enrich_sfx_candidate(layer), force_black_text=force_black_text)
+    enriched = neutralize_removed_decision_fields(enrich_sfx_candidate(layer))
+    return _neutralize_unallowed_source_style(enriched, force_black_text=force_black_text)
 
 
 def _normalize_text_layer_for_renderer(raw_layer: dict, page_number: int, layer_index: int) -> dict:
@@ -12667,7 +13805,8 @@ def _drop_stale_final_render_geometry(layer: dict) -> dict:
             "layout_fit_result",
         ):
             layer.pop(stale_key, None)
-        _merge_layer_qa_flags(layer, ["stale_final_render_contract_dropped"])
+        if qa_flags & {"TEXT_CLIPPED", "TEXT_OVERFLOW", "missing_render_bbox"}:
+            _merge_layer_qa_flags(layer, ["stale_final_render_contract_dropped"])
     return layer
 
 
@@ -12882,6 +14021,12 @@ def _sync_page_legacy_aliases(page: dict) -> None:
             "merge_reason": layer.get("merge_reason"),
             "ocr_merged_source_count": layer.get("ocr_merged_source_count"),
             "text_instance_id": layer.get("text_instance_id"),
+            "owner_id": layer.get("owner_id"),
+            "component_ids": list(layer.get("component_ids") or []),
+            "observation_ids": list(layer.get("observation_ids") or []),
+            "semantic_role": layer.get("semantic_role"),
+            "action_mask_ref": layer.get("action_mask_ref"),
+            "layout_region_ids": list(layer.get("layout_region_ids") or []),
             "bbox": _bbox4(
                 layer.get("render_bbox"),
                 _bbox4(
@@ -13323,7 +14468,9 @@ def _scrub_crop_rerender_text_regions(base_crop_rgb, local_layers: list[dict]) -
                     fill_rgb = _np.median(background_pixels, axis=0).astype("uint8")
                 else:
                     fill_rgb = _np.array([0, 0, 0], dtype="uint8")
-                roi[:, :, :] = fill_rgb
+                if int(_np.count_nonzero(mask)) <= 0:
+                    continue
+                roi[mask > 0] = fill_rgb
             else:
                 base_crop_rgb[y1:y2, x1:x2, :] = 0
             scrubbed += 1
@@ -13380,7 +14527,13 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
         "pages_rerendered": 0,
         "rows_checked": 0,
         "rows_rerendered": 0,
+        "final_page_crop_resync_count": 0,
         "positive_band_base_used": 0,
+        "rendered_band_direct_copy_used": 0,
+        "clean_band_source_used": 0,
+        "clean_band_final_mismatch_count": 0,
+        "clean_band_final_checks": [],
+        "render_plan_layers_used": 0,
         "stale_text_regions_scrubbed": 0,
         "errors": [],
         "strip_reassembled_output_rerender_allowed": True,
@@ -13397,21 +14550,17 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
     crop_rows = _load_debug_jsonl(crops_path)
     if not crop_rows:
         return audit
+    render_plan_layers = _load_final_rerender_render_plan_layers(work_dir)
     project_layers = [layer for layer in _iter_project_text_layers(project_data) if isinstance(layer, dict)]
     translated_pages: dict[Path, np.ndarray] = {}
     touched_pages: set[Path] = set()
     seen_pages: set[Path] = set()
-    for row in crop_rows:
+    composition_coverage: dict[Path, object] = {}
+    for row in sorted(crop_rows, key=_final_crop_page_composition_sort_key):
         audit["rows_checked"] += 1
         bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
         translated_name = str(row.get("translated_output_page") or "").strip()
         if bbox is None or not translated_name:
-            continue
-        matching_layers = [
-            layer for layer in _final_rerender_layers_for_crop(row, project_layers)
-            if _layer_requires_strip_crop_rerender(layer)
-        ]
-        if not matching_layers:
             continue
         translated_path = _final_rerender_resolve_translated_path(work_dir, translated_name)
         seen_pages.add(translated_path)
@@ -13431,10 +14580,89 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
             continue
         crop_w = x2 - x1
         crop_h = y2 - y1
+        clean_bgr, clean_path, clean_source = _preferred_clean_band_source_for_final_crop(
+            row,
+            work_dir,
+            (crop_w, crop_h),
+        )
+        if clean_bgr is not None:
+            base_page_path = work_dir / "images" / Path(translated_name).name
+            base_bgr = cv2.imread(str(base_page_path), cv2.IMREAD_COLOR)
+            fallback_reference = None
+            if base_bgr is not None and base_bgr.shape[:2] == page_bgr.shape[:2]:
+                fallback_reference = base_bgr[y1:y2, x1:x2, :]
+            changed_mask = _final_band_changed_mask_for_composition(
+                row,
+                work_dir,
+                clean_bgr,
+                fallback_reference_bgr=fallback_reference,
+            )
+            coverage = composition_coverage.get(translated_path)
+            if coverage is None or getattr(coverage, "shape", None) != page_bgr.shape[:2]:
+                import numpy as np
+
+                coverage = np.zeros(page_bgr.shape[:2], dtype=bool)
+                composition_coverage[translated_path] = coverage
+            covered_mask = coverage[y1:y2, x1:x2]
+            composed = _composite_final_band_candidate(
+                page_bgr[y1:y2, x1:x2, :],
+                clean_bgr,
+                changed_mask,
+                covered_mask,
+            )
+            page_bgr[y1:y2, x1:x2, :] = composed
+            coverage[y1:y2, x1:x2] = True
+            final_rel = str(row.get("final_crop_path") or "").strip()
+            final_path = None
+            if final_rel:
+                final_path = work_dir / "debug" / "e2e" / final_rel
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(final_path), composed, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            final_bgr = cv2.imread(str(final_path), cv2.IMREAD_COLOR) if final_path else None
+            diff_summary = _final_band_diff_summary(clean_bgr, final_bgr, changed_mask)
+            diff_summary.update(
+                {
+                    "band_id": str(row.get("band_id") or ""),
+                    "source": clean_source,
+                    "source_path": str(clean_path) if clean_path else "",
+                    "final_path": str(final_path) if final_path else "",
+                }
+            )
+            audit["clean_band_final_checks"].append(diff_summary)
+            if diff_summary.get("worse_than_clean_source"):
+                audit["clean_band_final_mismatch_count"] += 1
+            audit["clean_band_source_used"] += 1
+            if clean_source == "rendered_band_path":
+                audit["rendered_band_direct_copy_used"] += 1
+            audit["rows_rerendered"] += 1
+            touched_pages.add(translated_path)
+            continue
+        matching_layers = [
+            layer for layer in _final_rerender_layers_for_crop(row, render_plan_layers)
+            if _layer_requires_strip_crop_rerender(layer)
+        ]
+        if matching_layers:
+            audit["render_plan_layers_used"] += 1
+        else:
+            matching_layers = [
+                layer for layer in _final_rerender_layers_for_crop(row, project_layers)
+                if _layer_requires_strip_crop_rerender(layer)
+            ]
+        if not matching_layers:
+            continue
         positive_band_bgr, positive_band_path = _positive_strip_band_base_for_rerender(row, work_dir, (crop_w, crop_h))
         if positive_band_bgr is not None:
-            base_crop_rgb = cv2.cvtColor(positive_band_bgr, cv2.COLOR_BGR2RGB)
             audit["positive_band_base_used"] += 1
+            page_bgr[y1:y2, x1:x2, :] = positive_band_bgr
+            final_rel = str(row.get("final_crop_path") or "").strip()
+            if final_rel:
+                final_path = work_dir / "debug" / "e2e" / final_rel
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(final_path), positive_band_bgr, [cv2.IMWRITE_JPEG_QUALITY, 100])
+            audit["rendered_band_direct_copy_used"] += 1
+            audit["rows_rerendered"] += 1
+            touched_pages.add(translated_path)
+            continue
         else:
             base_page_path = work_dir / "images" / Path(translated_name).name
             base_bgr = cv2.imread(str(base_page_path), cv2.IMREAD_COLOR)
@@ -13476,9 +14704,53 @@ def _rerender_strip_reassembled_crops_from_metadata(project_data: dict, work_dir
         audit["rows_rerendered"] += 1
         touched_pages.add(translated_path)
     for path in touched_pages:
-        cv2.imwrite(str(path), translated_pages[path], [cv2.IMWRITE_JPEG_QUALITY, 95])
+        cv2.imwrite(str(path), translated_pages[path], [cv2.IMWRITE_JPEG_QUALITY, 100])
+        persisted = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if persisted is not None:
+            translated_pages[path] = persisted
+    for row in crop_rows:
+        bbox = _optional_bbox4(row.get("crop_bbox_in_translated_page"))
+        translated_name = str(row.get("translated_output_page") or "").strip()
+        final_rel = str(row.get("final_crop_path") or "").strip()
+        if bbox is None or not translated_name or not final_rel:
+            continue
+        translated_path = _final_rerender_resolve_translated_path(work_dir, translated_name)
+        if translated_path not in touched_pages:
+            continue
+        page_bgr = translated_pages.get(translated_path)
+        if page_bgr is None:
+            continue
+        height, width = page_bgr.shape[:2]
+        x1 = max(0, min(width, int(bbox[0])))
+        y1 = max(0, min(height, int(bbox[1])))
+        x2 = max(0, min(width, int(bbox[2])))
+        y2 = max(0, min(height, int(bbox[3])))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        final_path = work_dir / "debug" / "e2e" / final_rel
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(final_path), page_bgr[y1:y2, x1:x2, :], [cv2.IMWRITE_JPEG_QUALITY, 100])
+        audit["final_page_crop_resync_count"] += 1
     audit["pages_checked"] = len(seen_pages)
     audit["pages_rerendered"] = len(touched_pages)
+    consistency_audit = _audit_translated_page_band_consistency(work_dir)
+    audit["translated_page_band_consistency"] = {
+        "rows_checked": consistency_audit.get("rows_checked", 0),
+        "rows_compared": consistency_audit.get("rows_compared", 0),
+        "rows_failed": consistency_audit.get("rows_failed", 0),
+    }
+    try:
+        consistency_path = (
+            Path(work_dir)
+            / "debug"
+            / "e2e"
+            / "10_copyback_reassemble"
+            / "translated_page_band_consistency_audit.json"
+        )
+        consistency_path.parent.mkdir(parents=True, exist_ok=True)
+        consistency_path.write_text(json.dumps(consistency_audit, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        audit["errors"].append({"stage": "translated_page_band_consistency_audit", "error": str(exc)})
     return audit
 
 
@@ -13489,6 +14761,13 @@ def _rerender_final_project_images_from_metadata(project_data: dict, work_dir: P
     image has already been written.  Rerendering here keeps the visual output in
     sync with the final project.json and export-gate evidence.
     """
+    if str(project_data.get("owner_graph_status") or "") == "verified":
+        return {
+            "pages_checked": 0,
+            "pages_rerendered": 0,
+            "errors": [],
+            "skipped_verified_owner_project": True,
+        }
     pages = project_data.get("paginas") if isinstance(project_data, dict) else None
     if not isinstance(pages, list):
         return {"pages_checked": 0, "pages_rerendered": 0, "errors": []}
@@ -13770,6 +15049,46 @@ def _refresh_project_qa_summary(project: dict) -> None:
         if str(key).startswith("final_") or str(key).endswith("_audit")
     }
     qa["summary"] = {**summarize_flags(regions), **preserved_audits}
+    _synchronize_qa_summary_with_export_gate(project)
+
+
+def _publish_acceptance_execution_ledger(
+    project: dict,
+    work_dir: Path,
+    *,
+    environ: dict[str, str] | None = None,
+) -> dict | None:
+    """Publish the pipeline child ledger when an authenticated bundle is active."""
+
+    active_env = environ if environ is not None else os.environ
+    raw_bundle = str(active_env.get("TRADUZAI_ACCEPTANCE_BUNDLE") or "").strip()
+    if not raw_bundle:
+        return None
+    bundle_path = Path(raw_bundle).resolve()
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8-sig"))
+    from qa.execution_source_guard import finalize_execution_source_ledger
+
+    ledger = finalize_execution_source_ledger(bundle)
+    ledger.update(
+        {
+            "producer": "pipeline",
+            "producer_run_id": f"pipeline:{Path(work_dir).resolve().name}",
+            "acceptance_bundle_id": bundle.get("acceptance_bundle_id"),
+            "revision_sha256": bundle.get("revision_sha256"),
+            "source_manifest_sha256": bundle.get("source_manifest_sha256"),
+        }
+    )
+    ledger_path = Path(work_dir).resolve() / "execution_source_ledger.json"
+    temporary = ledger_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(ledger, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, ledger_path)
+    project.setdefault("qa", {})["acceptance_execution"] = {
+        "ledger_path": str(ledger_path),
+        "ledger_sha256": hashlib.sha256(ledger_path.read_bytes()).hexdigest(),
+        "acceptance_bundle_id": bundle.get("acceptance_bundle_id"),
+        "producer_run_id": ledger["producer_run_id"],
+    }
+    return ledger
 
 
 def _save_project_json(project_json_path: Path, project: dict) -> None:
@@ -13884,6 +15203,189 @@ def _apply_recovery_layer_for_page(project: dict, page: dict, rendered_path: Pat
         logger.warning("Falha ao aplicar recovery na pagina renderizada: %s", exc)
 
 
+def _run_final_pixel_gate_sequence(
+    *,
+    page_ids,
+    persist_page,
+    observe_page,
+    evaluate_gate,
+):
+    """Persist every page, observe those bytes, then close the image-write phase."""
+    ordered_page_ids = list(dict.fromkeys(str(page_id) for page_id in page_ids))
+    for page_id in ordered_page_ids:
+        persist_page(page_id)
+    reports = [observe_page(page_id) for page_id in ordered_page_ids]
+    return evaluate_gate(reports)
+
+
+def _observe_verified_owner_final_pages(
+    *,
+    project_data: dict,
+    output_pages,
+    observer,
+    source_language: str,
+) -> list[dict]:
+    """Audit persisted owner-mode pages from fresh detector/OCR evidence."""
+
+    if str(project_data.get("owner_graph_status") or "") != "verified":
+        return []
+    from qa.final_pixel_qa import evaluate_final_pixel_observation
+
+    work_dir = Path(project_data.get("_work_dir") or ".")
+    runtime_pages = list(output_pages or [])
+    project_pages = list(project_data.get("paginas") or [])
+    if len(runtime_pages) != len(project_pages):
+        raise ValueError("verified owner output/runtime page count mismatch")
+
+    reports: list[dict] = []
+    for index, (project_page, output_page) in enumerate(
+        zip(project_pages, runtime_pages),
+        start=1,
+    ):
+        page_id = str(project_page.get("page_id") or f"page_{index:03d}")
+        graph = getattr(output_page, "owner_graph", None)
+        composition = getattr(output_page, "owner_composition", None)
+        surface_geometry = getattr(output_page, "page_surface_geometry", None)
+        if graph is None or composition is None:
+            raise ValueError(f"verified owner runtime evidence missing for {page_id}")
+        if surface_geometry is None:
+            raise ValueError(f"verified owner page surface geometry missing for {page_id}")
+        geometry_hash = str(getattr(surface_geometry, "geometry_sha256", "") or "")
+        if not geometry_hash:
+            raise ValueError(f"verified owner page surface geometry invalid for {page_id}")
+        if str(getattr(composition, "page_surface_geometry_sha256", "") or "") != geometry_hash:
+            raise ValueError(f"verified owner composition geometry mismatch for {page_id}")
+        project_geometry_hash = str(
+            project_page.get("page_surface_geometry_sha256") or ""
+        )
+        if project_geometry_hash and project_geometry_hash != geometry_hash:
+            raise ValueError(f"verified owner project geometry mismatch for {page_id}")
+        if str(getattr(graph, "page_id", "")) != page_id:
+            raise ValueError(f"verified owner graph/runtime page mismatch for {page_id}")
+
+        rendered = ((project_page.get("image_layers") or {}).get("rendered") or {}).get("path")
+        if not rendered:
+            raise ValueError(f"verified owner rendered artifact missing for {page_id}")
+        artifact_path = Path(rendered)
+        if not artifact_path.is_absolute():
+            artifact_path = work_dir / artifact_path
+        source_challenges = []
+        dispositions = {
+            str(getattr(item, "component_id", "") or ""): item
+            for item in list(getattr(graph, "component_dispositions", []) or [])
+        }
+        owner_by_component = {
+            str(component_id): owner
+            for owner in list(getattr(graph, "owners", []) or [])
+            for component_id in list(getattr(owner, "component_ids", []) or [])
+        }
+        observations = list(getattr(graph, "observations", []) or [])
+        for component in list(getattr(graph, "components", []) or []):
+            bbox = getattr(component, "bbox_page", None)
+            component_id = str(getattr(component, "component_id", "") or "")
+            if not component_id or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+            disposition = dispositions.get(component_id)
+            disposition_reason = str(getattr(disposition, "reason", "") or "")
+            if (
+                str(getattr(disposition, "decision", "") or "") == "preserve"
+                and disposition_reason.strip().casefold().startswith("policy:")
+            ):
+                continue
+            owner = owner_by_component.get(component_id)
+            source_candidates = [
+                str(getattr(item, "text", "") or "")
+                for item in observations
+                if component_id in tuple(getattr(item, "component_ids", ()) or ())
+                and str(getattr(item, "text", "") or "").strip()
+            ]
+            source_challenges.append(
+                {
+                    "component_id": component_id,
+                    "owner_id": str(getattr(owner, "owner_id", "") or ""),
+                    "bbox_page": [int(value) for value in bbox],
+                    "coordinate_space": "logical_page",
+                    "polygon_page": [
+                        [int(x), int(y)]
+                        for x, y in tuple(getattr(component, "polygon_page", ()) or ())
+                    ],
+                    "source_candidates": source_candidates,
+                    "selected_payload": str(
+                        getattr(owner, "source_payload", "") or ""
+                    ),
+                    "preserve_policy": disposition_reason,
+                }
+            )
+        page_number = int(project_page.get("numero", index) or index)
+        observation = observer.observe(
+            artifact_path,
+            source_language=str(source_language or "en"),
+            page_id=page_id,
+            page_number=page_number,
+            source_challenges=source_challenges,
+            page_surface_geometry=surface_geometry,
+        )
+        report = evaluate_final_pixel_observation(
+            graph=graph,
+            composition=composition,
+            observation=observation,
+        )
+        expected_challenges = int(
+            getattr(
+                observation,
+                "expected_source_challenge_count",
+                len(source_challenges),
+            )
+        )
+        completed_challenges = int(
+            getattr(observation, "completed_source_challenge_count", 0)
+        )
+        coverage_complete = bool(
+            getattr(observation, "coverage_complete", False)
+            and expected_challenges == len(source_challenges)
+            and completed_challenges == expected_challenges
+        )
+        reports.append(
+            {
+                "page_id": report.page_id,
+                "artifact_path": str(artifact_path),
+                "persisted_sha256": report.persisted_sha256,
+                "observer": type(observer).__name__,
+                "observer_available": True,
+                "observation_complete": coverage_complete,
+                "detected_block_count": int(
+                    getattr(observation, "detected_block_count", len(observation.detected_blocks))
+                ),
+                "ocr_record_count": int(
+                    getattr(observation, "ocr_record_count", len(observation.ocr_records))
+                ),
+                "ocr_attempts": [
+                    dict(item) for item in getattr(observation, "ocr_attempts", ())
+                ],
+                "expected_source_challenge_count": expected_challenges,
+                "completed_source_challenge_count": completed_challenges,
+                "coverage_complete": coverage_complete,
+                "coverage_failures": list(
+                    getattr(observation, "coverage_failures", ())
+                ),
+                "observed_text_count": int(report.observed_text_count),
+                "geometry_projection_count": int(report.geometry_projection_count),
+                "owner_support_bbox_frame": (
+                    list(report.owner_support_bbox_frame)
+                    if report.owner_support_bbox_frame is not None
+                    else None
+                ),
+                "page_surface_geometry_sha256": geometry_hash,
+                "passed": bool(report.passed),
+                "contracts": dict(report.contracts),
+                "issues": [issue.to_dict() for issue in report.issues],
+                "detected_blocks": [dict(block) for block in observation.detected_blocks],
+                "ocr_records": [dict(record) for record in observation.ocr_records],
+            }
+        )
+    return reports
+
+
 def render_page_image(project, page_idx, output_path):
     """Auxiliar para renderizar a versao final da pagina para visualizacao."""
     from typesetter.renderer import _typeset_single_page
@@ -13930,6 +15432,7 @@ def render_page_image(project, page_idx, output_path):
         _apply_recovery_layer_for_page(project, page, rendered_path)
     except Exception as e:
         sys.stderr.write(f"Falha ao renderizar imagem da pagina: {e}\n")
+        raise
 
 
 def _merge_regional_inpaint_output(
@@ -14009,6 +15512,13 @@ def _visible_render_texts(texts: list[dict]) -> list[dict]:
         if merged_fragment:
             continue
         if text.get("visible", True) is not False:
+            renderable.append(text)
+            continue
+        if (
+            _has_renderable_translated_text(text)
+            and str(text.get("fit_status") or "").strip().lower()
+            == "below_minimum_legible"
+        ):
             renderable.append(text)
             continue
         if text.get("_force_render_hidden") is True and _has_renderable_translated_text(text):
@@ -14483,7 +15993,10 @@ def _run_render_preview_page(
 
         from typesetter.renderer import _typeset_single_page
 
-        _typeset_single_page((str(render_base_path), trans_page_dict, str(output_path.parent), project.get("font_assets")))
+        preview_args = (str(render_base_path), trans_page_dict, str(output_path.parent))
+        if project.get("font_assets") is not None:
+            preview_args = (*preview_args, project.get("font_assets"))
+        _typeset_single_page(preview_args)
         renderer_output = output_path.parent / Path(render_base_path).name
         if renderer_output.exists() and renderer_output.resolve() != output_path.resolve():
             if output_path.exists():
@@ -14823,27 +16336,511 @@ def build_glossary_used_report(config: dict, context: dict, page_text_layers: li
     }
 
 
-def build_project_json(config, context, ocr_results, page_text_layers, image_files, total_pages, elapsed):
+def _project_inputs_from_output_pages(
+    source_manifest,
+    output_pages,
+    *,
+    private_execution_root: Path,
+):
+    """Build verified chapter inputs exclusively from persisted page pointers."""
+    from ownership.chapter_contract import ChapterCardinalityError, VerifiedPageProjectInput, VerifiedProjectInputs
+    from ownership.execution import ArtifactGenerationMarker, PageArtifactIntegrityError, PageNotTerminalError
+
+    pages = tuple(output_pages)
+    if len(pages) != source_manifest.source_page_count:
+        raise ChapterCardinalityError("output page count differs from source manifest")
+    marker = ArtifactGenerationMarker.read_verified(private_execution_root)
+    if (marker.run_id, marker.execution_id, marker.replay_of_execution_id) != (
+        source_manifest.run_id,
+        source_manifest.execution_id,
+        source_manifest.replay_of_execution_id,
+    ):
+        raise PageArtifactIntegrityError("private generation marker differs from source manifest")
+    verified_pages = []
+    page_generation_ids = set()
+    pointer_paths = set()
+    evidence_paths = set()
+    for source_page, output_page in zip(source_manifest.pages, pages, strict=True):
+        ref = getattr(output_page, "owner_page_evidence_ref", None)
+        if ref is None:
+            raise PageNotTerminalError("enforce output page lacks persisted evidence pointer")
+        if (ref.page_id, ref.page_source_sha256) != (source_page.page_id, source_page.page_source_sha256):
+            raise ChapterCardinalityError("output page order or source identity differs from manifest")
+        if ref.artifact_store_id != marker.artifact_store_id or ref.generation_id != marker.generation_id:
+            raise PageArtifactIntegrityError("page pointer belongs to another private generation")
+        if ref.page_generation_id in page_generation_ids:
+            raise PageArtifactIntegrityError("page generation identity is duplicated")
+        if ref.current_pointer_relative_path in pointer_paths:
+            raise PageArtifactIntegrityError("page pointer path is shared between pages")
+        if ref.page_execution_evidence_relative_path in evidence_paths:
+            raise PageArtifactIntegrityError("page evidence path is shared between pages")
+        page_generation_ids.add(ref.page_generation_id)
+        pointer_paths.add(ref.current_pointer_relative_path)
+        evidence_paths.add(ref.page_execution_evidence_relative_path)
+        result = ref.read_verified(private_execution_root)
+        if result.status != "final_verified":
+            raise PageNotTerminalError("persisted page result is not terminal")
+        verified_pages.append(VerifiedPageProjectInput.from_verified_result(result, ref))
+    return VerifiedProjectInputs.build(source_manifest, tuple(verified_pages))
+
+
+def _run_verified_strip_chapter(
+    source_manifest,
+    *,
+    private_execution_root: Path,
+    run_chapter_fn=None,
+    **run_chapter_kwargs,
+):
+    """Invoke the strip entrypoint once and immediately discard mutable outputs."""
+
+    if run_chapter_fn is None:
+        import strip.run as strip_run
+
+        run_chapter_fn = strip_run.run_chapter
+    output_pages = run_chapter_fn(
+        **run_chapter_kwargs,
+        run_id=source_manifest.run_id,
+        execution_id=source_manifest.execution_id,
+        replay_of_execution_id=source_manifest.replay_of_execution_id,
+        source_manifest=source_manifest,
+    )
+    return _project_inputs_from_output_pages(
+        source_manifest,
+        output_pages,
+        private_execution_root=private_execution_root,
+    )
+
+
+@dataclass(frozen=True)
+class _PersistedPageOwnerArtifacts:
+    execution: object
+    artifact_manifest: dict
+    visual_stages: dict
+    page_root: Path
+
+
+def _page_artifact_record(value):
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    if hasattr(value, "read") and callable(value.read):
+        return value.read()
+    if hasattr(value, "__dataclass_fields__"):
+        return asdict(value)
+    if isinstance(value, dict):
+        return dict(value)
+    raise TypeError(f"unsupported page artifact record: {type(value).__name__}")
+
+
+def _page_artifact_jsonl(values) -> bytes:
+    from ownership.hash_contract import canonical_json_bytes
+
+    rows = [canonical_json_bytes(_page_artifact_record(item)) for item in values]
+    return b"".join(row + b"\n" for row in rows)
+
+
+def _write_page_artifacts(evidence, *, generation_root: Path):
+    """Persist a page evidence tree derived only from a verified frozen snapshot."""
+
+    import uuid
+
+    from ownership.coverage import (
+        _invocation_json,
+        _jsonable,
+        _ledger_json,
+        _observation_payload,
+        _request_json,
+    )
+    from ownership.execution import (
+        ArtifactGenerationMarker,
+        PageArtifactIntegrityError,
+        PageExecutionEvidenceSnapshot,
+    )
+    from ownership.hash_contract import canonical_json_bytes, sha256_bytes
+    from strip.page_pipeline import CANONICAL_VISUAL_STAGE_NAMES
+
+    if not isinstance(evidence, PageExecutionEvidenceSnapshot):
+        raise TypeError("page artifacts require PageExecutionEvidenceSnapshot")
+    root = Path(generation_root).resolve(strict=True)
+    marker = ArtifactGenerationMarker.read_verified(root)
+    expected = {
+        "run_id": evidence.run_id,
+        "execution_id": evidence.execution_id,
+        "page_id": evidence.page_id,
+        "page_source_sha256": evidence.page_source_sha256,
+        "artifact_store_id": evidence.artifact_store_id,
+        "generation_id": evidence.generation_id,
+        "page_result_sha256": evidence.page_result_sha256,
+        "sha256": evidence.sha256,
+    }
+    if (
+        marker.run_id != evidence.run_id
+        or marker.execution_id != evidence.execution_id
+        or marker.artifact_store_id != evidence.artifact_store_id
+        or marker.generation_id != evidence.generation_id
+    ):
+        raise PageArtifactIntegrityError("page evidence differs from generation marker")
+    result = PageExecutionEvidenceSnapshot.read_verified(
+        evidence.canonical_json_bytes, root, expected=expected
+    )
+    if result.status != "final_verified":
+        raise PageArtifactIntegrityError("page artifacts require a final_verified result")
+
+    stages = tuple(result.visual_stage_artifacts)
+    stage_by_name = {item.name: item for item in stages}
+    if tuple(stage_by_name) != CANONICAL_VISUAL_STAGE_NAMES:
+        raise PageArtifactIntegrityError("canonical visual stage set is incomplete")
+    for stage in stages:
+        pixels = stage.artifact_ref.load_verified(root)
+        if stage.pixel_sha256 != stage.artifact_ref.pixel_sha256:
+            raise PageArtifactIntegrityError("canonical visual stage hash mismatch")
+        if pixels.shape[:2] != (
+            result.request.original_page.height,
+            result.request.original_page.width,
+        ):
+            raise PageArtifactIntegrityError("canonical visual stage dimensions mismatch")
+        if stage.alias_of is not None:
+            aliased = stage_by_name.get(stage.alias_of)
+            if aliased is None or not stage.alias_reason:
+                raise PageArtifactIntegrityError("canonical visual stage alias is incomplete")
+            if aliased.pixel_sha256 != stage.pixel_sha256:
+                raise PageArtifactIntegrityError("canonical visual stage alias hash mismatch")
+
+    coverage_payload = json.loads(result.coverage.canonical_json_bytes.decode("utf-8"))
+    graph_payload = json.loads(result.owner_graph.canonical_json_bytes.decode("utf-8"))
+    files: dict[str, bytes] = {
+        "page_execution_evidence.json": evidence.canonical_json_bytes,
+        "coverage_result.json": canonical_json_bytes(coverage_payload),
+        "coverage_ledgers.jsonl": b"".join(
+            canonical_json_bytes(_ledger_json(item)) + b"\n"
+            for item in result.coverage.ledger_history
+        ),
+        "coverage_recovery_requests.jsonl": b"".join(
+            canonical_json_bytes(_jsonable(asdict(item))) + b"\n"
+            for item in result.coverage.recovery_requests
+        ),
+        "coverage_recovery_decisions.jsonl": b"".join(
+            canonical_json_bytes(_jsonable(asdict(item))) + b"\n"
+            for item in result.coverage.recovery_decisions
+        ),
+        "coverage_pending_request_ids.json": canonical_json_bytes(
+            {
+                "run_id": result.request.run_id,
+                "publication_execution_id": result.request.execution_id,
+                "page_id": result.page_id,
+                "page_source_sha256": result.request.page_source_sha256,
+                "pending_request_ids": list(result.coverage.pending_request_ids),
+            }
+        ),
+        "ocr_requests.jsonl": b"".join(
+            canonical_json_bytes(_request_json(item)) + b"\n"
+            for item in result.coverage.ocr_requests
+        ),
+        "ocr_invocations.jsonl": b"".join(
+            canonical_json_bytes(_invocation_json(item)) + b"\n"
+            for item in result.coverage.ocr_invocations
+        ),
+        "page_owner_observations.jsonl": b"".join(
+            canonical_json_bytes(_observation_payload(item)) + b"\n"
+            for item in result.coverage.observations
+        ),
+        "owner_graph.json": canonical_json_bytes(graph_payload),
+        "translation_attempts.jsonl": _page_artifact_jsonl(
+            result.translation_attempts
+        ),
+        "translation_bindings.json": canonical_json_bytes(
+            [item.to_dict() for item in result.translations]
+        ),
+        "repair_requests.jsonl": _page_artifact_jsonl(result.repair_requests),
+        "repair_attempts.jsonl": _page_artifact_jsonl(result.repair_history),
+        "owner_target_materialization.jsonl": _page_artifact_jsonl(
+            result.owner_target_materializations
+        ),
+        "execution_result.json": canonical_json_bytes(result.to_canonical_dict()),
+        "original.ref.json": canonical_json_bytes(
+            stage_by_name["original"].to_dict()
+        ),
+        "page_composition.json": canonical_json_bytes(
+            result.page_composition.to_dict() if result.page_composition is not None else {}
+        ),
+        "final_qa_ocr_requests.jsonl": b"".join(
+            canonical_json_bytes(_request_json(item)) + b"\n"
+            for item in result.final_qa_ocr_requests
+        ),
+        "final_qa_ocr_invocations.jsonl": b"".join(
+            canonical_json_bytes(_invocation_json(item)) + b"\n"
+            for item in result.final_qa_ocr_invocations
+        ),
+        "language_residual_issues.jsonl": _page_artifact_jsonl(
+            result.language_residual_issues
+        ),
+        "final_qa_probes.jsonl": _page_artifact_jsonl(result.qa_probes),
+        "final_pixel_proof.json": canonical_json_bytes(
+            result.terminal_proof.to_dict()
+        ),
+        "final_replacement_verdicts.jsonl": _page_artifact_jsonl(
+            result.final_replacement_verdicts
+        ),
+        "persisted_final.ref.json": canonical_json_bytes(
+            stage_by_name["persisted_final"].to_dict()
+        ),
+        "visual_stages.json": canonical_json_bytes(
+            [item.to_dict() for item in stages]
+        ),
+    }
+
+    page_relative = Path("evidence") / "pages" / result.page_id
+    page_root = root / page_relative
+    if page_root.exists():
+        raise PageArtifactIntegrityError("page evidence tree already exists")
+    staging = root / "evidence" / "pages" / f".{result.page_id}.{uuid.uuid4().hex}.tmp"
+    artifact_rows = [
+        {
+            "relative_path": (page_relative / name).as_posix(),
+            "file_sha256": sha256_bytes(encoded),
+            "size_bytes": len(encoded),
+            "evidence_reference": (page_relative / name).as_posix(),
+        }
+        for name, encoded in sorted(files.items())
+    ]
+    manifest = {
+        "schema_version": 1,
+        "run_id": result.request.run_id,
+        "publication_execution_id": result.request.execution_id,
+        "page_id": result.page_id,
+        "page_source_sha256": result.request.page_source_sha256,
+        "page_execution_evidence_sha256": evidence.sha256,
+        "page_result_sha256": evidence.page_result_sha256,
+        "visual_stages": [item.to_dict() for item in stages],
+        "artifacts": artifact_rows,
+    }
+    try:
+        staging.mkdir(parents=True)
+        for name, encoded in files.items():
+            (staging / name).write_bytes(encoded)
+        (staging / "artifact_manifest.json").write_bytes(canonical_json_bytes(manifest))
+        page_root.parent.mkdir(parents=True, exist_ok=True)
+        staging.replace(page_root)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+    return _PersistedPageOwnerArtifacts(
+        execution=result,
+        artifact_manifest=manifest,
+        visual_stages=stage_by_name,
+        page_root=page_root,
+    )
+
+
+def _wrap_up_verified_owner_pages(
+    inputs,
+    *,
+    source_private_execution_root: Path,
+):
+    """Freeze one self-contained publication generation from verified page evidence."""
+
+    import uuid
+
+    from ownership.chapter_contract import (
+        ChapterAssetManifest,
+        ExportManifest,
+        PublicationReceipt,
+        VerifiedChapterBundle,
+        VerifiedProjectInputs,
+    )
+    from ownership.execution import ArtifactGenerationMarker
+
+    if not isinstance(inputs, VerifiedProjectInputs):
+        raise TypeError("verified owner wrap-up requires VerifiedProjectInputs")
+    source_root = Path(source_private_execution_root).resolve(strict=True)
+    source_marker = ArtifactGenerationMarker.read_verified(source_root)
+    if (
+        source_marker.run_id,
+        source_marker.execution_id,
+        source_marker.artifact_store_id,
+        source_marker.generation_id,
+    ) != (
+        inputs.run_id,
+        inputs.execution_id,
+        inputs.artifact_store_id,
+        inputs.generation_id,
+    ):
+        raise ValueError("private execution marker differs from verified inputs")
+
+    # Reopen every page before copying.  This is the last trusted read of the
+    # private generation; everything after this point resolves against staging.
+    for page in inputs.pages:
+        page.page_execution_evidence.read_verified(
+            page.page_execution_evidence.canonical_json_bytes,
+            source_root,
+            expected={
+                "run_id": inputs.run_id,
+                "execution_id": inputs.execution_id,
+                "page_id": page.page_id,
+                "page_result_sha256": page.page_result_sha256,
+            },
+        )
+
+    transaction_id = f"bundle-{uuid.uuid4().hex}"
+    staging_root = source_root.parent / ".publication-staging" / transaction_id
+    if staging_root.exists():
+        raise FileExistsError(f"publication staging already exists: {staging_root}")
+    staging_root.mkdir(parents=True)
+    for source in source_root.rglob("*"):
+        if source.is_symlink():
+            raise ValueError("private execution tree contains a symlink")
+        relative = source.relative_to(source_root)
+        target = staging_root / relative
+        if source.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+    (staging_root / "chapter_source_manifest.json").write_bytes(
+        inputs.source_manifest.canonical_json_bytes
+    )
+    evidence_root = staging_root / "evidence"
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    (evidence_root / "verified_project_inputs.json").write_bytes(
+        inputs.canonical_json_bytes
+    )
+    existing_project = {}
+    existing_project_path = staging_root / "project.json"
+    if existing_project_path.is_file():
+        try:
+            loaded_project = json.loads(existing_project_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_project, dict):
+                existing_project = loaded_project
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            existing_project = {}
+    project_payload = dict(existing_project)
+    project_payload.update(
+        {
+            "schema_version": 1,
+            "owner_graph_status": "verified",
+            "run_id": inputs.run_id,
+            "execution_id": inputs.execution_id,
+            "replay_of_execution_id": inputs.replay_of_execution_id,
+            "source_manifest_sha256": inputs.source_manifest_sha256,
+            "verified_inputs_sha256": inputs.sha256,
+        }
+    )
+    existing_pages = list(project_payload.get("paginas") or [])
+    verified_project_pages = []
+    for ordinal, page in enumerate(inputs.pages, 1):
+        payload = (
+            dict(existing_pages[ordinal - 1])
+            if ordinal <= len(existing_pages) and isinstance(existing_pages[ordinal - 1], dict)
+            else {}
+        )
+        payload.update(
+            {
+                "numero": ordinal,
+                "page_id": page.page_id,
+                "arquivo_original": page.original_artifact.relative_path,
+                "arquivo_traduzido": page.final_artifact.relative_path,
+                "page_source_sha256": page.page_source_sha256,
+                "page_result_sha256": page.page_result_sha256,
+                "page_execution_evidence": page.page_execution_evidence_relative_path,
+                "page_execution_evidence_sha256": page.page_execution_evidence.sha256,
+                "owner_graph_sha256": page.owner_graph.sha256,
+                "terminal_proof_sha256": page.terminal_proof_sha256,
+            }
+        )
+        verified_project_pages.append(payload)
+    project_payload["paginas"] = verified_project_pages
+    project_path = staging_root / "project.json"
+    project_path.write_bytes(
+        json.dumps(project_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    reopened_inputs = VerifiedProjectInputs.read_verified(staging_root)
+    if reopened_inputs.sha256 != inputs.sha256:
+        raise ValueError("staged verified inputs changed during wrap-up")
+    for page in reopened_inputs.pages:
+        reopened_page = page.page_execution_evidence.read_verified(
+            page.page_execution_evidence.canonical_json_bytes,
+            staging_root,
+            expected={
+                "run_id": inputs.run_id,
+                "execution_id": inputs.execution_id,
+                "page_id": page.page_id,
+                "page_result_sha256": page.page_result_sha256,
+            },
+        )
+        if reopened_page.visual_stage_artifacts:
+            _write_page_artifacts(
+                page.page_execution_evidence,
+                generation_root=staging_root,
+            )
+    asset_manifest = ChapterAssetManifest.build(
+        staging_root,
+        run_id=inputs.run_id,
+        execution_id=inputs.execution_id,
+        replay_of_execution_id=inputs.replay_of_execution_id,
+        artifact_store_id=inputs.artifact_store_id,
+        generation_id=inputs.generation_id,
+    )
+    (staging_root / "chapter_asset_manifest.json").write_bytes(
+        asset_manifest.canonical_json_bytes
+    )
+    export_manifest = ExportManifest.build(reopened_inputs, asset_manifest)
+    (staging_root / "export_manifest.json").write_bytes(export_manifest.canonical_json_bytes)
+    receipt = PublicationReceipt.build(reopened_inputs, asset_manifest, export_manifest)
+    (staging_root / "publication_receipt.json").write_bytes(receipt.canonical_json_bytes)
+    return VerifiedChapterBundle.build(
+        runtime_staging_root=staging_root,
+        inputs=reopened_inputs,
+        asset_manifest=asset_manifest,
+        export_manifest=export_manifest,
+        publication_receipt=receipt,
+    )
+
+
+def build_project_json(
+    config,
+    context,
+    ocr_results,
+    page_text_layers,
+    image_files,
+    total_pages,
+    elapsed,
+    *,
+    output_pages=None,
+):
     """Build the project.json structure."""
     from layout.region_grouping import group_regions
+    from ownership.project import (
+        build_owner_project_envelope,
+        normalize_owner_text_layer_for_project,
+    )
     from qa.translation_qa import summarize_flags
 
     pages = []
     qa_regions = []
     work_dir = Path(config.get("work_dir")) if config.get("work_dir") else None
+    runtime_output_pages = list(output_pages or [])
     for i, (img, ocr, text_page) in enumerate(zip(image_files, ocr_results, page_text_layers)):
-        text_layers = text_page.get("texts", [])
-        text_layers = _drop_suppressed_ocr_texts(
-            text_layers,
-            config.get("idioma_origem", "en"),
-            sfx_candidates=ocr.get("_sfx_visual_candidates") if isinstance(ocr, dict) else [],
+        text_layers = list(text_page.get("texts", []))
+        verified_owner_page = (
+            isinstance(ocr, dict)
+            and ocr.get("_owner_graph_mode") == "enforce"
+            and isinstance(ocr.get("_owner_graph_snapshot"), dict)
         )
-        promoted_sfx = _promote_sfx_visual_candidates(ocr, existing_texts=text_layers)
-        if promoted_sfx:
-            text_layers = list(text_layers) + promoted_sfx
-        text_layers = group_regions(text_layers)
+        if not verified_owner_page:
+            text_layers = _drop_suppressed_ocr_texts(
+                text_layers,
+                config.get("idioma_origem", "en"),
+                sfx_candidates=ocr.get("_sfx_visual_candidates") if isinstance(ocr, dict) else [],
+            )
+            promoted_sfx = _promote_sfx_visual_candidates(ocr, existing_texts=text_layers)
+            if promoted_sfx:
+                text_layers = list(text_layers) + promoted_sfx
+            text_layers = group_regions(text_layers)
         text_layers = [
-            neutralize_removed_decision_fields(normalize_text_geometry(layer))
+            normalize_owner_text_layer_for_project(
+                neutralize_removed_decision_fields(normalize_text_geometry(layer))
+            )
             for layer in text_layers
         ]
         qa_regions.extend(text_layers)
@@ -14868,6 +16865,24 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
             for block in inpaint_blocks
         ]
 
+        surface_geometry = None
+        if i < len(runtime_output_pages):
+            surface_geometry = getattr(
+                runtime_output_pages[i], "page_surface_geometry", None
+            )
+        geometry_payload = (
+            surface_geometry.to_dict()
+            if surface_geometry is not None and hasattr(surface_geometry, "to_dict")
+            else None
+        )
+        page_profile = dict(ocr.get("page_profile") or {})
+        if geometry_payload is not None:
+            page_profile.update({
+                "logical_width": int(geometry_payload["logical_width"]),
+                "logical_height": int(geometry_payload["logical_height"]),
+                "frame_width": int(geometry_payload["frame_width"]),
+                "frame_height": int(geometry_payload["frame_height"]),
+            })
         page = {
             "numero": i + 1,
             "image_layers": {
@@ -14909,12 +16924,21 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
                 },
             },
             "inpaint_blocks": inpaint_blocks,
-            "page_profile": ocr.get("page_profile"),
+            "page_profile": page_profile or None,
             "page_quality": ocr.get("page_quality"),
             "route_history": ocr.get("route_history") or [],
             "vision_engine": page_engine,
             "text_layers": text_layers,
         }
+        if geometry_payload is not None:
+            page.update({
+                "logical_width": int(geometry_payload["logical_width"]),
+                "logical_height": int(geometry_payload["logical_height"]),
+                "frame_width": int(geometry_payload["frame_width"]),
+                "frame_height": int(geometry_payload["frame_height"]),
+                "page_surface_geometry": geometry_payload,
+                "page_surface_geometry_sha256": geometry_payload["geometry_sha256"],
+            })
         if work_dir is not None:
             _persist_real_bubble_mask_layer_for_page(
                 page,
@@ -14927,6 +16951,10 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
         _sync_page_legacy_aliases(page)
         pages.append(page)
 
+    owner_project_envelope = build_owner_project_envelope(
+        ocr_results,
+        page_text_layers,
+    )
     return {
         "versao": "2.0",
         "app": "traduzai",
@@ -14955,6 +16983,7 @@ def build_project_json(config, context, ocr_results, page_text_layers, image_fil
         "qa": {
             "summary": summarize_flags(qa_regions),
         },
+        **owner_project_envelope,
     }
 
 

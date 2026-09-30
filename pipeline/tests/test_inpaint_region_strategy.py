@@ -30,6 +30,24 @@ def test_region_strategy_ignores_legacy_text_classification_fields():
     assert classify_region(region) == "text"
 
 
+def test_translucent_balloon_profile_requires_lama_strategy(tmp_path):
+    mask_path = tmp_path / "translucent_mask.png"
+    _write_opaque_mask(mask_path)
+
+    result = plan_inpaint(
+        {
+            "bbox": [0, 0, 30, 20],
+            "layout_profile": "translucent_balloon",
+            "background_type": "solid_background",
+        },
+        str(mask_path),
+    )
+
+    assert result["region_type"] == "translucent_balloon"
+    assert result["strategy"] == "lama_required"
+    assert result["roi_strategy"] is None
+
+
 def test_image_dark_bubble_visually_light_blocks_dark_fill():
     image = np.zeros((220, 320, 3), dtype=np.uint8)
     image[20:180, 60:240] = 248

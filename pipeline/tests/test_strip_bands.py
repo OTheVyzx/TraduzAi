@@ -85,3 +85,48 @@ class BandGroupingBasicTests(unittest.TestCase):
         b2 = Balloon(strip_bbox=BBox(0, 500, 200, 600), confidence=0.9)
         bands = group_balloons_into_bands([b1, b2], gap_threshold=64)
         self.assertEqual(len(bands), 2)
+
+
+class StableBandTileIdentityTests(unittest.TestCase):
+    @staticmethod
+    def _balloons():
+        from strip.types import Balloon, BBox
+
+        return [
+            Balloon(
+                strip_bbox=BBox(0, 100, 200, 150),
+                confidence=0.9,
+                metadata={"region_id": "region_p001_a"},
+            ),
+            Balloon(
+                strip_bbox=BBox(0, 500, 200, 600),
+                confidence=0.9,
+                metadata={"region_id": "region_p001_b"},
+            ),
+        ]
+
+    def test_band_tile_ids_are_stable_under_balloon_order(self):
+        from strip.bands import group_balloons_into_bands
+
+        balloons = self._balloons()
+        forward = group_balloons_into_bands(balloons, gap_threshold=64)
+        backward = group_balloons_into_bands(list(reversed(balloons)), gap_threshold=64)
+
+        self.assertEqual([band.tile_id for band in forward], [band.tile_id for band in backward])
+        self.assertTrue(all(band.tile_id.startswith("tile_strip_") for band in forward))
+        self.assertTrue(all(band.strip_offset_xy == (0, band.y_top) for band in forward))
+
+    def test_changing_band_boundaries_does_not_change_region_ids(self):
+        from strip.bands import group_balloons_into_bands
+
+        balloons = self._balloons()
+        grouped = group_balloons_into_bands(balloons, gap_threshold=400)
+        split = group_balloons_into_bands(balloons, gap_threshold=64)
+
+        grouped_regions = {
+            item.metadata["region_id"] for band in grouped for item in band.balloons
+        }
+        split_regions = {
+            item.metadata["region_id"] for band in split for item in band.balloons
+        }
+        self.assertEqual(grouped_regions, split_regions)

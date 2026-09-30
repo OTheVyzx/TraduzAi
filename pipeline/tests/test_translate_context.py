@@ -2,6 +2,8 @@
 import sys
 import json
 import tempfile
+import ast
+import inspect
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,6 +40,36 @@ from translator.translate import (
 
 
 class TranslateContextTests(unittest.TestCase):
+    def test_google_wrapper_falls_back_to_public_endpoint_and_health_uses_it(self):
+        class _BrokenDeepTranslator:
+            def __init__(self, source, target):
+                self.source = source
+                self.target = target
+
+            def translate(self, _text):
+                raise RuntimeError("deep-translator endpoint unavailable")
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps([[['olá', 'hello', None, None, 10]], 'en']).encode("utf-8")
+
+        with patch("deep_translator.GoogleTranslator", _BrokenDeepTranslator), patch(
+            "translator.translate.urllib.request.urlopen", return_value=_Response()
+        ) as urlopen, patch("translator.translate.time.sleep"):
+            translator = translate_module._GoogleTranslator(source="en", target="pt")
+            _probe_google_backend(translator, "en", "pt")
+
+        self.assertEqual(translator.translate("hello"), "olá")
+        self.assertEqual(urlopen.call_count, 1)
+        request = urlopen.call_args.args[0]
+        self.assertIn("translate.googleapis.com/translate_a/single", request.full_url)
+
     def setUp(self):
         translate_module._google = None
         translate_module._google_health_key = None
@@ -527,7 +559,7 @@ class TranslateContextTests(unittest.TestCase):
 
         self.assertEqual(translated[0]["texts"][0]["translated"], "Ã¬â€¢Ë†Ã«â€¦â€¢Ã­â€¢ËœÃ¬â€žÂ¸Ã¬Å¡â€")
 
-    def test_translate_pages_does_not_call_ollama_when_google_health_fails(self):
+    def test_translate_pages_checks_ollama_then_passthrough_when_all_backends_fail(self):
         class _BrokenGoogleTranslator:
             def __init__(self):
                 self._translator = self
@@ -545,7 +577,10 @@ class TranslateContextTests(unittest.TestCase):
             with patch("translator.translate._google_health_key", None):
                 with patch("translator.translate._google_health_ok", False):
                     with patch("translator.translate._GoogleTranslator", return_value=_BrokenGoogleTranslator()):
-                        with patch("translator.translate._check_ollama") as check_ollama:
+                        with patch(
+                            "translator.translate._check_ollama",
+                            return_value={"running": False, "models": [], "has_translator": False},
+                        ) as check_ollama:
                             with patch("translator.translate._call_ollama") as call_ollama:
                                 translated = translate_pages(
                                     ocr_results=ocr_results,
@@ -556,7 +591,7 @@ class TranslateContextTests(unittest.TestCase):
                                     idioma_destino="pt-BR",
                                 )
 
-        check_ollama.assert_not_called()
+        check_ollama.assert_called_once()
         call_ollama.assert_not_called()
         self.assertEqual(translated[0]["texts"][0]["translated"], ocr_results[0]["texts"][0]["text"])
 
@@ -1107,7 +1142,7 @@ class TranslateContextTests(unittest.TestCase):
         self.assertIn("translation_render_blocked", entity_meta.get("qa_flags", []))
         self.assertEqual(entity_meta.get("translation_blocked_text"), 'maravilhoso disse "estou indo"')
 
-    def test_ollama_repair_google_batch_keeps_name_lock_placeholders(self):
+    def test_ollama_public_boundary_never_hides_google_repair(self):
         placeholder = PLACEHOLDER_TEMPLATE.format(index=0)
 
         class _FakeGoogleTranslator:
@@ -1151,11 +1186,9 @@ class TranslateContextTests(unittest.TestCase):
                                         idioma_destino="pt-BR",
                                     )
 
-        self.assertEqual(fake_google.seen_batches, [f"{placeholder} wins"])
+        self.assertEqual(fake_google.seen_batches, [])
         entity_meta = translated[0]["texts"][0]
-        self.assertEqual(entity_meta["translated"], "Wonho venceu.")
         self.assertNotIn("maravilhoso", entity_meta["translated"])
-        self.assertNotIn("unrestored_placeholder", entity_meta.get("qa_flags", []))
 
     def test_translate_pages_does_not_name_lock_common_uppercase_one(self):
         placeholder = PLACEHOLDER_TEMPLATE.format(index=0)
@@ -1309,7 +1342,7 @@ class TranslateContextTests(unittest.TestCase):
 
         self.assertEqual(backend, "google")
 
-    def test_resolve_translation_backend_does_not_fallback_to_ollama(self):
+    def test_resolve_translation_backend_falls_back_to_available_ollama(self):
         backend = _resolve_translation_backend(
             google_ok=False,
             ollama_status={
@@ -1319,7 +1352,7 @@ class TranslateContextTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(backend, "passthrough")
+        self.assertEqual(backend, "ollama")
 
     def test_pick_ollama_model_for_korean_portuguese_prefers_gemma(self):
         picked = _pick_ollama_model_for_language_pair(
@@ -1806,3 +1839,418 @@ class PostprocessImperativeIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _owned_legacy_page() -> dict:
+    return {
+        "page_id": "page_001",
+        "texts": [
+            {
+                "id": "owner-a",
+                "owner_id": "owner-a",
+                "text": "THE PLAYER HAS 10 KILLS",
+                "original": "THE PLAYER HAS 10 KILLS",
+                "tipo": "dialogue_body",
+                "route_action": "translate_inpaint_render",
+            }
+        ],
+    }
+
+
+def test_public_translate_pages_signature_remains_compatible() -> None:
+    assert list(inspect.signature(translate_module.translate_pages).parameters) == [
+        "ocr_results",
+        "obra",
+        "context",
+        "glossario",
+        "idioma_destino",
+        "idioma_origem",
+        "qualidade",
+        "ollama_host",
+        "ollama_model",
+        "progress_callback",
+        "models_dir",
+        "translation_context",
+    ]
+
+
+def test_forced_google_attempt_records_real_metadata(monkeypatch) -> None:
+    translated = {
+        "texts": [
+            {
+                "id": "owner-a",
+                "owner_id": "owner-a",
+                "translated": "O JOGADOR TEM 10 ABATES",
+            }
+        ]
+    }
+    low_level = unittest.mock.Mock(return_value=[translated])
+    monkeypatch.setattr(translate_module, "_translate_with_google", low_level)
+    monkeypatch.setattr(
+        translate_module,
+        "_google",
+        type("Google", (), {"_cache": {}, "_persistent_cache": None})(),
+    )
+
+    result = translate_module.translate_one_owner_attempt(
+        _owned_legacy_page(),
+        "obra",
+        {},
+        {},
+        idioma_destino="pt-BR",
+        idioma_origem="en",
+        qualidade="normal",
+        ollama_host="http://localhost:11434",
+        ollama_model="traduzai-translator",
+        models_dir="",
+        translation_context=None,
+        control=translate_module.TranslationAttemptControl(
+            "google", "primary", True
+        ),
+    )
+
+    assert result.backend == "google"
+    assert result.provider_called is True
+    assert result.cache_hit is False
+    assert result.provider_metadata_sha256 == translate_module.sha256_bytes(
+        result.provider_metadata_json_bytes
+    )
+    assert result.translated_items[0].read() == translated
+    low_level.assert_called_once()
+
+
+def test_owner_attempt_bypasses_legacy_renormalization_for_joined_ocr(monkeypatch) -> None:
+    source = "MYTHOUGHTSAREA BIT DIFFERENTTHOUGH"
+    translate_batch = unittest.mock.Mock(
+        return_value=["Meu pensamento e um pouco diferente"]
+    )
+    google = type(
+        "Google",
+        (),
+        {
+            "_cache": {},
+            "_persistent_cache": None,
+            "translate_batch": translate_batch,
+        },
+    )()
+    monkeypatch.setattr(translate_module, "_google", google)
+
+    result = translate_module.translate_one_owner_attempt(
+        {
+            "page_id": "page_012",
+            "texts": [
+                {
+                    "id": "owner-a",
+                    "owner_id": "owner-a",
+                    "text": source,
+                    "original": source,
+                    "semantic_role": "dialogue_body",
+                    "tipo": "dialogue_body",
+                    "route_action": "translate_inpaint_render",
+                    "component_ids": ["component-a"],
+                }
+            ],
+        },
+        "obra",
+        {},
+        {},
+        idioma_destino="pt-BR",
+        idioma_origem="en",
+        qualidade="normal",
+        ollama_host="http://localhost:11434",
+        ollama_model="traduzai-translator",
+        models_dir="",
+        translation_context=None,
+        control=translate_module.TranslationAttemptControl(
+            "google", "primary", True
+        ),
+    )
+
+    translated = result.translated_items[0].read()["texts"][0]
+    assert translated["route_action"] == "translate_inpaint_render"
+    assert translated["translated"] == "MEU PENSAMENTO E UM POUCO DIFERENTE"
+    translate_batch.assert_called_once_with(["Mythoughtsarea bit differentthough"])
+
+
+def test_forced_ollama_attempt_disables_hidden_google_repair(monkeypatch) -> None:
+    translated = {
+        "texts": [
+            {
+                "id": "owner-a",
+                "owner_id": "owner-a",
+                "translated": "O JOGADOR TEM 10 ABATES",
+            }
+        ]
+    }
+    low_level = unittest.mock.Mock(return_value=[translated])
+    monkeypatch.setattr(translate_module, "_translate_with_ollama", low_level)
+
+    result = translate_module.translate_one_owner_attempt(
+        _owned_legacy_page(),
+        "obra",
+        {},
+        {},
+        idioma_destino="pt-BR",
+        idioma_origem="en",
+        qualidade="normal",
+        ollama_host="http://localhost:11434",
+        ollama_model="traduzai-translator",
+        models_dir="",
+        translation_context=None,
+        control=translate_module.TranslationAttemptControl(
+            "ollama", "local", True
+        ),
+    )
+
+    assert result.backend == "ollama"
+    assert low_level.call_args.kwargs["repair_translator"] is None
+
+
+def test_owner_ocr_recovery_attempt_reconstructs_source_then_translates_with_google(monkeypatch) -> None:
+    source = "ISSOANSRRAWO!HOOMO DIDINBEDODGEKMSSIMEOK'S SWPORBDSTRIKETFAOOEH..."
+    page = _owned_legacy_page()
+    page["texts"][0]["text"] = source
+    page["texts"][0]["original"] = source
+    captured: dict[str, str] = {}
+
+    def local_model(_model, system, user_msg, _host):
+        captured["system"] = system
+        captured["user"] = user_msg
+        return [{"id": "t1", "translated": "HOW DID HE DODGE KIM SIHYEOK'S SWORD STRIKE?"}]
+
+    def google(pages, *_args, **_kwargs):
+        captured["google_source"] = pages[0]["texts"][0]["text"]
+        result = pages[0].copy()
+        result["texts"] = [dict(pages[0]["texts"][0])]
+        result["texts"][0]["translated"] = "COMO ELE DESVIOU DO GOLPE DE ESPADA DE KIM SIHYEOK?"
+        return [result]
+
+    monkeypatch.setattr(translate_module, "_call_ollama", local_model)
+    monkeypatch.setattr(translate_module, "_translate_with_google", google)
+    monkeypatch.setattr(translate_module, "_google", type("Google", (), {"_cache": {}, "_persistent_cache": None})())
+    result = translate_module.translate_one_owner_attempt(
+        page, "obra", {"personagens": ["Kim Sihyeok"]}, {},
+        idioma_destino="pt-BR", idioma_origem="en", qualidade="normal",
+        ollama_host="http://localhost:11434", ollama_model="traduzai-translator",
+        models_dir="", translation_context=None,
+        control=translate_module.TranslationAttemptControl("ocr_recovery", "owner_ocr_recovery", True),
+    )
+    translated = result.translated_items[0].read()["texts"][0]["translated"]
+    assert translated.startswith("COMO ELE DESVIOU")
+    assert result.backend == "ocr_recovery"
+    assert "OCR" in captured["system"]
+    assert "HOW | DID | DODGE | KIM SIHYEOK | SWORD | STRIKE" in captured["system"]
+    assert source in captured["user"]
+    assert captured["google_source"] == "HOW DID HE DODGE KIM SIHYEOK'S SWORD STRIKE?"
+
+
+def test_source_preparation_repairs_only_digit_led_numeric_ocr_zero_confusions() -> None:
+    cases = (
+        ("IS ABOUT 20O MILLION WON", "Is about 200 million won"),
+        ("THE REWARD IS 1O0 GOLD", "The reward is 100 gold"),
+        ("THE SCORE IS 2OO", "The score is 200"),
+        ("WAS175,O0O POINTS,WHICH", "Was 175,000 points,which"),
+        ("HAS1O PLAYERS", "Has 10 players"),
+        ("O2 LEVEL IS SAFE", "O2 level is safe"),
+        ("B2B MATCH", "B2b match"),
+        ("ROOM20O CODE", "Room20o code"),
+        ("B52 BOMBER", "B52 bomber"),
+        ("ROOM FOR TWO", "Room for two"),
+    )
+    for source, prepared in cases:
+        assert translate_module._prepare_source_text_for_translation(
+            source,
+            "fala",
+            lang="en",
+        ) == prepared
+
+
+def test_google_owner_attempt_accepts_repaired_numeric_ocr_magnitude(monkeypatch) -> None:
+    source = "IS ABOUT 20O MILLION WON"
+    page = _owned_legacy_page()
+    page["texts"][0]["text"] = source
+    page["texts"][0]["original"] = source
+
+    class Google:
+        _cache = {}
+        _persistent_cache = None
+
+        def translate_batch(self, texts):
+            assert texts == ["Is about 200 million won"]
+            return ["É cerca de 200 milhões de won"]
+
+    monkeypatch.setattr(translate_module, "_google", Google())
+    result = translate_module.translate_one_owner_attempt(
+        page, "obra", {}, {},
+        idioma_destino="pt-BR", idioma_origem="en", qualidade="normal",
+        ollama_host="http://localhost:11434", ollama_model="traduzai-translator",
+        models_dir="", translation_context=None,
+        control=translate_module.TranslationAttemptControl("google", "owner_primary", True),
+    )
+
+    translated = result.translated_items[0].read()["texts"][0]
+    assert translated["original"] == source
+    assert translated["source_text_sent_to_translator"] == "Is about 200 million won"
+    assert translated["translated"] == "É CERCA DE 200 MILHÕES DE WON"
+    assert translated["locale_validation"]["status"] == "ok"
+    from translator.language_policy import validate_target_language
+
+    verdict = validate_target_language(
+        source=source,
+        target=translated["translated"],
+        role="dialogue_body",
+    )
+    assert verdict.accepted
+    assert verdict.numbers_equivalent
+
+
+def test_google_owner_attempt_accepts_glued_quantity_with_ocr_zero_confusion(monkeypatch) -> None:
+    source = "WAS175,O0O POINTS,WHICH"
+    page = _owned_legacy_page()
+    page["texts"][0]["text"] = source
+    page["texts"][0]["original"] = source
+
+    class Google:
+        _cache = {}
+        _persistent_cache = None
+
+        def translate_batch(self, texts):
+            assert texts == ["Was 175,000 points,which"]
+            return ["Foram 175.000 pontos, o que"]
+
+    monkeypatch.setattr(translate_module, "_google", Google())
+    result = translate_module.translate_one_owner_attempt(
+        page, "obra", {}, {},
+        idioma_destino="pt-BR", idioma_origem="en", qualidade="normal",
+        ollama_host="http://localhost:11434", ollama_model="traduzai-translator",
+        models_dir="", translation_context=None,
+        control=translate_module.TranslationAttemptControl("google", "owner_primary", True),
+    )
+
+    translated = result.translated_items[0].read()["texts"][0]
+    assert translated["original"] == source
+    assert translated["source_text_sent_to_translator"] == "Was 175,000 points,which"
+    assert translated["translated"] == "FORAM 175.000 PONTOS, O QUE"
+    assert translated["locale_validation"]["status"] == "ok"
+    from translator.language_policy import validate_target_language
+
+    verdict = validate_target_language(
+        source=source,
+        target=translated["translated"],
+        role="dialogue_body",
+    )
+    assert verdict.accepted
+    assert verdict.numbers_equivalent
+
+
+def test_low_level_provider_calls_are_owned_only_by_attempt_boundary() -> None:
+    tree = ast.parse(Path(translate_module.__file__).read_text(encoding="utf-8"))
+    offenders: list[str] = []
+    function_stack: list[str] = []
+
+    class Visitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node):
+            function_stack.append(node.name)
+            self.generic_visit(node)
+            function_stack.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id in {"_translate_with_google", "_translate_with_ollama"}
+                and (not function_stack or function_stack[-1] != "translate_one_owner_attempt")
+            ):
+                offenders.append(f"{node.func.id}:{node.lineno}")
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    assert offenders == []
+
+
+def test_enabled_owner_attempt_cache_reports_hit_without_fake_provider_call(
+    monkeypatch,
+) -> None:
+    translated = {
+        "texts": [
+            {
+                "id": "owner-a",
+                "owner_id": "owner-a",
+                "translated": "O JOGADOR TEM 10 ABATES",
+            }
+        ]
+    }
+    low_level = unittest.mock.Mock(return_value=[translated])
+    google = type(
+        "Google",
+        (),
+        {
+            "_cache": {"THE PLAYER HAS 10 KILLS": "O JOGADOR TEM 10 ABATES"},
+            "_persistent_cache": None,
+        },
+    )()
+    monkeypatch.setattr(translate_module, "_translate_with_google", low_level)
+    monkeypatch.setattr(translate_module, "_google", google)
+
+    result = translate_module.translate_one_owner_attempt(
+        _owned_legacy_page(),
+        "obra",
+        {},
+        {},
+        idioma_destino="pt-BR",
+        idioma_origem="en",
+        qualidade="normal",
+        ollama_host="http://localhost:11434",
+        ollama_model="traduzai-translator",
+        models_dir="",
+        translation_context=None,
+        control=translate_module.TranslationAttemptControl(
+            "google", "primary", False
+        ),
+    )
+
+    assert result.cache_hit is True
+    assert result.provider_called is False
+
+
+def test_disable_cache_bypasses_populated_owner_attempt_cache(monkeypatch) -> None:
+    translated = {
+        "texts": [
+            {
+                "id": "owner-a",
+                "owner_id": "owner-a",
+                "translated": "O JOGADOR TEM 10 ABATES",
+            }
+        ]
+    }
+    low_level = unittest.mock.Mock(return_value=[translated])
+    original_cache = {"THE PLAYER HAS 10 KILLS": "O JOGADOR TEM 10 ABATES"}
+    google = type(
+        "Google",
+        (),
+        {"_cache": original_cache, "_persistent_cache": None},
+    )()
+    monkeypatch.setattr(translate_module, "_translate_with_google", low_level)
+    monkeypatch.setattr(translate_module, "_google", google)
+
+    result = translate_module.translate_one_owner_attempt(
+        _owned_legacy_page(),
+        "obra",
+        {},
+        {},
+        idioma_destino="pt-BR",
+        idioma_origem="en",
+        qualidade="normal",
+        ollama_host="http://localhost:11434",
+        ollama_model="traduzai-translator",
+        models_dir="",
+        translation_context=None,
+        control=translate_module.TranslationAttemptControl(
+            "google", "contextual", True
+        ),
+    )
+
+    assert result.cache_hit is False
+    assert result.provider_called is True
+    assert google._cache is original_cache

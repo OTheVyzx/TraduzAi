@@ -43,6 +43,29 @@ from main import (
     _sync_page_legacy_aliases,
 )
 
+from hashlib import sha256
+from unittest.mock import Mock, patch
+from typesetter.owner_style import attach_owner_visual_profile, build_owner_visual_profile
+from typesetter.style_materialization import (
+    build_materialization_plan,
+    build_resolved_style_intent,
+)
+from ownership.hash_contract import sha256_text
+from ownership.model import (
+    OWNER_GRAPH_SCHEMA_VERSION,
+    ComponentDisposition,
+    OwnerGlyphPatch,
+    OwnerGraph,
+    OwnerProjection,
+    SourceTextComponent,
+    TextObservation,
+    TextOwner,
+    owner_style_raster_segment_sha256,
+    validate_owner_style_raster_contract,
+)
+from ownership.render_geometry import build_owner_render_geometry
+from ownership.delivery import seal_owner_text_execution_authority
+
 
 class TypesettingRendererTests(unittest.TestCase):
     _LEGACY_CONNECTED_DEFAULT_TESTS = set()
@@ -803,7 +826,7 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertGreater(capacity[3] - capacity[1], 430)
         self.assertIn("dark_lobe_visual_capacity_bbox", text_data["qa_flags"])
 
-    def test_dark_jagged_missing_lobe_anchor_splits_by_line_polygons(self):
+    def test_dark_jagged_missing_lobe_anchor_requires_review_despite_split_geometry(self):
         text_data = {
             "id": "page_003_band_047_like",
             "text_id": "direct_paddle_reocr_001",
@@ -849,25 +872,29 @@ class TypesettingRendererTests(unittest.TestCase):
             },
         }
 
-        blocks = build_render_blocks([text_data])
-
-        self.assertEqual(len(blocks), 2)
-        self.assertEqual([block["translated"] for block in blocks], ["Evite isso, rapidamente!", "e nosso inimigo!"])
-        self.assertEqual([block["id"] for block in blocks], ["page_003_band_047_like_fragment_1", "page_003_band_047_like_fragment_2"])
+        split_candidates = renderer_mod._split_single_ocr_visual_lobes(dict(text_data))
+        self.assertIsNotNone(split_candidates)
+        self.assertEqual(len(split_candidates), 2)
+        self.assertEqual([block["translated"] for block in split_candidates], ["Evite isso, rapidamente!", "e nosso inimigo!"])
+        self.assertEqual([block["id"] for block in split_candidates], ["page_003_band_047_like_fragment_1", "page_003_band_047_like_fragment_2"])
         self.assertEqual(
-            [block["text_id"] for block in blocks],
+            [block["text_id"] for block in split_candidates],
             ["direct_paddle_reocr_001_fragment_1", "direct_paddle_reocr_001_fragment_2"],
         )
-        self.assertTrue(all("dark_missing_anchor_visual_lobes_split" in (block.get("qa_flags") or []) for block in blocks))
-        self.assertEqual(blocks[0]["source_text_mask_bbox"], [89, 25, 325, 78])
-        self.assertEqual(blocks[1]["source_text_mask_bbox"], [107, 560, 319, 611])
-        self.assertEqual(blocks[0]["qa_metrics"]["dark_missing_anchor_visual_lobe_split"]["index"], 0)
-        self.assertEqual(blocks[1]["qa_metrics"]["dark_missing_anchor_visual_lobe_split"]["index"], 1)
-        self.assertLess(blocks[0]["target_bbox"][3], 120)
-        self.assertGreater(blocks[1]["target_bbox"][1], 520)
-        self.assertLess(blocks[1]["target_bbox"][3], 640)
-        self.assertNotEqual(blocks[0]["target_bbox"], [0, 0, 538, 859])
-        self.assertNotEqual(blocks[1]["target_bbox"], [0, 0, 538, 859])
+        self.assertTrue(all("dark_missing_anchor_visual_lobes_split" in (block.get("qa_flags") or []) for block in split_candidates))
+        self.assertEqual(split_candidates[0]["source_text_mask_bbox"], [89, 25, 325, 78])
+        self.assertEqual(build_render_blocks([text_data]), [])
+        self.assertEqual(text_data["route_action"], "review_required")
+        self.assertEqual(text_data["route_reason"], "unsafe_automatic_render")
+        self.assertIn("unsafe_automatic_render_suppressed", text_data["qa_flags"])
+        self.assertEqual(split_candidates[1]["source_text_mask_bbox"], [107, 560, 319, 611])
+        self.assertEqual(split_candidates[0]["qa_metrics"]["dark_missing_anchor_visual_lobe_split"]["index"], 0)
+        self.assertEqual(split_candidates[1]["qa_metrics"]["dark_missing_anchor_visual_lobe_split"]["index"], 1)
+        self.assertLess(split_candidates[0]["target_bbox"][3], 120)
+        self.assertGreater(split_candidates[1]["target_bbox"][1], 520)
+        self.assertLess(split_candidates[1]["target_bbox"][3], 640)
+        self.assertNotEqual(split_candidates[0]["target_bbox"], [0, 0, 538, 859])
+        self.assertNotEqual(split_candidates[1]["target_bbox"], [0, 0, 538, 859])
 
     def test_dark_connected_lobe_prefers_source_text_mask_bbox_for_anchor_and_scale(self):
         text_data = {
@@ -12419,6 +12446,2052 @@ class TypesettingRendererTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(img.getpixel((90, 44)), (254, 254, 254))
         self.assertNotIn("sfx_white_bubble_background_removed", text.get("qa_metrics", {}))
+
+
+    def test_verified_v2_owner_style_is_not_renormalized_as_auto(self):
+        image = Image.new("RGB", (80, 60), "white")
+        profile = {
+            "owner_id": "owner_v2",
+            "visual_profile_sha256": "a" * 64,
+            "applied_style": {"cor": "#F8F8F8", "fonte": "ComicNeue-Bold.ttf"},
+        }
+        intent = {
+            "owner_id": "owner_v2",
+            "page_id": "page_001",
+            "visual_profile_sha256": "a" * 64,
+            "intent_sha256": "b" * 64,
+            "approved_attributes": {"fill": "#F8F8F8"},
+            "approved_abstentions": {},
+        }
+        block = {
+            "owner_id": "owner_v2",
+            "visual_profile_v2": profile,
+            "visual_profile_sha256": "a" * 64,
+            "style_resolved_intent_v1": intent,
+            "estilo": {
+                "cor": "#000000",
+                "fonte": "Legacy.ttf",
+                "glow": False,
+            },
+            "bbox": [5, 5, 70, 50],
+        }
+        profile_before = json.loads(json.dumps(profile))
+        intent_before = json.loads(json.dumps(intent))
+
+        with patch(
+            "typesetter.renderer.validate_owner_visual_profile",
+            return_value=profile,
+        ):
+            renderer_mod._apply_auto_style_policy_if_needed(image, block)
+
+        self.assertEqual(block["visual_profile_v2"], profile_before)
+        self.assertEqual(block["style_resolved_intent_v1"], intent_before)
+        self.assertEqual(block["style_origin"], "owner_style_v2")
+        self.assertEqual(block["estilo"]["cor"], "#F8F8F8")
+        self.assertEqual(block["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+
+
+    def test_layout_observation_uses_final_fit_and_positions_not_request_echo(self):
+        observed = renderer_mod._observe_layout_materialization(
+            {
+                "font_size_final": 36,
+                "safe_text_box": [0, 0, 200, 80],
+                "render_layout_contract": {
+                    "lines": ["TESTE"],
+                    "positions": [[24, 20]],
+                    "line_widths": [80],
+                    "line_height": 40,
+                    "block_bbox": [24, 20, 104, 60],
+                },
+            },
+            attribute_names={"font_size_px", "alignment"},
+        )
+
+        self.assertEqual(observed["font_size_px"]["canonical_value"], 36)
+        self.assertEqual(observed["alignment"]["canonical_value"], "left")
+        self.assertEqual(observed["alignment"]["evidence_kind"], "final_glyph_positions")
+        self.assertEqual(len(observed["alignment"]["evidence_sha256"]), 64)
+
+
+    def test_tracking_and_curve_are_observed_from_final_glyph_run(self):
+        run = renderer_mod.RenderedGlyphRun.build(
+            text="AB",
+            font_spans=((0, 2, "font-sha"),),
+            glyphs=(
+                renderer_mod.RenderedGlyphPose(65, 1, 10.0, 20.0, 12.0, (10, 10, 20, 30), -8.0),
+                renderer_mod.RenderedGlyphPose(66, 2, 25.0, 18.0, 12.0, (25, 8, 35, 28), 8.0),
+            ),
+            rendered_x_height_px=20.0,
+            nominal_advances=(10.0,),
+        )
+
+        observed = renderer_mod._observe_layout_materialization(
+            {"_rendered_glyph_run": run.to_dict()},
+            attribute_names={"tracking_xh", "curve"},
+        )
+
+        self.assertEqual(observed["tracking_xh"]["evidence_kind"], "glyph_run")
+        self.assertEqual(observed["curve"]["evidence_kind"], "glyph_run")
+        self.assertEqual(
+            observed["curve"]["metrics"]["glyph_poses_sha256"],
+            run.glyph_poses_sha256,
+        )
+
+
+    def test_owner_tracking_changes_glyph_advances_and_raster_width_once(self):
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 30)
+        plain = renderer_mod._render_v2_owner_core_mask(
+            (100, 240), ["TESTE"], font, [(60, 30)], tracking_xh=0.0, alignment="left"
+        )
+        tracked = renderer_mod._render_v2_owner_core_mask(
+            (100, 240), ["TESTE"], font, [(60, 30)], tracking_xh=0.15, alignment="left"
+        )
+        run = renderer_mod._build_linear_rendered_glyph_run(
+            ["TESTE"], [(60, 30)], font, tracking_xh=0.15, alignment="left"
+        )
+        observed = renderer_mod._observe_layout_materialization(
+            {"_rendered_glyph_run": run.to_dict()},
+            attribute_names={"tracking_xh"},
+        )
+
+        plain_bbox = cv2.boundingRect(cv2.findNonZero(plain))
+        tracked_bbox = cv2.boundingRect(cv2.findNonZero(tracked))
+        self.assertGreater(tracked_bbox[2], plain_bbox[2])
+        self.assertAlmostEqual(observed["tracking_xh"]["canonical_value"], 0.15, places=6)
+
+
+    def test_complete_materialization_observation_merges_disjoint_domains(self):
+        owner_id = "owner_domains"
+        page_id = "page_001"
+        profile_sha = "a" * 64
+        identity = {
+            "filename": "ComicNeue-Bold.ttf",
+            "file_sha256": "b" * 64,
+            "family": "Comic Neue",
+            "subfamily": "Bold",
+            "postscript_name": "ComicNeue-Bold",
+            "weight_class": 700,
+            "width_class": 5,
+            "variation_axes": [],
+        }
+        intent = build_resolved_style_intent(
+            owner_id=owner_id,
+            page_id=page_id,
+            visual_profile_sha256=profile_sha,
+            decision_sha256="c" * 64,
+            group_resolution_sha256="d" * 64,
+            approved={
+                "font_size_px": 36,
+                "alignment": "left",
+                "font_name": "ComicNeue-Bold.ttf",
+                "fill": "#FFFFFF",
+            },
+            approved_abstentions={},
+        )
+        plan = build_materialization_plan(
+            intent=intent,
+            render_layout_contract_sha256="e" * 64,
+            targets={
+                "font_size_px": 36,
+                "alignment": "left",
+                "font_name": identity,
+                "fill": "#FFFFFF",
+            },
+            resolution_kinds={
+                "font_size_px": "exact",
+                "alignment": "exact",
+                "font_name": "exact",
+                "fill": "exact",
+            },
+            rendered_x_height_px=25.2,
+        )
+        text_data = {
+            "_sealed_materialization_plan_v1": plan.to_dict(),
+            "font_size_final": 36,
+            "safe_text_box": [0, 0, 200, 80],
+            "render_layout_contract": {
+                "lines": ["TESTE"],
+                "positions": [[10, 20]],
+                "line_widths": [80],
+                "line_height": 40,
+                "block_bbox": [10, 20, 90, 60],
+            },
+            "_style_v2_font_observation": {
+                "font_name": {
+                    "value": identity,
+                    "evidence_kind": "resolved_font_file",
+                    "evidence_sha256": "f" * 64,
+                }
+            },
+        }
+        before = np.zeros((80, 200, 3), dtype=np.uint8)
+        rendered = before.copy()
+        glyph = np.zeros((80, 200), dtype=np.uint8)
+        glyph[20:60, 10:90] = 255
+        rendered[glyph > 0] = 255
+        rgba = np.zeros((80, 200, 4), dtype=np.uint8)
+        rgba[glyph > 0] = (255, 255, 255, 255)
+        raster = renderer_mod.GlyphRasterResult(
+            status="applied",
+            rgba=rgba,
+            glyph_core_mask=glyph,
+            effect_mask=np.zeros_like(glyph),
+            glyph_core_envelope=(10, 20, 90, 60),
+            effect_envelope=None,
+            observed_attributes={"fill": "#FFFFFF"},
+            abstained_attributes={},
+            metrics={},
+            attribute_evidence={"fill": {"evidence_kind": "layer_pixels_and_mask"}},
+            attribute_evidence_sha256={"fill": "1" * 64},
+        )
+        profile = {
+            "visual_profile_sha256": profile_sha,
+            "component_geometry_sha256": "2" * 64,
+            "source_sha256": "3" * 64,
+            "glyph_mask_sha256": "4" * 64,
+            "status": "applied",
+        }
+
+        with patch(
+            "typesetter.renderer.validate_owner_visual_profile",
+            return_value=profile,
+        ):
+            contract = renderer_mod._build_owner_style_raster_contract(
+                owner_id=owner_id,
+                page_id=page_id,
+                profile=profile,
+                execution_component_geometry_sha256="5" * 64,
+                before=before,
+                rendered=rendered,
+                glyph_mask=glyph,
+                render_completed=True,
+                raster_result=raster,
+                render_quality_contract=Mock(to_dict=lambda: {"status": "ok"}),
+                text_data=text_data,
+            )
+
+        payload = contract.to_dict()
+        validate_owner_style_raster_contract(
+            contract,
+            expected_owner_id=owner_id,
+            expected_page_id=page_id,
+        )
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["materialization_status"], "match")
+        domains = {
+            row["domain"]
+            for row in payload["materialization_observation"]["attributes"].values()
+        }
+        self.assertEqual(domains, {"layout", "font", "raster"})
+        self.assertTrue(
+            all(
+                row["evidence_sha256"]
+                for row in payload["materialization_observation"]["attributes"].values()
+            )
+        )
+
+
+    def test_materialization_plan_seals_final_fit_without_rewriting_intent(self):
+        owner_id = "owner_fit"
+        page_id = "page_001"
+        profile_sha = "a" * 64
+        intent = build_resolved_style_intent(
+            owner_id=owner_id,
+            page_id=page_id,
+            visual_profile_sha256=profile_sha,
+            decision_sha256="b" * 64,
+            group_resolution_sha256="c" * 64,
+            approved={
+                "font_size_px": 48,
+                "fill": "#FFFFFF",
+                "stroke": {"color": "#000000", "width_xh": 0.1},
+                "glow": {
+                    "color": "#FFCC00",
+                    "width_px": 3,
+                    "width_xh": 0.19,
+                },
+                "shadow": {"color": "#202030", "offset": [2.6, 1.4]},
+            },
+            approved_abstentions={},
+        )
+        block = {
+            "owner_id": owner_id,
+            "page_id": page_id,
+            "visual_profile_sha256": profile_sha,
+            "visual_profile_v2": {"visual_profile_sha256": profile_sha},
+            "style_resolved_intent_v1": intent.to_dict(),
+            "font_size_final": 36,
+            "render_layout_contract": {
+                "font_size": 36,
+                "lines": ["TESTE"],
+                "positions": [[20, 20]],
+                "line_widths": [80],
+                "line_height": 40,
+                "block_bbox": [20, 20, 100, 60],
+                "safe_text_box": [0, 0, 160, 80],
+            },
+        }
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 36)
+
+        with patch(
+            "typesetter.renderer.validate_owner_visual_profile",
+            return_value={"visual_profile_sha256": profile_sha},
+        ):
+            renderer_mod._seal_owner_materialization_plan(
+                block,
+                {
+                    "alignment": "center",
+                    "outline_color": "#000000",
+                    "outline_px": 3,
+                    "glow": True,
+                    "glow_cor": "#FFCC00",
+                    "glow_px": 3,
+                    "sombra": True,
+                    "sombra_cor": "#202030",
+                    "sombra_offset": [2.6, 1.4],
+                },
+                font,
+                ["TESTE"],
+                [(20, 20)],
+            )
+
+        sealed = block["_sealed_materialization_plan_v1"]
+        font_size = sealed["attribute_plans"]["font_size_px"]
+        self.assertEqual(font_size["intent_value"], 48)
+        self.assertEqual(font_size["target_value"], 36)
+        self.assertEqual(font_size["resolution_kind"], "policy_adjusted")
+        self.assertEqual(
+            sealed["attribute_plans"]["stroke"]["target_value"],
+            {"color": "#000000", "width_px": 3},
+        )
+        self.assertEqual(
+            sealed["attribute_plans"]["glow"]["target_value"],
+            {"color": "#FFCC00", "width_px": 3},
+        )
+        self.assertEqual(
+            sealed["attribute_plans"]["shadow"]["target_value"],
+            {"color": "#202030", "offset": [3, 1]},
+        )
+        self.assertEqual(intent.to_dict()["approved_attributes"]["font_size_px"], 48)
+
+
+    def test_font_observation_comes_from_faces_used_by_text_raster(self):
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
+
+        mask = _build_textpath_mask(font, "AÇÃO", padding=0)
+
+        observation = font._font_run_observation_cache["AÇÃO"]
+        self.assertGreater(np.count_nonzero(mask), 0)
+        self.assertEqual(observation["text"], "AÇÃO")
+        self.assertTrue(observation["spans"])
+        self.assertEqual(len(observation["primary_identity"]["file_sha256"]), 64)
+        self.assertEqual(len(observation["observation_sha256"]), 64)
+
+
+    def test_v2_owner_fill_stroke_and_glow_produce_nonempty_raster(self):
+        canvas = np.zeros((120, 240, 3), dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
+        block = {
+            "visual_profile_v2": {
+                "applied_style": {
+                    "cor": "#FFFFFF",
+                    "contorno": "#161616",
+                    "contorno_px": 2,
+                    "glow": True,
+                    "glow_cor": "#FFD34D",
+                    "glow_px": 3,
+                }
+            },
+            "render_safe_polygon_page": [[0, 0], [240, 0], [240, 120], [0, 120]],
+        }
+        plan = {
+            "safe_text_box": [0, 0, 240, 120],
+            "text_color": "#FFFFFF",
+            "outline_color": "#161616",
+            "outline_px": 2,
+            "glow": True,
+            "glow_cor": "#FFD34D",
+            "glow_px": 3,
+        }
+
+        result = renderer_mod._render_v2_owner_text_layer(
+            canvas, block, plan, ["TESTE"], font, [(40, 35)]
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "applied")
+        self.assertGreater(np.count_nonzero(result.rgba[:, :, 3]), 0)
+        self.assertNotEqual(block.get("fit_status"), "style_attribute_not_materialized")
+
+
+    def test_v2_owner_renderer_preserves_directional_gradient_geometry(self):
+        canvas = np.zeros((120, 240, 3), dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
+        gradient = {
+            "kind": "linear",
+            "colors": ["#6A36B8", "#181818"],
+            "stops": [0.0, 1.0],
+            "start": [0.20, 0.15],
+            "end": [0.80, 0.90],
+            "coordinate_space": "glyph_bbox_normalized",
+        }
+        block = {
+            "visual_profile_v2": {
+                "applied_style": {"cor": "#6A36B8", "gradient": gradient}
+            },
+            "render_safe_polygon_page": [[0, 0], [240, 0], [240, 120], [0, 120]],
+        }
+        plan = {
+            "safe_text_box": [0, 0, 240, 120],
+            "text_color": "#6A36B8",
+            "cor_gradiente": gradient,
+            "alignment": "center",
+        }
+
+        result = renderer_mod._render_v2_owner_text_layer(
+            canvas, block, plan, ["TESTE"], font, [(40, 35)]
+        )
+
+        self.assertIsNotNone(result)
+        observed = result.observed_attributes["gradient"]
+        self.assertEqual(observed["start"], gradient["start"])
+        self.assertEqual(observed["end"], gradient["end"])
+        self.assertEqual(observed["coordinate_space"], "glyph_bbox_normalized")
+
+
+    def test_v2_owner_fallback_without_approved_attributes_produces_normal_glyph_evidence(self):
+        canvas = np.zeros((120, 240, 3), dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Regular.ttf"), 28)
+        block = {
+            "visual_profile_v2": {
+                "status": "fallback",
+                "style_application_decision_v2": {
+                    "status": "fallback",
+                    "applied_attributes": {},
+                    "abstained_attributes": {"stroke": "attribute_confidence_below_threshold"},
+                },
+                "applied_style": {"fonte": "ComicNeue-Regular.ttf", "cor": "#000000"},
+            },
+            "render_safe_polygon_page": [[0, 0], [240, 0], [240, 120], [0, 120]],
+        }
+        plan = {
+            "safe_text_box": [0, 0, 240, 120],
+            "text_color": "#000000",
+            "alignment": "center",
+        }
+
+        result = renderer_mod._render_v2_owner_text_layer(
+            canvas, block, plan, ["TESTE"], font, [(40, 35)]
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "applied")
+        self.assertGreater(np.count_nonzero(result.glyph_core_mask), 0)
+        self.assertNotIn("_sealed_materialization_plan_v1", block)
+
+
+    def test_v2_owner_effects_use_container_paint_safe_not_layout_chord(self):
+        canvas = np.zeros((120, 240, 3), dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
+        core = np.zeros((120, 240), dtype=np.uint8)
+        core[40:80, 40:200] = 255
+        block = {
+            "visual_profile_v2": {
+                "applied_style": {
+                    "cor": "#FFFFFF",
+                    "glow": True,
+                    "glow_cor": "#FFD34D",
+                    "glow_px": 3,
+                }
+            },
+            "render_safe_polygon_page": [[40, 20], [200, 20], [200, 100], [40, 100]],
+            "paint_safe_polygon_page": [[20, 0], [220, 0], [220, 119], [20, 119]],
+        }
+        plan = {
+            "safe_text_box": [40, 20, 200, 100],
+            "text_color": "#FFFFFF",
+            "glow": True,
+            "glow_cor": "#FFD34D",
+            "glow_px": 3,
+        }
+
+        result = renderer_mod._render_v2_owner_text_layer(
+            canvas,
+            block,
+            plan,
+            ["TESTE"],
+            font,
+            [(40, 35)],
+            core_override=core,
+        )
+
+        self.assertEqual(result.status, "applied")
+        self.assertIn("glow", result.observed_attributes)
+        self.assertGreater(np.count_nonzero(result.effect_mask[:, :40]), 0)
+
+
+    def test_v2_owner_raster_executes_approved_intent_when_legacy_plan_omits_glow(self):
+        canvas = np.zeros((120, 240, 3), dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 28)
+        profile_sha = "a" * 64
+        intent = build_resolved_style_intent(
+            owner_id="owner_intent_glow",
+            page_id="page_001",
+            visual_profile_sha256=profile_sha,
+            decision_sha256="b" * 64,
+            group_resolution_sha256="c" * 64,
+            approved={"glow": {"color": "#FFD34D", "width_px": 5}},
+            approved_abstentions={},
+        )
+        block = {
+            "owner_id": "owner_intent_glow",
+            "page_id": "page_001",
+            "visual_profile_sha256": profile_sha,
+            "visual_profile_v2": {
+                "visual_profile_sha256": profile_sha,
+                "applied_style": {"cor": "#FFFFFF", "glow": False},
+            },
+            "style_resolved_intent_v1": intent.to_dict(),
+            "font_size_final": 28,
+            "render_layout_contract": {
+                "font_size": 28,
+                "lines": ["TESTE"],
+                "positions": [[40, 35]],
+                "line_widths": [80],
+                "line_height": 32,
+                "block_bbox": [40, 35, 120, 67],
+                "safe_text_box": [20, 10, 220, 110],
+            },
+            "render_safe_polygon_page": [[30, 20], [210, 20], [210, 100], [30, 100]],
+            "paint_safe_polygon_page": [[10, 0], [230, 0], [230, 119], [10, 119]],
+        }
+        layout_plan = {
+            "safe_text_box": [20, 10, 220, 110],
+            "text_color": "#FFFFFF",
+            "alignment": "center",
+        }
+
+        with patch(
+            "typesetter.renderer.validate_owner_visual_profile",
+            return_value={
+                "visual_profile_sha256": profile_sha,
+                "applied_style": block["visual_profile_v2"]["applied_style"],
+            },
+        ):
+            result = renderer_mod._render_v2_owner_text_layer(
+                canvas, block, layout_plan, ["TESTE"], font, [(40, 35)]
+            )
+
+        sealed_glow = block["_sealed_materialization_plan_v1"]["attribute_plans"]["glow"]
+        self.assertEqual(sealed_glow["target_value"], {"color": "#FFD34D", "width_px": 5})
+        self.assertIn("glow", result.observed_attributes)
+        self.assertEqual(result.observed_attributes["glow"]["width_px"], 5)
+
+
+    def test_owner_renderer_rejects_underfilled_fit_inside_safe_box(self):
+        canvas = np.full((220, 320, 3), 235, dtype=np.uint8)
+        image = Image.fromarray(canvas.copy(), mode="RGB")
+        block = {
+            "owner_id": "owner_underfilled",
+            "translated": "OK",
+            "translated_payload": "OK",
+            "render_safe_polygon_page": [[20, 20], [300, 20], [300, 200], [20, 200]],
+            "layout_regions": [],
+            "bbox": [20, 20, 300, 200],
+            "safe_text_box": [20, 20, 300, 200],
+            "layout_safe_bbox": [20, 20, 300, 200],
+            "layout_bbox": [20, 20, 300, 200],
+            "balloon_bbox": [20, 20, 300, 200],
+            "page_width": 320,
+            "page_height": 220,
+            "layout_profile": "white_balloon",
+            "source_font_bounds_px": [12, 12],
+            "container_font_bounds_px": [12, 12],
+            "source_scale_evidence_confidence": 0.0,
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "cor": "#111111"},
+            "_owner_render_mode": True,
+        }
+
+        render_text_block(image, block)
+
+        self.assertEqual(block["fit_status"], "below_proportional_legibility")
+        self.assertFalse(block["render_completed"])
+        self.assertEqual(block["route_action"], "review_required")
+        self.assertTrue(np.array_equal(np.asarray(image), canvas))
+
+
+    def test_owner_renderer_retries_smaller_size_when_effect_envelope_does_not_fit(self):
+        canvas = np.full((120, 220, 3), 20, dtype=np.uint8)
+        image = Image.fromarray(canvas.copy(), mode="RGB")
+        block = {
+            "owner_id": "owner_glow_fit",
+            "translated": "DEPRESSA, DEPRESSA!",
+            "translated_payload": "DEPRESSA, DEPRESSA!",
+            "render_safe_polygon_page": [[20, 20], [200, 20], [200, 100], [20, 100]],
+            "paint_safe_polygon_page": [[10, 10], [210, 10], [210, 110], [10, 110]],
+            "safe_text_box": [20, 20, 200, 100],
+            "bbox": [20, 20, 200, 100],
+            "layout_regions": [],
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "glow": True, "glow_px": 5},
+            "_owner_render_mode": True,
+        }
+        attempted_sizes = []
+
+        def plan(candidate):
+            bounds = candidate.get("source_font_bounds_px") or [19, 20]
+            return {
+                "font_size_bounds_px": list(bounds),
+                "safe_text_box": [20, 20, 200, 100],
+                "target_bbox": [20, 20, 200, 100],
+                "max_width": 180,
+                "max_height": 80,
+                "font_name": "ComicNeue-Bold.ttf",
+                "line_spacing_ratio": 0.2,
+                "layout_profile": "dark_bubble",
+                "trusted_container": True,
+            }
+
+        def render_candidate(trial_image, child, _plan, **_kwargs):
+            size = int(child["source_font_bounds_px"][0])
+            attempted_sizes.append(size)
+            child.update(
+                {
+                    "fit_status": "ok",
+                    "render_bbox": [60, 45, 160, 75],
+                    "font_size_final": size,
+                    "minimum_legible_font_px": 19,
+                }
+            )
+            core = np.zeros(canvas.shape[:2], dtype=np.uint8)
+            core[45:75, 60:160] = 255
+            rgba = np.zeros((*canvas.shape[:2], 4), dtype=np.uint8)
+            rgba[core > 0] = (255, 255, 255, 255)
+            ImageDraw.Draw(trial_image).rectangle((60, 45, 159, 74), fill=(255, 255, 255))
+            return renderer_mod.GlyphRasterResult(
+                status="fallback" if size == 20 else "applied",
+                rgba=rgba,
+                glyph_core_mask=core,
+                effect_mask=np.zeros_like(core),
+                glyph_core_envelope=(60, 45, 160, 75),
+                effect_envelope=None,
+                observed_attributes={"fill": "#FFFFFF"},
+                abstained_attributes=(
+                    {"glow": "effect_envelope_outside_safe"} if size == 20 else {}
+                ),
+                metrics={"core_pixels_outside_safe": 0},
+                unavailable_attributes=(
+                    {"glow": "effect_envelope_outside_safe"} if size == 20 else {}
+                ),
+            )
+
+        quality = {
+            "status": "ok",
+            "source_scale_ratio": 1.0,
+            "safe_height_occupancy": 0.5,
+            "font_size_final": 19,
+        }
+        with (
+            patch("typesetter.renderer.plan_text_layout", side_effect=plan),
+            patch("typesetter.renderer._fits_in_box", return_value=True),
+            patch("typesetter.renderer._render_single_text_block", side_effect=render_candidate),
+            patch("typesetter.renderer._evaluate_rendered_owner_candidate", return_value=quality),
+            patch("typesetter.renderer._minimum_legible_font_px", return_value=19),
+        ):
+            result = renderer_mod._render_single_owner_proportionally(
+                image, block, pre_render_np=None
+            )
+
+        self.assertEqual(attempted_sizes, [20, 19])
+        self.assertEqual(block["font_size_final"], 19)
+        self.assertEqual(block["fit_status"], "ok")
+        self.assertEqual(result.status, "applied")
+
+
+    def test_owner_renderer_caps_proportional_candidate_attempts(self):
+        canvas = np.full((120, 220, 3), 20, dtype=np.uint8)
+        image = Image.fromarray(canvas.copy(), mode="RGB")
+        block = {
+            "owner_id": "owner_many_sizes",
+            "translated": "4,6 BILHOES......",
+            "translated_payload": "4,6 BILHOES......",
+            "render_safe_polygon_page": [[20, 20], [200, 20], [200, 100], [20, 100]],
+            "paint_safe_polygon_page": [[10, 10], [210, 10], [210, 110], [10, 110]],
+            "safe_text_box": [20, 20, 200, 100],
+            "bbox": [20, 20, 200, 100],
+            "layout_regions": [],
+            "estilo": {"fonte": "ComicNeue-Bold.ttf"},
+            "_owner_render_mode": True,
+        }
+        attempted_sizes = []
+
+        def plan(candidate):
+            bounds = candidate.get("source_font_bounds_px") or [6, 96]
+            return {
+                "font_size_bounds_px": list(bounds),
+                "safe_text_box": [20, 20, 200, 100],
+                "target_bbox": [20, 20, 200, 100],
+                "max_width": 180,
+                "max_height": 80,
+                "font_name": "ComicNeue-Bold.ttf",
+                "line_spacing_ratio": 0.2,
+                "layout_profile": "colored_status_panel",
+                "trusted_container": True,
+            }
+
+        def render_candidate(_trial_image, child, _plan, **_kwargs):
+            size = int(child["source_font_bounds_px"][0])
+            attempted_sizes.append(size)
+            child.update(
+                {
+                    "fit_status": "ok",
+                    "render_bbox": [18, 18, 202, 102],
+                    "font_size_final": size,
+                    "minimum_legible_font_px": 6,
+                }
+            )
+            return None
+
+        with (
+            patch("typesetter.renderer.plan_text_layout", side_effect=plan),
+            patch("typesetter.renderer._owner_candidate_font_sizes", return_value=range(96, 5, -1)),
+            patch("typesetter.renderer._fits_in_box", return_value=True),
+            patch("typesetter.renderer._render_single_text_block", side_effect=render_candidate),
+            patch(
+                "typesetter.renderer._evaluate_rendered_owner_candidate",
+                return_value={"status": "core_pixels_outside_safe_polygon", "font_size_final": 0},
+            ),
+            patch("typesetter.renderer._minimum_legible_font_px", return_value=6),
+        ):
+            result = renderer_mod._render_single_owner_proportionally(
+                image, block, pre_render_np=None
+            )
+
+        self.assertIsNone(result)
+        self.assertLessEqual(len(attempted_sizes), 16)
+        self.assertIn(96, attempted_sizes)
+        self.assertIn(6, attempted_sizes)
+        self.assertEqual(block["fit_status"], "below_proportional_legibility")
+        self.assertIn("owner_render_review_required", block["qa_flags"])
+
+
+    def test_owner_renderer_applies_functional_contrast_on_dark_region(self):
+        canvas = np.full((100, 180, 3), 8, dtype=np.uint8)
+        image = Image.fromarray(canvas.copy(), mode="RGB")
+        block = {
+            "id": "owner_dark",
+            "owner_id": "owner_dark",
+            "page_id": "page_001",
+            "translated": "TEXTO LEGIVEL",
+            "translated_payload": "TEXTO LEGIVEL",
+            "layout_regions": [
+                {
+                    "layout_region_id": "owner_dark__component",
+                    "owner_id": "owner_dark",
+                    "order": 0,
+                    "bbox_page": [20, 20, 160, 80],
+                    "safe_polygon_page": [[20, 20], [160, 20], [160, 80], [20, 80]],
+                }
+            ],
+            "render_safe_polygon_page": [[20, 20], [160, 20], [160, 80], [20, 80]],
+            "safe_text_box": [20, 20, 160, 80],
+            "layout_safe_bbox": [20, 20, 160, 80],
+            "layout_bbox": [20, 20, 160, 80],
+            "balloon_bbox": [20, 20, 160, 80],
+            "bbox": [20, 20, 160, 80],
+            "_owner_render_mode": True,
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "cor": "#000000"},
+            "visual_profile": {"fonte": "ComicNeue-Bold.ttf", "cor": "#000000"},
+        }
+
+        renderer_mod._render_owner_text_block(image, block)
+
+        rendered = np.asarray(image)
+        changed = np.any(rendered != canvas, axis=2)
+        self.assertTrue(np.any(changed))
+        self.assertGreater(float(rendered[changed].mean()), 150.0)
+        self.assertEqual(block["estilo"]["cor"], "#FFFFFF")
+
+
+    def test_owner_renderer_applies_uppercase_only_to_visual_alias(self):
+        image = Image.new("RGB", (180, 100), (255, 255, 255))
+        payload = "Olha esse cara agindo"
+        block = {
+            "owner_id": "owner_upper",
+            "translated": payload,
+            "translated_payload": payload,
+            "semantic_role": "dialogue_body",
+            "layout_regions": [],
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "force_upper": False},
+            "_owner_render_mode": True,
+        }
+        observed = {}
+
+        def capture(_image, visual_block, **_kwargs):
+            observed["translated"] = visual_block.get("translated")
+            observed["translated_payload"] = visual_block.get("translated_payload")
+            return None
+
+        with patch(
+            "typesetter.renderer._render_single_owner_proportionally",
+            side_effect=capture,
+        ):
+            renderer_mod._render_owner_text_block(image, block)
+
+        self.assertEqual(observed["translated"], payload.upper())
+        self.assertEqual(observed["translated_payload"], payload)
+        self.assertEqual(block["translated"], payload)
+        self.assertEqual(block["translated_payload"], payload)
+
+
+    def test_render_band_image_owner_mode_returns_logical_page_glyph_patch(self):
+        canvas = np.full((120, 180, 3), 235, dtype=np.uint8)
+        action_mask_ref = (
+            "owner_masks/owner_body--"
+            f"{sha256(b'owner_body').hexdigest()[:12]}/"
+            "tile_executor/action_mask.png"
+        )
+        owner = TextOwner(
+            owner_id="owner_body",
+            page_id="page_001",
+            component_ids=["component_body"],
+            observation_ids=["observation_body"],
+            selected_observation_ids=["observation_body"],
+            semantic_role="dialogue_body",
+            source_payload="SOURCE BODY",
+            translated_payload="CORPO TRADUZIDO",
+            disposition="owned",
+            state="inpainted",
+            route_action="translate_inpaint_render",
+            execution_tile_id="tile_executor",
+            action_mask_ref=action_mask_ref,
+        )
+        component = SourceTextComponent(
+            component_id="component_body",
+            page_id="page_001",
+            bbox_page=(30, 20, 150, 100),
+            polygon_page=((30, 20), (150, 20), (150, 100), (30, 100)),
+            detector_sources=("independent_text_recall",),
+        )
+        observation = TextObservation(
+            observation_id="observation_body",
+            page_id="page_001",
+            component_ids=(component.component_id,),
+            text="SOURCE BODY",
+            confidence=0.96,
+            provider="paddle_full_page",
+            bbox_page=component.bbox_page,
+            tile_provenance=("tile_executor",),
+            run_id="run-typesetting-renderer",
+            origin_execution_id="execution-typesetting-renderer",
+            invocation_id="invocation-typesetting-renderer-body",
+            attempt_id="attempt-typesetting-renderer-body",
+            provider_family="paddle",
+            page_source_sha256="a" * 64,
+            root_input_pixel_sha256="b" * 64,
+            input_pixel_sha256="c" * 64,
+            payload_sha256=sha256_text("SOURCE BODY"),
+        )
+        graph = OwnerGraph(
+            schema_version=OWNER_GRAPH_SCHEMA_VERSION,
+            page_id="page_001",
+            run_id="run-typesetting-renderer",
+            origin_execution_id="execution-typesetting-renderer",
+            page_source_sha256="a" * 64,
+            owners=[owner],
+            components=[component],
+            observations=[observation],
+            projections=[
+                OwnerProjection(
+                    owner_id="owner_body",
+                    tile_id="tile_executor",
+                    role="executor",
+                    bbox_page=component.bbox_page,
+                    bbox_tile=component.bbox_page,
+                    offset_xy=(0, 0),
+                )
+            ],
+            component_dispositions=[
+                ComponentDisposition(
+                    component_id=component.component_id,
+                    decision="owned",
+                    owner_id=owner.owner_id,
+                )
+            ],
+        )
+        graph.require_valid()
+        protected_sha256 = renderer_mod._owner_array_sha256(
+            np.zeros(canvas.shape[:2], dtype=np.uint8)
+        )
+        render_geometry = build_owner_render_geometry(
+            graph,
+            owner.owner_id,
+            page_width=canvas.shape[1],
+            page_height=canvas.shape[0],
+            container_evidence={
+                "evidence_id": "balloon_fixture",
+                "source": "balloon_inner_polygon",
+                "bbox_page": component.bbox_page,
+                "confidence": 1.0,
+            },
+            protected_art_mask_sha256=protected_sha256,
+        )
+        execution_authority = seal_owner_text_execution_authority(
+            owner_id=owner.owner_id,
+            page_id=owner.page_id,
+            source_payload=owner.source_payload,
+            translated_payload=owner.translated_payload,
+            normalized_chunks=[owner.translated_payload],
+        )
+        page = {
+            "page_id": "page_001",
+            "width": 180,
+            "height": 120,
+            "texts": [
+                {
+                    "id": "owner_body",
+                    "owner_id": "owner_body",
+                    "page_id": "page_001",
+                    "coordinate_space": "logical_page",
+                    "translated": "CORPO TRADUZIDO",
+                    "route_action": "translate_inpaint_render",
+                    "action_mask_ref": owner.action_mask_ref,
+                    "execution_tile_id": "tile_executor",
+                    "render_safe_polygon_page": [
+                        [30, 20],
+                        [150, 20],
+                        [150, 100],
+                        [30, 100],
+                    ],
+                    "safe_text_box": [30, 20, 150, 100],
+                    "balloon_bbox": [30, 20, 150, 100],
+                    "layout_bbox": [30, 20, 150, 100],
+                    "bbox": [30, 20, 150, 100],
+                    "confidence": 0.95,
+                    "style_evidence": {
+                        "source": "primary_ocr",
+                        "text_color": "#f4f4f4",
+                        "text_color_confidence": 0.95,
+                    },
+                    "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 22},
+                    "owner_render_geometry": render_geometry.to_dict(),
+                    "owner_render_geometry_sha256": render_geometry.geometry_sha256,
+                    "owner_text_execution_authority": execution_authority.to_dict(),
+                    "text_execution_authority_sha256": execution_authority.authority_sha256,
+                }
+            ],
+        }
+        glyph_mask = np.zeros(canvas.shape[:2], dtype=np.uint8)
+        glyph_mask[52:69, 70:109] = 255
+        profile = build_owner_visual_profile(
+            owner,
+            canvas,
+            components=[component],
+            observations=[observation],
+            glyph_mask=glyph_mask,
+            candidate=page["texts"][0],
+        )
+        page["texts"][0] = attach_owner_visual_profile(page["texts"][0], profile)
+
+        def deterministic_render(img, block, *_args, **_kwargs):
+            ImageDraw.Draw(img).rectangle((70, 52, 108, 68), fill=(244, 244, 244))
+            block["render_completed"] = True
+            block["fit_status"] = "ok"
+            block["render_bbox"] = [70, 52, 109, 69]
+            block["font_size_final"] = 18
+            block["minimum_legible_font_px"] = 14
+            core = np.zeros(canvas.shape[:2], dtype=np.uint8)
+            core[52:69, 70:109] = 255
+            rgba = np.zeros((*canvas.shape[:2], 4), dtype=np.uint8)
+            rgba[core > 0] = (244, 244, 244, 255)
+            return renderer_mod.GlyphRasterResult(
+                status="applied",
+                rgba=rgba,
+                glyph_core_mask=core,
+                effect_mask=np.zeros_like(core),
+                glyph_core_envelope=(70, 52, 109, 69),
+                effect_envelope=None,
+                observed_attributes={"fill": "#f4f4f4"},
+                abstained_attributes={},
+                metrics={"core_pixels_outside_safe": 0},
+            )
+
+        with patch("typesetter.renderer.render_text_block", side_effect=deterministic_render):
+            glyph_patch = render_band_image(canvas, page, owner_graph=graph)
+
+        self.assertIsInstance(glyph_patch, OwnerGlyphPatch)
+        self.assertEqual(glyph_patch.owner_id, "owner_body")
+        self.assertEqual(glyph_patch.page_id, "page_001")
+        self.assertEqual(glyph_patch.coordinate_space, "logical_page")
+        self.assertEqual(glyph_patch.execution_tile_id, "tile_executor")
+        self.assertEqual(glyph_patch.projection_role, "executor")
+        self.assertTrue(glyph_patch.render_completed)
+        self.assertEqual(glyph_patch.fit_status, "ok")
+        self.assertEqual(glyph_patch.glyph_bbox_page, (70, 52, 109, 69))
+        self.assertEqual(int(np.count_nonzero(glyph_patch.glyph_mask)), 39 * 17)
+        self.assertEqual(len(glyph_patch.component_geometry_sha256), 64)
+        self.assertNotEqual(glyph_patch.after_sha256, glyph_patch.before_sha256)
+        self.assertEqual(
+            glyph_patch.render_safe_polygon_page,
+            ((30, 20), (150, 20), (150, 100), (30, 100)),
+        )
+        raster_contract = glyph_patch.style_raster_contract.to_dict()
+        self.assertEqual(raster_contract["owner_id"], glyph_patch.owner_id)
+        self.assertEqual(raster_contract["page_id"], glyph_patch.page_id)
+        self.assertEqual(
+            raster_contract["visual_profile_sha256"],
+            profile["visual_profile_sha256"],
+        )
+        self.assertEqual(
+            raster_contract["profile_component_geometry_sha256"],
+            profile["component_geometry_sha256"],
+        )
+        self.assertEqual(
+            raster_contract["execution_component_geometry_sha256"],
+            glyph_patch.component_geometry_sha256,
+        )
+        self.assertEqual(raster_contract["applied_attributes"]["fill"], "#f4f4f4")
+        self.assertEqual(
+            raster_contract["rendered_after_sha256"],
+            glyph_patch.after_sha256,
+        )
+        self.assertEqual(
+            raster_contract["rendered_patch_sha256"],
+            renderer_mod._owner_masked_pixels_sha256(
+                glyph_patch.result_rgb,
+                glyph_patch.glyph_mask,
+            ),
+        )
+        self.assertNotIn("style_v2_raster_contract", page["texts"][0])
+
+
+    def test_render_band_image_owner_mode_returns_page_space_glyph_patch(self):
+        """Preserve the historical nodeid for the logical-page contract."""
+
+        self.test_render_band_image_owner_mode_returns_logical_page_glyph_patch()
+
+
+    def test_owner_renderer_rejects_unvalidated_graph_object(self):
+        class ForgedGraph:
+            page_id = "page_001"
+            owners = []
+            components = []
+            projections = []
+
+        with self.assertRaisesRegex(TypeError, "OwnerGraph"):
+            render_band_image(
+                np.full((20, 30, 3), 235, dtype=np.uint8),
+                {"page_id": "page_001", "width": 30, "height": 20, "texts": []},
+                owner_graph=ForgedGraph(),
+            )
+
+
+    def test_owner_style_raster_fallback_and_review_never_claim_applied_style(self):
+        for status in ("fallback", "review_required"):
+            with self.subTest(status=status):
+                profile = {
+                    "status": status,
+                    "style_evidence_v2": {
+                        "attributes": {
+                            "fill": {
+                                "value": "#f4f4f4",
+                                "confidence": 0.25,
+                            }
+                        }
+                    },
+                    "style_application_decision_v2": {
+                        "status": status,
+                        "applied_attributes": {},
+                        "abstained_attributes": {
+                            "fill": "attribute_confidence_below_threshold"
+                        },
+                    },
+                }
+                raster_result = renderer_mod.GlyphRasterResult(
+                    status="applied",
+                    rgba=np.zeros((4, 4, 4), dtype=np.uint8),
+                    glyph_core_mask=np.zeros((4, 4), dtype=np.uint8),
+                    effect_mask=np.zeros((4, 4), dtype=np.uint8),
+                    glyph_core_envelope=None,
+                    effect_envelope=None,
+                    observed_attributes={"fill": "#f4f4f4"},
+                    abstained_attributes={},
+                    metrics={},
+                )
+
+                resolved = renderer_mod._owner_style_contract_attributes(
+                    profile,
+                    raster_result,
+                    render_completed=True,
+                )
+
+                self.assertEqual(resolved[0], status)
+                self.assertEqual(resolved[1], {"fill": "#f4f4f4"})
+                self.assertEqual(resolved[2], {})
+                self.assertEqual(
+                    resolved[3],
+                    {"fill": "attribute_confidence_below_threshold"},
+                )
+
+
+    def test_split_owner_fails_closed_when_one_child_has_no_raster_contract(self):
+        children = [
+            {
+                "owner_id": "owner_split",
+                "visual_profile_sha256": "a" * 64,
+                "_owner_render_mode": True,
+                "render_bbox": [2, 2, 10, 8],
+                "safe_text_box": [1, 1, 11, 9],
+                "fit_status": "ok",
+                "_style_raster_segment": {
+                    "segment_id": "region_0",
+                },
+            },
+            {
+                "owner_id": "owner_split",
+                "visual_profile_sha256": "a" * 64,
+                "_owner_render_mode": True,
+                "render_bbox": [14, 2, 22, 8],
+                "safe_text_box": [13, 1, 23, 9],
+                "fit_status": "ok",
+            },
+        ]
+
+        with self.assertRaisesRegex(ValueError, "child raster contract"):
+            renderer_mod._aggregate_split_render_blocks(children)
+
+
+    def test_split_owner_aggregates_child_contracts_in_canonical_order(self):
+        owner_id = "owner_split"
+        profile_sha256 = "a" * 64
+
+        def child(segment_id, order, bbox):
+            core = np.zeros((12, 28), dtype=np.uint8)
+            core[bbox[1] : bbox[3], bbox[0] : bbox[2]] = 255
+            rgba = np.zeros((12, 28, 4), dtype=np.uint8)
+            rgba[core > 0] = (244, 244, 244, 255)
+            envelope = {
+                "bbox_page": list(bbox),
+                "mask_sha256": renderer_mod._owner_array_sha256(core),
+                "pixel_count": int(np.count_nonzero(core)),
+            }
+            empty = np.zeros_like(core)
+            segment = {
+                "segment_id": segment_id,
+                "order": order,
+                "owner_id": owner_id,
+                "visual_profile_sha256": profile_sha256,
+                "bbox_page": list(bbox),
+                "status": "applied",
+                "applied_attributes": {"fill": "#f4f4f4"},
+                "abstained_attributes": {},
+                "glyph_core_envelope": envelope,
+                "effect_envelope": {
+                    "bbox_page": [],
+                    "mask_sha256": renderer_mod._owner_array_sha256(empty),
+                    "pixel_count": 0,
+                },
+                "rendered_before_sha256": sha256(
+                    f"before:{segment_id}".encode()
+                ).hexdigest(),
+                "rendered_patch_sha256": sha256(
+                    f"patch:{segment_id}".encode()
+                ).hexdigest(),
+                "rendered_after_sha256": sha256(
+                    f"after:{segment_id}".encode()
+                ).hexdigest(),
+            }
+            segment["segment_sha256"] = owner_style_raster_segment_sha256(segment)
+            return {
+                "owner_id": owner_id,
+                "visual_profile_sha256": profile_sha256,
+                "_owner_render_mode": True,
+                "render_bbox": list(bbox),
+                "safe_text_box": list(bbox),
+                "fit_status": "ok",
+                "_style_raster_segment": segment,
+                "_style_v2_raster_result": renderer_mod.GlyphRasterResult(
+                    status="applied",
+                    rgba=rgba,
+                    glyph_core_mask=core,
+                    effect_mask=empty,
+                    glyph_core_envelope=bbox,
+                    effect_envelope=None,
+                    observed_attributes={"fill": "#f4f4f4"},
+                    abstained_attributes={},
+                    metrics={},
+                ),
+            }
+
+        region_0 = child("region_0", 0, (2, 2, 10, 8))
+        region_1 = child("region_1", 1, (14, 2, 22, 8))
+        for region in (region_0, region_1):
+            region["_style_v2_raster_result"].abstained_attributes["glow"] = (
+                "effect_envelope_outside_safe"
+            )
+
+        forward = renderer_mod._aggregate_split_render_blocks(
+            [region_0, region_1]
+        )
+        reversed_input = renderer_mod._aggregate_split_render_blocks(
+            [region_1, region_0]
+        )
+
+        self.assertEqual(
+            [row["segment_id"] for row in forward["_style_raster_segments"]],
+            ["region_0", "region_1"],
+        )
+        self.assertEqual(
+            forward["_style_raster_segments"],
+            reversed_input["_style_raster_segments"],
+        )
+        self.assertEqual(
+            forward["_style_v2_raster_result"].applied_attributes,
+            {"fill": "#f4f4f4"},
+        )
+        self.assertEqual(
+            forward["_style_v2_raster_result"].unavailable_attributes,
+            {"glow": "effect_envelope_outside_safe"},
+        )
+
+
+    def test_curved_owner_uses_shared_raster_and_reports_glyph_run(self):
+        canvas = np.full((160, 360, 3), 245, dtype=np.uint8)
+        image = Image.fromarray(canvas.copy(), mode="RGB")
+        text = {
+            "owner_id": "owner_curve",
+            "translated": "OLA TUDO BEM",
+            "translated_payload": "OLA TUDO BEM",
+            "bbox": [40, 35, 320, 125],
+            "safe_text_box": [40, 35, 320, 125],
+            "balloon_bbox": [30, 25, 330, 135],
+            "render_safe_polygon_page": [
+                [30, 25],
+                [330, 25],
+                [330, 135],
+                [30, 135],
+            ],
+            "visual_profile_v2": {},
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 34,
+                "cor": "#111111",
+                "curva": True,
+                "curva_direcao": "arc_up",
+                "curva_intensidade": 0.42,
+            },
+        }
+        plan = plan_text_layout(text)
+
+        result = renderer_mod._render_single_text_block_unrotated(
+            image,
+            text,
+            plan,
+        )
+
+        self.assertIsInstance(result, renderer_mod.GlyphRasterResult)
+        self.assertEqual(result.status, "applied")
+        self.assertGreater(np.count_nonzero(result.rgba[:, :, 3]), 0)
+        self.assertIn("_rendered_glyph_run", text)
+        self.assertEqual(text["_rendered_glyph_run"]["curve_direction"], "arc_up")
+        self.assertAlmostEqual(text["_rendered_glyph_run"]["curve_amount"], 0.42)
+        self.assertFalse(np.array_equal(np.asarray(image), canvas))
+
+
+    def test_curved_owner_cannot_claim_v2_applied_without_supported_contract(self):
+        """Preserve the old nodeid after curved rendering gained observable support."""
+
+        self.test_curved_owner_uses_shared_raster_and_reports_glyph_run()
+
+
+    def test_visual_card_with_unresolved_pure_inpaint_is_suppressed_before_render(self):
+        text = {
+            "id": "cardocr_003",
+            "translated": "AUMENTA PERMANENTEMENTE A FORCA",
+            "bbox": [152, 243, 438, 266],
+            "text_pixel_bbox": [152, 243, 438, 266],
+            "layout_category": "item_card",
+            "layout_profile": "colored_status_panel",
+            "card_panel_text_context": True,
+            "bubble_mask_source": "image_dark_panel_mask",
+            "background_rgb": [230, 175, 64],
+            "qa_flags": [
+                "visual_card_ocr_recall",
+                "visual_text_only_inpaint_contract",
+                "weak_text_residual_after_inpaint",
+                "real_inpaint_skipped_unsafe_mask",
+            ],
+            "qa_metrics": {
+                "inpaint_mask_contract": {
+                    "source_pixels": 1938,
+                    "expanded_pixels": 2824,
+                },
+                "image_dark_panel_mask": {
+                    "mask_pixels": 12000,
+                    "panel_fill_rgb": [230, 175, 64],
+                }
+            },
+        }
+
+        suppressed = renderer_mod._suppress_unsafe_automatic_render(text)
+
+        self.assertTrue(suppressed)
+        self.assertFalse(text["visible"])
+        self.assertTrue(text["skip_processing"])
+        self.assertIn("unsafe_automatic_render_suppressed", text["qa_flags"])
+
+
+    def test_renderer_applies_structured_horizontal_gradient_pixels(self):
+        arr = self._render_style_probe(
+            {
+                "cor": "#D01020",
+                "cor_gradiente": {
+                    "kind": "linear",
+                    "colors": ["#D01020", "#2010D0"],
+                    "stops": [0.0, 1.0],
+                    "start": [0.0, 0.5],
+                    "end": [1.0, 0.5],
+                    "coordinate_space": "glyph_bbox_normalized",
+                },
+                "contorno": "",
+                "contorno_px": 0,
+            }
+        )
+        mask = self._changed_mask(arr)
+        _ys, xs = np.where(mask)
+        x_grid = np.indices(mask.shape)[1]
+        left = arr[mask & (x_grid <= np.percentile(xs, 30))]
+        right = arr[mask & (x_grid >= np.percentile(xs, 70))]
+
+        self.assertGreater(len(left), 30)
+        self.assertGreater(len(right), 30)
+        self.assertGreater(float(np.mean(left[:, 0])), float(np.mean(right[:, 0])) + 25.0)
+        self.assertGreater(float(np.mean(right[:, 2])), float(np.mean(left[:, 2])) + 25.0)
+
+
+    def test_safe_renderer_uses_one_gradient_field_for_unequal_lines(self):
+        canvas = np.full((120, 240, 3), 255, dtype=np.uint8)
+        font = SafeTextPathFont(find_font("ComicNeue-Bold.ttf"), 30)
+        lines = ["MMMMMMMM", "MM"]
+        positions = [(10, 10), (85, 60)]
+        gradient = {
+            "kind": "linear",
+            "colors": ["#E01020", "#2010E0"],
+            "stops": [0.0, 1.0],
+            "start": [0.0, 0.5],
+            "end": [1.0, 0.5],
+            "coordinate_space": "glyph_bbox_normalized",
+        }
+
+        renderer_mod._apply_safe_gradient_text(
+            canvas,
+            lines,
+            font,
+            positions,
+            gradient,
+            "",
+            0,
+        )
+
+        second_mask = renderer_mod._build_textpath_mask(font, lines[1], padding=0) > 180
+        second_pixels = canvas[
+            60 : 60 + second_mask.shape[0],
+            85 : 85 + second_mask.shape[1],
+        ][second_mask]
+        mean = np.mean(second_pixels, axis=0)
+        self.assertGreater(float(mean[0]), 55.0)
+        self.assertGreater(float(mean[2]), 55.0)
+        self.assertLess(abs(float(mean[0]) - float(mean[2])), 70.0)
+
+
+    def test_pil_renderer_applies_structured_diagonal_gradient(self):
+        layer = Image.new("RGBA", (240, 120), (0, 0, 0, 0))
+        font = ImageFont.truetype(find_font("ComicNeue-Bold.ttf"), 42)
+        gradient = {
+            "kind": "linear",
+            "colors": ["#7D35D8", "#181818"],
+            "stops": [0.0, 1.0],
+            "start": [0.0, 0.0],
+            "end": [1.0, 1.0],
+            "coordinate_space": "glyph_bbox_normalized",
+        }
+
+        renderer_mod._apply_gradient_text(
+            layer,
+            ["TESTE"],
+            font,
+            [(45, 35)],
+            gradient,
+        )
+
+        rgba = np.asarray(layer)
+        mask = rgba[:, :, 3] > 180
+        ys, xs = np.where(mask)
+        projection = xs + ys
+        low = rgba[mask & ((np.indices(mask.shape)[1] + np.indices(mask.shape)[0]) <= np.percentile(projection, 30)), :3]
+        high = rgba[mask & ((np.indices(mask.shape)[1] + np.indices(mask.shape)[0]) >= np.percentile(projection, 70)), :3]
+        self.assertGreater(len(low), 30)
+        self.assertGreater(len(high), 30)
+        self.assertGreater(float(np.mean(low[:, 2])), float(np.mean(high[:, 2])) + 25.0)
+
+
+    def test_visual_item_card_rows_receive_independent_non_overlapping_slots(self):
+        rows = []
+        for text_id, bbox, translated in (
+            ("cardocr_003", [266, 269, 461, 299], "ELIXIR DA PEDRA DA LUA"),
+            ("ocr_002", [208, 466, 517, 527], "NOTA: B+ AUMENTA PERMANENTEMENTE A AGILIDADE"),
+            ("cardocr_004", [220, 540, 501, 561], "STAT POR 4 APÓS O CONSUMO"),
+            ("ocr_003", [151, 574, 572, 704], "O USO PELA PRIMEIRA VEZ AUMENTA LIGEIRAMENTE A FLEXIBILIDADE TAMBÉM UM ELIXIR CRIADO PELA MISTURA DE PÓ DE MINÉRIO DO LUAR E ERVA RASA"),
+            ("cardocr_005", [134, 715, 588, 778], "ALQUIMIA AVANÇADA E APRIMORAMENTO DE ELIXIR MELHORARAM MUITO A EFICÁCIA DA POÇÃO"),
+        ):
+            rows.append(
+                {
+                    "id": text_id,
+                    "translated": translated,
+                    "bbox": list(bbox),
+                    "source_bbox": list(bbox),
+                    "text_pixel_bbox": list(bbox),
+                    "balloon_bbox": [35, 250, 687, 796],
+                    "bubble_mask_bbox": [35, 250, 687, 796],
+                    "bubble_mask_source": "image_dark_panel_mask",
+                    "layout_category": "item_card",
+                    "card_panel_text_context": True,
+                    "qa_flags": ["visual_text_only_inpaint_contract"],
+                }
+            )
+        rows[2]["balloon_subregions"] = [[66, 504, 369, 744], [381, 504, 619, 744]]
+        rows[2]["connected_lobe_bboxes"] = [[66, 504, 369, 744], [381, 504, 619, 744]]
+        rows[2]["connected_balloon_orientation"] = "left-right"
+        rows[2]["render_layout_contract"] = {
+            "schema_version": 1,
+            "translated_key": renderer_mod._text_layout_contract_text_key(rows[2]["translated"]),
+            "font_name": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+            "font_size": 5,
+            "line_height": 5,
+            "lines": [rows[2]["translated"]],
+            "positions": [[337, 548]],
+        }
+
+        renderer_mod._apply_visual_item_card_row_slots(rows)
+
+        targets = [row["target_bbox"] for row in rows]
+        for row, target in zip(rows, targets, strict=True):
+            source = row["text_pixel_bbox"]
+            self.assertLessEqual(target[1], source[1])
+            self.assertGreaterEqual(target[3], source[3])
+            self.assertIn("visual_item_card_row_slot", row.get("qa_flags") or [])
+        for previous, current in zip(targets, targets[1:], strict=False):
+            self.assertLess(previous[3], current[1])
+        self.assertLessEqual(targets[2][3] - targets[2][1], 34)
+        self.assertEqual(rows[2].get("balloon_subregions"), [])
+        self.assertFalse(rows[2].get("connected_lobe_bboxes"))
+        self.assertNotIn("render_layout_contract", rows[2])
+
+        resolved_rows = []
+        for row in rows[2:]:
+            plan = plan_text_layout(row)
+            resolved = _resolve_text_layout(row, plan)
+            resolved_rows.append(resolved)
+            safe = row["safe_text_box"]
+            block = resolved["block_bbox"]
+            self.assertGreaterEqual(block[1], safe[1])
+            self.assertLessEqual(block[3], safe[3])
+        self.assertGreaterEqual(resolved_rows[0]["font_size"], 10)
+        self.assertGreaterEqual(resolved_rows[-1]["font_size"], 10)
+        self.assertGreaterEqual(len(resolved_rows[-1]["lines"]), 2)
+
+
+    def test_item_card_joint_layout_preserves_all_translated_text(self):
+        rows = [
+            {"id": "title", "translated": "ELIXIR DA PEDRA DA LUA", "text_pixel_bbox": [120, 120, 480, 160], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:1", "card_panel_role": "title", "layout_category": "item_card"},
+            {"id": "note", "translated": "NOTA B+", "text_pixel_bbox": [160, 190, 440, 220], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:1", "card_panel_role": "note", "layout_category": "item_card"},
+            {"id": "body", "translated": "AUMENTA PERMANENTEMENTE A AGILIDADE E A FLEXIBILIDADE", "text_pixel_bbox": [110, 270, 490, 360], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:1", "card_panel_role": "body", "layout_category": "item_card"},
+            {"id": "footer", "translated": "ALQUIMIA AVANCADA", "text_pixel_bbox": [130, 440, 470, 475], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:1", "card_panel_role": "footer", "layout_category": "item_card"},
+        ]
+        payloads = [row["translated"] for row in rows]
+
+        renderer_mod._apply_visual_item_card_row_slots(rows)
+
+        self.assertEqual([row["translated"] for row in rows], payloads)
+        self.assertTrue(all(row.get("card_joint_layout_status") == "ok" for row in rows))
+
+
+    def test_item_card_title_never_renders_below_minimum(self):
+        row = {"id": "title", "translated": "ELIXIR SUPREMO DA PEDRA DA LUA", "text_pixel_bbox": [120, 120, 480, 160], "card_panel_bbox": [80, 90, 520, 250], "card_panel_id": "card:2", "card_panel_role": "title", "layout_category": "item_card", "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24}}
+
+        renderer_mod._apply_visual_item_card_row_slots([row])
+        resolved = _resolve_text_layout(row, plan_text_layout(row))
+
+        self.assertGreaterEqual(resolved["font_size"], row["minimum_legible_font_px"])
+        self.assertEqual(row["card_joint_layout_status"], "ok")
+
+
+    def test_item_card_rows_do_not_overlap_after_ptbr_expansion(self):
+        rows = [
+            {"id": "title", "translated": "ELIXIR DA PEDRA DA LUA", "text_pixel_bbox": [120, 120, 480, 160], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:3", "card_panel_role": "title", "layout_category": "item_card"},
+            {"id": "note", "translated": "NOTA B+ AUMENTA PERMANENTEMENTE A AGILIDADE", "text_pixel_bbox": [160, 190, 440, 220], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:3", "card_panel_role": "note", "layout_category": "item_card"},
+            {"id": "body", "translated": "O PRIMEIRO USO TAMBEM AUMENTA A FLEXIBILIDADE E MELHORA MUITO A EFICACIA DA POCAO", "text_pixel_bbox": [110, 270, 490, 360], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:3", "card_panel_role": "body", "layout_category": "item_card"},
+            {"id": "footer", "translated": "ALQUIMIA AVANCADA", "text_pixel_bbox": [130, 440, 470, 475], "card_panel_bbox": [80, 90, 520, 520], "card_panel_id": "card:3", "card_panel_role": "footer", "layout_category": "item_card"},
+        ]
+
+        renderer_mod._apply_visual_item_card_row_slots(rows)
+
+        slots = [row["safe_text_box"] for row in rows]
+        self.assertTrue(all(previous[3] + 4 <= current[1] for previous, current in zip(slots, slots[1:])))
+
+
+    def test_runtime_visual_card_rows_form_joint_group_without_preassigned_panel(self):
+        rows = [
+            {
+                "id": "ocr_001",
+                "band_id": "page_002_band_046",
+                "translated": "NOTA: AUMENTA PERMANENTEMENTE AS ESTATISTICAS DE SAUDE EM 7",
+                "text_pixel_bbox": [336, 154, 632, 252],
+                "bubble_mask_bbox": [271, 132, 697, 279],
+                "bubble_mask_source": "image_dark_panel_mask",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "ocr_002",
+                "band_id": "page_002_band_046",
+                "translated": "A PRIMEIRA VEZ AUMENTA SUA SAUDE E A REGENERACAO NATURAL",
+                "text_pixel_bbox": [260, 262, 703, 386],
+                "bubble_mask_bbox": [249, 257, 709, 423],
+                "bubble_mask_source": "image_dark_panel_mask",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "cardocr_003",
+                "band_id": "page_002_band_046",
+                "translated": "A ALQUIMIA AVANCADA E O APRIMORAMENTO DO ELIXIR AUMENTARAM MUITO A EFICACIA DA POCAO",
+                "text_pixel_bbox": [266, 398, 701, 456],
+                "bubble_mask_bbox": [171, 381, 796, 473],
+                "bubble_mask_source": "image_dark_panel_mask",
+                "layout_profile": "colored_status_panel_row",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+        ]
+
+        rows = renderer_mod.build_render_blocks(rows)
+
+        self.assertEqual(len({row.get("card_panel_id") for row in rows}), 1)
+        self.assertEqual([row.get("card_panel_role") for row in rows], ["title", "body", "footer"])
+        self.assertTrue(all(row.get("card_panel_bbox") == [171, 132, 796, 473] for row in rows))
+        self.assertTrue(all(row.get("layout_category") == "item_card" for row in rows))
+        self.assertTrue(all(row.get("card_joint_layout_status") == "ok" for row in rows))
+        self.assertTrue(all(row["safe_text_box"][0] <= 185 and row["safe_text_box"][2] >= 785 for row in rows))
+
+
+    def test_runtime_visual_card_narrow_panel_uses_resolved_layout_for_joint_legibility(self):
+        panel = [260, 159, 703, 456]
+        rows = [
+            {
+                "id": "ocr_001",
+                "band_id": "page_002_band_046",
+                "translated": "NOTA: AUMENTA PERMANENTEMENTE AS ESTATÍSTICAS DE SAÚDE EM 7 APÓS O CONSUMO",
+                "text_pixel_bbox": [336, 159, 632, 252],
+                "card_panel_bbox": panel,
+                "bubble_mask_source": "image_dark_panel_mask",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "ocr_002",
+                "band_id": "page_002_band_046",
+                "translated": "A PRIMEIRA VEZ AUMENTA SUA SAÚDE E 2 LIGEIRO AUMENTO NA TAXA DE REGENERAÇÃO NATURAL, UM ELIXIR FEITO COM USO REFINADO. BASE CONSUMÍVEL DE MITHRIL ASA",
+                "text_pixel_bbox": [260, 262, 703, 386],
+                "card_panel_bbox": panel,
+                "bubble_mask_source": "image_dark_panel_mask",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "cardocr_003",
+                "band_id": "page_002_band_046",
+                "translated": "A ALQUIMIA AVANÇADA E O APRIMORAMENTO DO ELIXIR AUMENTARAM MUITO A EFICÁCIA DA POÇÃO",
+                "text_pixel_bbox": [266, 398, 701, 456],
+                "card_panel_bbox": panel,
+                "bubble_mask_source": "image_dark_panel_mask",
+                "layout_profile": "colored_status_panel_row",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+        ]
+
+        renderer_mod._apply_visual_item_card_row_slots(rows)
+
+        self.assertTrue(all(row.get("card_joint_layout_status") == "ok" for row in rows))
+        for row in rows:
+            resolved = _resolve_text_layout(row, plan_text_layout(row))
+            self.assertGreaterEqual(resolved["font_size"], row["minimum_legible_font_px"])
+
+
+    def test_runtime_nine_row_light_card_keeps_footer_and_long_rows_legible(self):
+        panel = [127, 161, 471, 523]
+        payloads = (
+            ("ocr_001", "NOTA: B+ AUMENTA PERMANENTEMENTE A FORÇA", [125, 161, 474, 225]),
+            ("cardocr_002", "STAT BY5 APÓS CONSUMO", [150, 238, 438, 261]),
+            ("cardocr_003", "PRIMEIRA UTILIZAÇÃO PERMANENTE", [158, 275, 443, 299]),
+            ("cardocr_004", "AUMENTA SUA SAÚDE", [186, 311, 411, 334]),
+            ("cardocr_005", "FEITO DE CORAÇÕES DE OGROS", [130, 347, 467, 376]),
+            ("cardocr_006", "TROLLS.E VÁRIOS ANIMAIS", [158, 387, 441, 411]),
+            ("cardocr_007", "ELIXIR DE FORMIGA DE ALQUIMIA ATIVANCET", [150, 424, 449, 447]),
+            ("cardocr_008", "APRIMORAMENTO MUITO MELHORADO", [135, 461, 463, 485]),
+            ("cardocr_009", "A EFICÁCIA DA POÇÃO", [162, 499, 437, 523]),
+        )
+        rows = [
+            {
+                "id": text_id,
+                "band_id": "page_002_band_044",
+                "translated": translated,
+                "text_pixel_bbox": bbox,
+                "card_panel_bbox": panel,
+                "bubble_mask_source": "image_dark_panel_mask",
+                "layout_profile": "colored_status_panel_row",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            }
+            for text_id, translated, bbox in payloads
+        ]
+        stale_style = {"fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf", "tamanho": 23}
+        rows[5].update({"line_height": 27, "wrapped_lines": [rows[5]["translated"]], "font_size_final": 11, "estilo": dict(stale_style)})
+        rows[8].update({"line_height": 26, "wrapped_lines": [rows[8]["translated"]], "font_size_final": 6, "estilo": dict(stale_style)})
+
+        renderer_mod._apply_visual_item_card_row_slots(rows)
+        resolved = [_resolve_text_layout(row, plan_text_layout(row)) for row in rows]
+
+        self.assertTrue(all(row.get("card_joint_layout_status") == "ok" for row in rows))
+        self.assertTrue(all(item["font_size"] >= row["minimum_legible_font_px"] for row, item in zip(rows, resolved, strict=True)))
+        self.assertTrue(all(row["card_panel_bbox"][0] <= 99 and row["card_panel_bbox"][2] >= 500 for row in rows))
+
+
+    def test_visual_card_row_recovers_anchor_from_polygon_when_text_bbox_is_double_page_shifted(self):
+        row = {
+            "id": "cardocr_006",
+            "band_id": "page_002_band_047",
+            "translated": "BASE DE MITHRIL",
+            "text_pixel_bbox": [401, 26848, 564, 26869],
+            "line_polygons": [[[397, 13303], [564, 13303], [564, 13324], [397, 13324]]],
+            "bubble_mask_bbox": [382, 13298, 579, 13329],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "layout_profile": "colored_status_panel_row",
+            "qa_flags": ["visual_card_ocr_recall", "visual_text_only_inpaint_contract", "page_space_aux_bbox_scrubbed"],
+        }
+
+        renderer_mod._apply_visual_item_card_row_slots([row])
+
+        self.assertEqual(row["text_pixel_bbox"], [397, 13303, 564, 13324])
+        self.assertLess(row["render_bbox"][1] if row.get("render_bbox") else row["safe_text_box"][1], 13400)
+        self.assertIn("visual_card_anchor_recovered_from_line_polygons", row.get("qa_flags") or [])
+
+
+    def test_render_copyback_preserves_joint_card_contract_fields(self):
+        source = {"id": "cardocr_003", "qa_flags": []}
+        rendered = {
+            "card_panel_id": "item_card:page_002_band_046",
+            "card_panel_role": "footer",
+            "card_panel_bbox": [171, 132, 796, 473],
+            "layout_category": "item_card",
+            "card_joint_layout_status": "ok",
+            "minimum_legible_font_px": 12,
+            "font_size_final": 18,
+            "fit_status": "ok",
+        }
+
+        renderer_mod._copy_render_debug_fields(source, rendered)
+
+        self.assertEqual(source["card_panel_id"], rendered["card_panel_id"])
+        self.assertEqual(source["card_panel_role"], "footer")
+        self.assertEqual(source["card_panel_bbox"], rendered["card_panel_bbox"])
+        self.assertEqual(source["card_joint_layout_status"], "ok")
+
+
+    def test_plan_text_layout_uses_wide_real_balloon_when_contour_mask_is_overmerged(self):
+        text_data = {
+            "translated": "COMO ESPERADO DE UMA RAPOSA, PARECE QUE YUJEONG JA FEZ UM MOVIMENTO ANTES",
+            "bbox": [189, 8678, 611, 8841],
+            "source_bbox": [189, 8678, 611, 8841],
+            "text_pixel_bbox": [189, 8678, 611, 8841],
+            "balloon_bbox": [0, 8670, 800, 9010],
+            "bubble_mask_bbox": [189, 8678, 483, 8800],
+            "bubble_inner_bbox": [197, 8677, 602, 8838],
+            "layout_profile": "standard",
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "background_rgb": [229, 229, 229],
+            "qa_flags": ["balloon_outline_components_removed", "bubble_clip_preserved_raw_text"],
+            "tipo": "fala",
+            "style_origin": "auto",
+            "page_width": 800,
+            "page_height": 9200,
+        }
+
+        plan = plan_text_layout(text_data)
+
+        self.assertEqual(plan["target_bbox"], [0, 8670, 800, 9010])
+        self.assertEqual(text_data.get("_render_target_source"), "real_balloon_bbox_overmerged_contour_guard")
+
+
+    def test_wide_contour_balloon_render_stays_centered_on_original_text(self):
+        img = Image.new("RGB", (800, 505), (229, 229, 229))
+        text_data = {
+            "id": "ocr_001",
+            "translated": "COMO ESPERADO DE UMA RAPOSA, PARECE QUE YUJEONG JA FEZ UM MOVIMENTO ANTES",
+            "original": "AS EXPECTED OF A FOX, LOOKS LIKE THAT YUJEONG ALREADY MADE A MOVE BEFOREHAND",
+            "bbox": [189, 173, 611, 336],
+            "source_bbox": [189, 173, 611, 336],
+            "text_pixel_bbox": [189, 173, 611, 336],
+            "balloon_bbox": [0, 165, 800, 505],
+            "bubble_mask_bbox": [189, 173, 483, 295],
+            "bubble_inner_bbox": [197, 172, 602, 333],
+            "layout_profile": "standard",
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "background_rgb": [229, 229, 229],
+            "qa_flags": ["balloon_outline_components_removed", "bubble_clip_preserved_raw_text"],
+            "tipo": "fala",
+            "style_origin": "auto",
+            "page_width": 800,
+            "page_height": 505,
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24, "cor": "#000000", "alinhamento": "center"},
+            "style": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24, "cor": "#000000", "alinhamento": "center"},
+        }
+
+        plan = plan_text_layout(text_data)
+        with patch("typesetter.renderer._try_render_single_text_block_with_rust", return_value=False):
+            _render_single_text_block_unrotated(img, text_data, plan)
+
+        render_bbox = text_data.get("render_bbox")
+        self.assertIsNotNone(render_bbox)
+        original_center_y = (text_data["text_pixel_bbox"][1] + text_data["text_pixel_bbox"][3]) / 2.0
+        render_center_y = (render_bbox[1] + render_bbox[3]) / 2.0
+        self.assertLessEqual(abs(render_center_y - original_center_y), 2.0)
+
+
+    def test_build_render_blocks_skips_critical_mask_failure_instead_of_review_fallback(self):
+        text = {
+            "id": "ocr_critical_mask",
+            "text": "THIS DIALOGUE MUST NOT BE FORCED",
+            "original": "THIS DIALOGUE MUST NOT BE FORCED",
+            "translated": "ESTE DIALOGO NAO PODE SER FORCADO",
+            "bbox": [160, 180, 390, 250],
+            "text_pixel_bbox": [160, 180, 390, 250],
+            "balloon_bbox": [100, 120, 440, 300],
+            "layout_profile": "white_balloon",
+            "bubble_mask_source": "image_white_bubble_mask",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["mask_outside_balloon_critical"],
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24},
+        }
+
+        blocks = build_render_blocks([text])
+
+        self.assertEqual(blocks, [])
+        self.assertTrue(text["needs_review"])
+        self.assertTrue(text["skip_processing"])
+        self.assertTrue(text["preserve_original"])
+        self.assertEqual(text["route_action"], "review_required")
+        self.assertEqual(text["route_reason"], "unsafe_automatic_render")
+
+
+    def test_build_render_blocks_skips_unsafe_connected_balloon_before_split(self):
+        text = {
+            "id": "ocr_unsafe_connected",
+            "text": "THIS CONNECTED DIALOGUE MUST NOT BE FORCED",
+            "original": "THIS CONNECTED DIALOGUE MUST NOT BE FORCED",
+            "translated": "ESTE DIALOGO CONECTADO NAO PODE SER FORCADO",
+            "bbox": [180, 180, 430, 250],
+            "text_pixel_bbox": [180, 180, 430, 250],
+            "balloon_bbox": [100, 120, 520, 310],
+            "layout_profile": "connected_balloon",
+            "connected_balloon_orientation": "left-right",
+            "connected_lobe_bboxes": [[100, 120, 310, 310], [310, 120, 520, 310]],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["missing_real_bubble_mask"],
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24},
+        }
+
+        blocks = build_render_blocks([text])
+
+        self.assertEqual(blocks, [])
+        self.assertEqual(text["route_reason"], "unsafe_automatic_render")
+
+
+    def test_build_render_blocks_keeps_inpainted_text_over_art_with_unsafe_history(self):
+        text = {
+            "id": "ocr_text_over_art",
+            "text": "ALRIGHT!!! THE NATIONAL TEAM SELECTION EVENT",
+            "original": "ALRIGHT!!! THE NATIONAL TEAM SELECTION EVENT",
+            "translated": "TUDO BEM!!! O EVENTO DE SELEÇÃO NACIONAL",
+            "bbox": [180, 150, 620, 320],
+            "text_pixel_bbox": [180, 150, 620, 320],
+            "balloon_bbox": [120, 100, 700, 380],
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "bubble_mask_source": "derived_white_crop_rejected",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["missing_real_bubble_mask", "rejected_derived_bubble_mask"],
+            "qa_metrics": {"translucent_text_over_art_inpaint": {"pixels": 640}},
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 28},
+        }
+
+        blocks = build_render_blocks([text])
+
+        self.assertEqual(len(blocks), 1)
+        self.assertFalse(text.get("skip_processing"))
+        self.assertEqual(text.get("route_action"), "translate_inpaint_render")
+
+
+    def test_build_render_blocks_keeps_colored_item_card_with_trustworthy_inpaint_contract(self):
+        text = {
+            "id": "cardocr_003",
+            "text": "MOONSTONE ELIXIR",
+            "original": "MOONSTONE ELIXIR",
+            "translated": "ELIXIR DE PEDRA DA LUA",
+            "bbox": [266, 160, 461, 190],
+            "text_pixel_bbox": [266, 160, 461, 190],
+            "balloon_bbox": [130, 120, 590, 360],
+            "bubble_mask_bbox": [130, 120, 590, 360],
+            "layout_category": "item_card",
+            "layout_profile": "colored_status_panel",
+            "background_type": "colored_status_panel",
+            "bubble_mask_source": "image_dark_panel_mask",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": [
+                "visual_text_only_inpaint_contract",
+                "mask_outside_balloon_critical",
+            ],
+            "qa_metrics": {
+                "inpaint_mask_contract": {
+                    "source_pixels": 420,
+                    "expanded_pixels": 710,
+                },
+                "derived_card_panel_mask": {
+                    "panel_fill_rgb": [249, 210, 107],
+                    "mask_pixels": 39200,
+                },
+            },
+            "estilo": {"fonte": "ComicNeue-Bold.ttf", "tamanho": 24},
+        }
+
+        blocks = build_render_blocks([text])
+
+        self.assertEqual(len(blocks), 1)
+        self.assertFalse(text.get("skip_processing"))
+        self.assertEqual(text.get("route_action"), "translate_inpaint_render")
+        self.assertNotIn("unsafe_automatic_render_suppressed", text.get("qa_flags") or [])
+
+
+    def test_run_render_qa_does_not_clip_translucent_panel_text_inside_the_outer_balloon(self):
+        text_data = {
+            "translated": "E PENSAR QUE ELE USARIA O GOLPE SEM SOMBRAS.",
+            "layout_profile": "translucent_balloon",
+            "inpaint_profile": "translucent_separator_split",
+            "balloon_bbox": [0, 168, 800, 456],
+            "render_bbox": [265, 168, 541, 324],
+            "qa_flags": [],
+        }
+        plan = {
+            "target_bbox": [0, 168, 800, 456],
+            "safe_text_box": [212, 204, 730, 377],
+        }
+
+        renderer_mod._run_render_qa(text_data, plan)
+
+        self.assertNotIn("TEXT_CLIPPED", text_data["qa_flags"])
+        self.assertNotIn("TEXT_OVERFLOW", text_data["qa_flags"])
+
+
+    def test_contour_speech_balloon_clamps_original_anchor_layout_to_safe_box(self):
+        text_data = {
+            "translated": "HA UMA EXPECTATIVA E UM INTERESSE SEM PRECEDENTES NESTA SELETIVA NACIONAL, CERTO?",
+            "original": "THERE ARE UNPRECEDENTED EXPECTATIONS AND INTEREST IN THIS NATIONAL TEAM SELECTION, RIGHT?",
+            "tipo": "fala",
+            "layout_profile": "standard",
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "bbox": [221, 528, 593, 648],
+            "source_bbox": [221, 528, 593, 648],
+            "text_pixel_bbox": [221, 528, 593, 648],
+            "source_text_mask_bbox": [221, 528, 593, 648],
+            "balloon_bbox": [218, 516, 597, 655],
+            "estilo": {
+                "fonte": "ComicNeue-Bold.ttf",
+                "tamanho": 23,
+                "cor": "#000000",
+                "alinhamento": "center",
+            },
+        }
+        plan = {
+            "target_bbox": [218, 516, 597, 655],
+            "position_bbox": [218, 516, 597, 655],
+            "capacity_bbox": [218, 516, 597, 655],
+            "safe_text_box": [282, 551, 533, 620],
+            "font_name": "ComicNeue-Bold.ttf",
+            "max_width": 251,
+            "max_height": 69,
+            "line_spacing_ratio": 0.04,
+            "padding_y": 0,
+            "vertical_anchor": "center",
+            "alignment": "center",
+            "layout_shape": "wide",
+            "balloon_geo": "ellipse",
+        }
+
+        resolved = _resolve_text_layout(text_data, plan)
+
+        self.assertGreaterEqual(resolved["block_bbox"][1], plan["safe_text_box"][1])
+        self.assertLessEqual(resolved["block_bbox"][3], plan["safe_text_box"][3])
+
+
+    def test_contour_speech_balloon_keeps_real_inner_box_when_mask_bbox_is_overbroad(self):
+        text_data = {
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "balloon_bbox": [218, 516, 597, 655],
+            "background_rgb": [248, 248, 248],
+        }
+        overbroad_mask_bbox = [98, 396, 717, 775]
+        real_inner_bbox = [230, 528, 585, 643]
+
+        self.assertFalse(
+            renderer_mod._should_reject_tiny_bubble_inner_safe_area(
+                text_data,
+                overbroad_mask_bbox,
+                real_inner_bbox,
+            )
+        )
+
+
+    def test_render_band_text_mask_cleanup_skips_translucent_balloon(self):
+        img = Image.new("RGB", (160, 90), (112, 120, 126))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "TEXTO",
+            "source_text_mask_bbox": [42, 32, 118, 54],
+            "background_rgb": [220, 220, 220],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "layout_profile": "translucent_balloon",
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertFalse(changed)
+        self.assertEqual(img.getpixel((80, 42)), (112, 120, 126))
+
+
+    def test_render_band_text_mask_cleanup_skips_white_balloon(self):
+        img = Image.new("RGB", (160, 90), (248, 248, 248))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "TEXTO",
+            "source_text_mask_bbox": [42, 32, 118, 54],
+            "background_rgb": [220, 220, 220],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "layout_profile": "white_balloon",
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertFalse(changed)
+        self.assertEqual(img.getpixel((80, 42)), (248, 248, 248))
+
+
+    def test_render_band_text_mask_cleanup_skips_standard_text_over_art(self):
+        img = Image.new("RGB", (160, 90), (116, 128, 142))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "TEXTO",
+            "source_text_mask_bbox": [42, 32, 118, 54],
+            "background_rgb": [180, 180, 180],
+            "layout_profile": "standard",
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertFalse(changed)
+        self.assertEqual(img.getpixel((80, 42)), (116, 128, 142))
+
+
+    def test_render_band_text_mask_cleanup_skips_visual_item_card(self):
+        img = Image.new("RGB", (220, 120), (241, 206, 107))
+        text = {
+            "route_action": "translate_inpaint_render",
+            "translated": "ELIXIR DA PEDRA DA LUA",
+            "source_text_mask_bbox": [52, 32, 168, 58],
+            "background_rgb": [241, 206, 107],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "layout_profile": "colored_status_panel",
+            "layout_category": "item_card",
+            "card_panel_id": "item_card_35_257_687_796",
+            "qa_flags": ["visual_text_only_inpaint_contract"],
+        }
+
+        changed = renderer_mod._apply_text_mask_cleanup_before_render(img, [text], {})
+
+        self.assertFalse(changed)
+        self.assertEqual(img.getpixel((110, 45)), (241, 206, 107))
+
+
+    def test_finalize_render_completion_contract_requires_legible_ink_bbox(self):
+        text_data = {
+            "fit_status": "ok",
+            "render_bbox": [12, 8, 72, 34],
+            "font_size_final": 16,
+            "minimum_legible_font_px": 12,
+        }
+
+        renderer_mod._finalize_render_completion_contract(text_data)
+
+        self.assertTrue(text_data["render_completed"])
+
+        text_data["font_size_final"] = 10
+        renderer_mod._finalize_render_completion_contract(text_data)
+
+        self.assertFalse(text_data["render_completed"])
+
+
+    def test_finalize_render_completion_reconciles_false_negative_item_card_preflight(self):
+        text_data = {
+            "fit_status": "ok",
+            "render_bbox": [280, 397, 684, 441],
+            "font_size_final": 13,
+            "minimum_legible_font_px": 12,
+            "layout_category": "item_card",
+            "card_panel_id": "item_card:GRADE:A",
+            "card_joint_layout_status": "below_minimum_legible",
+            "route_action": "review_required",
+            "route_reason": "item_card_joint_layout_below_minimum",
+            "qa_flags": ["fit_below_minimum_legible", "item_card_joint_layout_failed"],
+            "qa_metrics": {"item_card_joint_layout": {"status": "below_minimum_legible"}},
+        }
+
+        renderer_mod._finalize_render_completion_contract(text_data)
+
+        self.assertTrue(text_data["render_completed"])
+        self.assertEqual(text_data["card_joint_layout_status"], "ok")
+        self.assertNotIn("item_card_joint_layout_failed", text_data["qa_flags"])
+        self.assertNotIn("fit_below_minimum_legible", text_data["qa_flags"])
+        self.assertNotIn("route_action", text_data)
+        self.assertEqual(text_data["qa_metrics"]["item_card_joint_layout"]["status"], "ok")
+
+
+    def test_item_card_actual_resolver_retries_below_minimum_with_legible_font(self):
+        text_data = {
+            "id": "cardocr_009",
+            "translated": "A EFICÁCIA DA POÇÃO",
+            "layout_category": "item_card",
+            "card_panel_id": "item_card:GRADE:B+",
+            "safe_text_box": [116, 495, 483, 518],
+            "target_bbox": [103, 494, 496, 519],
+            "balloon_bbox": [103, 494, 496, 519],
+            "position_bbox": [108, 495, 491, 518],
+            "capacity_bbox": [108, 495, 491, 518],
+            "layout_safe_bbox": [108, 495, 491, 518],
+            "estilo": {"fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf", "tamanho": 23},
+            "qa_flags": ["visual_text_only_inpaint_contract"],
+        }
+        plan = plan_text_layout(text_data)
+        resolved = _resolve_text_layout(text_data, plan)
+        resolved["font_size"] = 6
+
+        fallback_plan, fallback = renderer_mod._resolve_item_card_legible_fallback(text_data, plan, resolved)
+
+        self.assertEqual(fallback_plan["font_name"], "ComicNeue-Bold.ttf")
+        self.assertGreaterEqual(fallback["font_size"], 12)
+        self.assertIn("visual_card_font_fallback", text_data["qa_flags"])
 
 if __name__ == "__main__":
     unittest.main()

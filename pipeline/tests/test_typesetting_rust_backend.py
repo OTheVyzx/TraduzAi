@@ -8,6 +8,7 @@ import pytest
 
 from typesetter.backend_contract import TypesettingRenderRequest
 from typesetter.rust_backend import (
+    KOHARU_RENDERER_CAPABILITIES,
     KoharuBackendUnavailable,
     render_with_koharu_backend,
     resolve_koharu_bridge_path,
@@ -40,6 +41,11 @@ def test_missing_koharu_bridge_fails_closed(monkeypatch):
 
     with pytest.raises(KoharuBackendUnavailable, match="TRADUZAI_KOHARU_RENDERER_BIN"):
         render_with_koharu_backend(_request())
+
+
+def test_koharu_backend_capabilities_are_explicit_and_do_not_claim_v2_effects():
+    assert {"fill", "stroke", "font_family"} <= KOHARU_RENDERER_CAPABILITIES
+    assert not ({"glow", "shadow", "gradient", "multistroke"} & KOHARU_RENDERER_CAPABILITIES)
 
 
 def test_resolve_koharu_bridge_path_uses_configured_env(monkeypatch, tmp_path):

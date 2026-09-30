@@ -6,6 +6,7 @@ from typesetter.style_extractor import (
     TextStyleEvidence,
     extract_sfx_style_evidence,
     extract_text_style_evidence,
+    extract_text_style_evidence_v2,
 )
 
 
@@ -26,6 +27,279 @@ class FakeScoreFontDetector:
 class RaisingFontDetector:
     def detect(self, crop, allow_default=True):
         raise RuntimeError("font model unavailable")
+
+
+def test_v2_metrics_are_mask_backed_and_x_height_normalized():
+    image = np.full((100, 240, 3), (70, 160, 215), dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.putText(glyph, "CARD", (35, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.4, 255, 3, cv2.LINE_8)
+    image[glyph > 0] = (248, 248, 248)
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        owner_id="owner_card",
+        semantic_role="system_card",
+    )
+    metrics = evidence.attribute_provenance["typographic_metrics"]
+
+    assert evidence.attributes["fill"].value == "#F8F8F8"
+    assert metrics["normalization_unit"] == "source_x_height"
+    assert metrics["bbox_width_xh"] > metrics["bbox_height_xh"]
+    assert "tracking_xh" in metrics and "slant_tangent" in metrics
+    assert evidence.attributes["tracking_xh"].value != "unknown"
+    assert evidence.attributes["slant_tangent"].value != "unknown"
+    assert evidence.attributes["width_scale"].value != "unknown"
+    assert evidence.attributes["scale_y"].value != "unknown"
+
+
+def test_v2_explicit_masks_exclude_neighboring_art_from_effect_evidence():
+    image = np.full((80, 160, 3), 245, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[30:42, 42:82] = 255
+    image[glyph > 0] = (15, 15, 15)
+    context = np.zeros_like(glyph)
+    context[10:70, 15:145] = 255
+    context[glyph > 0] = 0
+    stroke = np.zeros_like(glyph)
+    effect = np.zeros_like(glyph)
+    effect[24:48, 35:90] = 255
+    effect[glyph > 0] = 0
+    foreign_art = np.zeros_like(glyph)
+    foreign_art[24:48, 86:110] = 255
+    image[foreign_art > 0] = (220, 20, 180)
+    effect[foreign_art > 0] = 0
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        stroke_ring_mask=stroke,
+        effect_region_mask=effect,
+        owner_id="owner_a",
+        semantic_role="dialogue_body",
+        source_phase="pre_inpaint",
+    )
+
+    assert evidence.attribute_provenance["owner"]["source_phase"] == "pre_inpaint"
+    assert evidence.attributes["fill"].value == "#0F0F0F"
+    assert evidence.attributes["glow"].value == "unknown"
+
+
+def test_v2_fill_sampling_excludes_halo_contamination_from_authoritative_glyph_mask():
+    image = np.full((120, 260, 3), (61, 3, 4), dtype=np.uint8)
+    core = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.putText(core, "OPPA", (38, 78), cv2.FONT_HERSHEY_SIMPLEX, 1.6, 255, 3, cv2.LINE_AA)
+    halo = cv2.dilate(core, np.ones((11, 11), dtype=np.uint8))
+    halo_only = (halo > 0) & (core == 0)
+    image[halo_only] = (86, 2, 2)
+    image[core > 0] = (248, 248, 248)
+    authoritative_region = np.zeros_like(core)
+    authoritative_region[25:86, 28:225] = 255
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        authoritative_region,
+        context,
+        owner_id="owner_halo",
+        semantic_role="dialogue_body",
+    )
+
+    assert evidence.attributes["fill"].value == "#F8F8F8"
+    assert evidence.attributes["gradient"].value == "unknown"
+    assert evidence.attributes["gradient"].abstention_reason == "solid_fill_no_gradient"
+
+
+def test_v2_fill_sampling_preserves_a_real_vertical_gradient():
+    image = np.full((120, 260, 3), (18, 18, 18), dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.putText(glyph, "CARD", (30, 82), cv2.FONT_HERSHEY_SIMPLEX, 1.7, 255, 5, cv2.LINE_8)
+    ys = np.where(glyph > 0)[0]
+    for y in np.unique(ys):
+        t = (float(y) - float(ys.min())) / max(1.0, float(ys.max() - ys.min()))
+        image[y, glyph[y] > 0] = (
+            int(round(70 + 120 * t)),
+            int(round(220 - 120 * t)),
+            int(round(255 - 40 * t)),
+        )
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        owner_id="owner_gradient",
+        semantic_role="system_card",
+    )
+
+    gradient = evidence.attributes["gradient"].value
+    assert isinstance(gradient, dict)
+    assert gradient["colors"][0] != gradient["colors"][1]
+    axis = np.asarray(gradient["end"]) - np.asarray(gradient["start"])
+    assert float(axis[1] / np.linalg.norm(axis)) >= 0.98
+
+
+def test_v2_fill_sampling_preserves_diagonal_gradient_direction_and_metrics():
+    image = np.full((150, 280, 3), 246, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    for text, origin in (
+        ("HONESTLY", (32, 36)),
+        ("NO ONE CAN", (18, 67)),
+        ("BEAT ME", (48, 98)),
+        ("ONE ON ONE", (12, 129)),
+    ):
+        cv2.putText(
+            glyph,
+            text,
+            origin,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.72,
+            255,
+            2,
+            cv2.LINE_8,
+        )
+    ys, xs = np.where(glyph > 0)
+    grid_y, grid_x = np.indices(glyph.shape, dtype=np.float32)
+    xn = (grid_x - xs.min()) / max(1.0, float(xs.max() - xs.min()))
+    yn = (grid_y - ys.min()) / max(1.0, float(ys.max() - ys.min()))
+    t = np.clip((xn + yn) / 2.0, 0.0, 1.0)[..., None]
+    purple = np.asarray((102, 51, 204), dtype=np.float32)
+    black = np.asarray((8, 8, 10), dtype=np.float32)
+    field = np.rint(purple * (1.0 - t) + black * t).astype(np.uint8)
+    image[glyph > 0] = field[glyph > 0]
+    context = np.full(glyph.shape, 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        owner_id="owner_diagonal_gradient",
+        semantic_role="dialogue_body",
+    )
+
+    gradient = evidence.attributes["gradient"].value
+    assert isinstance(gradient, dict)
+    axis = np.asarray(gradient["end"]) - np.asarray(gradient["start"])
+    assert float(np.dot(axis, (1.0, 1.0)) / (np.linalg.norm(axis) * np.sqrt(2.0))) >= 0.90
+    metrics = evidence.attribute_provenance["typographic_metrics"]
+    assert metrics["gradient_supported_cells"] >= 6
+    assert metrics["gradient_rank_one_explained_energy"] >= 0.72
+    assert metrics["gradient_median_residual_rgb"] >= 0.0
+
+
+def test_v2_gradient_fill_ignores_separate_white_outline_and_dark_shadow():
+    image = np.full((120, 260, 3), 244, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.putText(glyph, "GRADIENT", (22, 75), cv2.FONT_HERSHEY_SIMPLEX, 1.0, 255, 3, cv2.LINE_8)
+    outline = cv2.dilate(glyph, np.ones((5, 5), dtype=np.uint8))
+    outline[glyph > 0] = 0
+    shadow = np.zeros_like(glyph)
+    shadow[4:, 5:] = glyph[:-4, :-5]
+    shadow[glyph > 0] = 0
+    image[shadow > 0] = (18, 18, 20)
+    image[outline > 0] = (255, 255, 255)
+    ys, xs = np.where(glyph > 0)
+    grid_x = np.indices(glyph.shape, dtype=np.float32)[1]
+    t = np.clip((grid_x - xs.min()) / max(1.0, float(xs.max() - xs.min())), 0.0, 1.0)[..., None]
+    red = np.asarray((224, 32, 32), dtype=np.float32)
+    yellow = np.asarray((240, 224, 32), dtype=np.float32)
+    field = np.rint(red * (1.0 - t) + yellow * t).astype(np.uint8)
+    image[glyph > 0] = field[glyph > 0]
+    context = np.full(glyph.shape, 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        stroke_ring_mask=outline,
+        effect_region_mask=shadow,
+        owner_id="owner_gradient_effects",
+        semantic_role="dialogue_body",
+    )
+
+    gradient = evidence.attributes["gradient"].value
+    assert isinstance(gradient, dict)
+    colors = [np.asarray([int(color[i : i + 2], 16) for i in (1, 3, 5)]) for color in gradient["colors"]]
+    assert np.linalg.norm(colors[0] - red) <= 24.0
+    assert np.linalg.norm(colors[1] - yellow) <= 24.0
+
+
+def test_v2_coarse_multiline_owner_mask_abstains_from_glyph_geometry_style():
+    image = np.full((100, 240, 3), (30, 120, 180), dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[18:28, 30:205] = 255
+    glyph[31:41, 30:205] = 255
+    glyph[44:54, 30:205] = 255
+    image[glyph > 0] = (248, 248, 248)
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        glyph,
+        context,
+        owner_id="owner_coarse_lines",
+        semantic_role="dialogue_body",
+    )
+
+    assert evidence.attributes["tracking_xh"].value == "unknown"
+    assert evidence.attributes["tracking_xh"].abstention_reason == "coarse_owner_mask_geometry"
+    assert evidence.attributes["font_width"].value == "unknown"
+    assert evidence.attributes["font_weight"].value == "unknown"
+    assert evidence.attributes["gradient"].value == "unknown"
+    assert (
+        evidence.attributes["gradient"].abstention_reason
+        == "coarse_owner_mask_color_geometry"
+    )
+
+
+def test_v2_coarse_owner_mask_recovers_high_contrast_fill_without_false_gradient():
+    image = np.full((100, 260, 3), (92, 196, 238), dtype=np.uint8)
+    coarse = np.zeros(image.shape[:2], dtype=np.uint8)
+    coarse[18:28, 25:235] = 255
+    coarse[31:41, 25:235] = 255
+    coarse[44:54, 25:235] = 255
+    actual_glyphs = np.zeros_like(coarse)
+    cv2.putText(
+        actual_glyphs,
+        "DIAMOND",
+        (42, 27),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
+        255,
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        actual_glyphs,
+        "ELIXIR",
+        (70, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
+        255,
+        1,
+        cv2.LINE_AA,
+    )
+    image[actual_glyphs > 0] = (248, 248, 248)
+    context = np.full(image.shape[:2], 255, dtype=np.uint8)
+
+    evidence = extract_text_style_evidence_v2(
+        image,
+        coarse,
+        context,
+        owner_id="owner_coarse_card_title",
+        semantic_role="system_card",
+    )
+
+    assert evidence.attributes["fill"].value == "#F8F8F8"
+    assert evidence.attributes["fill"].confidence >= 0.70
+    assert evidence.attributes["gradient"].value == "unknown"
+    assert (
+        evidence.attributes["gradient"].abstention_reason
+        == "coarse_owner_mask_color_geometry"
+    )
 
 
 def test_extracts_black_fill_from_dark_text_on_white_crop():

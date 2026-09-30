@@ -1,8 +1,16 @@
+import pytest
+
 from typesetter.backend_contract import (
+    KOHARU_RUST_CAPABILITIES,
+    PYTHON_V2_CAPABILITIES,
     DEFAULT_FONT_FAMILY,
     TypesettingRenderRequest,
     TypesettingRenderResult,
     build_rust_render_request,
+    choose_backend,
+    select_backend_for_style,
+    StyleBackend,
+    UnsupportedStyleCapability,
 )
 
 
@@ -90,3 +98,42 @@ def test_result_contract_contains_required_backend_response_fields():
         "fit_status": "ok",
         "backend": "koharu",
     }
+
+
+def test_backend_declares_v2_style_capabilities():
+    assert {"fill", "stroke", "font_family"} <= KOHARU_RUST_CAPABILITIES
+    assert {"glow", "shadow", "gradient", "multistroke", "tracking", "slant"} <= PYTHON_V2_CAPABILITIES
+
+
+def test_profile_with_unsupported_glow_falls_back_to_python():
+    selection = select_backend_for_style(
+        "koharu_rust",
+        {"applied_style": {"font_name": "KOMIKAX_.ttf", "fill": "#FFFFFF", "glow": {"width_px": 6}}},
+    )
+
+    assert selection.selected_backend == "python_v2"
+    assert selection.status == "fallback"
+    assert selection.unsupported_capabilities == ("glow",)
+
+
+def test_backend_cannot_silently_drop_requested_tracking_or_slant():
+    limited = StyleBackend("limited", frozenset({"fill", "font_family"}))
+
+    with pytest.raises(UnsupportedStyleCapability, match="slant,tracking"):
+        choose_backend(
+            requested={"tracking_xh", "slant_tangent"},
+            backends=[limited],
+        )
+
+
+def test_style_v2_enforce_selects_only_backend_with_observation_contract():
+    selection = select_backend_for_style(
+        "koharu_rust",
+        {"applied_style": {"fill": "#FFFFFF"}},
+        enforce_observation=True,
+    )
+
+    assert selection.selected_backend == "python_v2"
+    assert selection.reason == "rust_missing_materialization_observation_v2"
+    assert "materialization_observation_v2" in PYTHON_V2_CAPABILITIES
+    assert "materialization_observation_v2" not in KOHARU_RUST_CAPABILITIES

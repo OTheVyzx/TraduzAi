@@ -7,6 +7,30 @@ import numpy as np
 from debug_tools import style_audit_report
 
 
+def test_applied_style_fields_expose_directional_gradient_without_flattening():
+    gradient = {
+        "kind": "linear",
+        "colors": ["#6633CC", "#08080A"],
+        "stops": [0.0, 1.0],
+        "start": [0.2, 0.1],
+        "end": [0.8, 0.9],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+
+    fields = style_audit_report._applied_style_fields(
+        {"estilo": {"cor": "#6633CC", "cor_gradiente": gradient}}
+    )
+
+    assert fields["applied_gradient"] is True
+    assert fields["applied_gradient_colors"] == gradient["colors"]
+    assert fields["applied_gradient_direction"] == {
+        "start": gradient["start"],
+        "end": gradient["end"],
+        "coordinate_space": "glyph_bbox_normalized",
+    }
+    assert fields["applied_gradient_spec"] == gradient
+
+
 class _FakeEvidence:
     def to_dict(self) -> dict:
         return {
@@ -45,6 +69,7 @@ def test_style_audit_report_separates_detected_evidence_from_applied_style(tmp_p
                         "tipo": "fala",
                         "bbox": [10, 10, 70, 50],
                         "content_class": "text",
+                        "confidence": 0.95,
                         "route_action": "translate_inpaint_render",
                         "style_origin": "auto",
                         "style_confidence": 0.95,
@@ -76,6 +101,9 @@ def test_style_audit_report_separates_detected_evidence_from_applied_style(tmp_p
     assert records[0]["applied_gradient"] is False
     assert records[0]["applied_glow"] is False
     assert records[0]["applied_stroke_color"] == ""
+    assert records[0]["style_evidence_v2"]["schema_version"] == 2
+    assert records[0]["style_evidence_v2"]["attributes"]["fill"]["value"] == "#FFFFFF"
+    assert records[0]["style_evidence_v2_shadow_policy"]["apply_to_renderer"] is False
 
 
 def test_style_audit_report_skips_unapplied_sfx_visual_review_candidates(tmp_path, monkeypatch):

@@ -33,6 +33,18 @@ class BuildStripTests(unittest.TestCase):
             self.assertTrue(np.all(strip.image[99, :] == 50))
             self.assertTrue(np.all(strip.image[100, :] == 200))
 
+    def test_build_strip_normalizes_opencv_bgr_input_to_internal_rgb(self):
+        from strip.concat import build_strip
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_bgr = np.full((12, 18, 3), [11, 37, 229], dtype=np.uint8)
+            path = self._write_png(tmp_path, "colored.png", source_bgr)
+
+            strip = build_strip([path])
+
+            np.testing.assert_array_equal(strip.image[4, 7], [229, 37, 11])
+
     def test_build_strip_letterboxes_narrow_pages_with_white(self):
         from strip.concat import build_strip
         with tempfile.TemporaryDirectory() as tmp:
@@ -83,6 +95,23 @@ class BuildStripTests(unittest.TestCase):
             self.assertEqual(strip.page_x_offsets[0], 0)
             # narrow (200px) → offset (300-200)//2 = 50
             self.assertEqual(strip.page_x_offsets[1], 50)
+
+    def test_build_strip_preserves_odd_original_page_width_for_page_space_crop(self):
+        from strip.concat import build_strip
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            wide = np.full((20, 400, 3), 90, dtype=np.uint8)
+            odd = np.full((20, 359, 3), 140, dtype=np.uint8)
+            paths = [
+                self._write_png(tmp_path, "wide.png", wide),
+                self._write_png(tmp_path, "odd.png", odd),
+            ]
+
+            strip = build_strip(paths)
+
+            self.assertEqual(strip.source_page_widths, [400, 359])
+            self.assertEqual(strip.page_x_offsets, [0, 20])
 
     def test_build_strip_same_width_pages_have_zero_offset(self):
         """Páginas com mesma largura têm offset=0."""

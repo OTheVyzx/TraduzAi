@@ -561,6 +561,26 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertEqual(page["_strip_fast_white_rejection_reasons"], {"koharu_text_evidence_mismatch": 1})
         self.assertTrue(np.array_equal(result, image))
 
+    def test_fast_white_evidence_rejects_partial_line_polygon_coverage(self):
+        import inpainter
+        from inpainter import _koharu_style_fast_white_evidence_rejection_reason
+
+        image = np.full((120, 220, 3), 255, dtype=np.uint8)
+        text = {
+            "line_polygons": [
+                [[30, 42], [190, 42], [190, 72], [30, 72]],
+            ],
+        }
+        fill_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        fill_mask[42:72, 88:132] = 255
+        evidence = np.zeros(image.shape[:2], dtype=np.uint8)
+        evidence[42:72, 30:190] = 255
+
+        with patch.object(inpainter, "build_raw_text_mask_from_image", return_value=evidence):
+            reason = _koharu_style_fast_white_evidence_rejection_reason(image, text, fill_mask)
+
+        self.assertEqual(reason, "koharu_text_evidence_mismatch")
+
     def test_fast_white_fill_prefers_merged_source_boxes_over_broad_bbox(self):
         from inpainter import _apply_fast_white_balloon_fill
 
@@ -3762,6 +3782,15 @@ class VisionStackInpainterTests(unittest.TestCase):
             },
             clear=False,
         ), patch(
+            "inpainter._apply_koharu_bubble_fast_fill_to_blocks",
+            side_effect=lambda working_rgb, page, blocks: (
+                working_rgb,
+                blocks,
+                np.zeros(working_rgb.shape[:2], dtype=np.uint8),
+                np.zeros(working_rgb.shape[:2], dtype=np.uint8),
+                {"filled_pixels": 0, "remaining_pixels": 0, "samples": [], "rejection_reasons": {}},
+            ),
+        ), patch(
             "vision_stack.runtime._get_inpainter",
             return_value=fake_inpainter,
         ), patch(
@@ -3779,7 +3808,104 @@ class VisionStackInpainterTests(unittest.TestCase):
                 {"has_residual": True, "flags": ["dark_residual_pixels"], "score": 0.24},
                 {"has_residual": True, "flags": ["dark_residual_pixels"], "score": 0.24},
                 {"has_residual": False, "flags": [], "score": 0.0},
+                {"has_residual": False, "flags": [], "score": 0.0},
             ],
+        ):
+            result = inpaint_band_image(image, page)
+
+        self.assertEqual(len(fake_inpainter.calls), 1)
+        self.assertTrue(page["_strip_dark_residual_retry"])
+        self.assertGreater(page["_strip_dark_residual_retry_mask_pixels"], 0)
+        self.assertTrue(np.all(result[34:42, 42:110] == 42))
+
+    def test_dark_residual_retry_runs_for_text_over_art_when_evidence_uses_expanded_mask(self):
+        from inpainter import inpaint_band_image
+
+        image = np.full((90, 150, 3), 36, dtype=np.uint8)
+        image[34:42, 42:110] = 245
+        first_clean = image.copy()
+        first_clean[32:46, 38:116] = 54
+        page = {
+            "texts": [
+                {
+                    "bbox": [40, 30, 112, 48],
+                    "text_pixel_bbox": [42, 34, 110, 42],
+                    "balloon_bbox": [34, 24, 122, 56],
+                    "tipo": "fala",
+                    "layout_profile": "translucent_balloon",
+                    "bubble_mask_source": "derived_white_crop_rejected",
+                    "bubble_mask_error": "derived_mask_not_anchored_to_text",
+                    "mask_evidence": {
+                        "kind": "ocr_pixels",
+                        "raw_mask_pixels": 512,
+                        "expanded_mask_pixels": 1187,
+                        "evidence_score": 1.0,
+                    },
+                    "skip_processing": False,
+                }
+            ],
+            "_vision_blocks": [{"bbox": [40, 30, 112, 48], "confidence": 0.95}],
+        }
+
+        class FakeInpainter:
+            def __init__(self):
+                self.calls = []
+
+            def inpaint(self, img, mask, batch_size=4, force_no_tiling=True):
+                self.calls.append(mask.copy())
+                repaired = img.copy()
+                repaired[mask > 0] = 42
+                return repaired
+
+        fake_inpainter = FakeInpainter()
+        dark_residual = {
+            "has_residual": True,
+            "flags": ["dark_residual_pixels"],
+            "score": 0.24,
+            "region_source": "expanded_mask",
+        }
+        retry_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        retry_mask[28:52, 36:120] = 255
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_FAST_WHITE_INPAINT": "0",
+                "TRADUZAI_STRIP_FAST_LOCAL_INPAINT": "0",
+            },
+            clear=False,
+        ), patch(
+            "inpainter._apply_koharu_bubble_fast_fill_to_blocks",
+            side_effect=lambda working_rgb, page, blocks: (
+                working_rgb,
+                blocks,
+                np.zeros(working_rgb.shape[:2], dtype=np.uint8),
+                np.zeros(working_rgb.shape[:2], dtype=np.uint8),
+                {"filled_pixels": 0, "remaining_pixels": 0, "samples": [], "rejection_reasons": {}},
+            ),
+        ), patch(
+            "vision_stack.runtime._get_inpainter",
+            return_value=fake_inpainter,
+        ), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            return_value=first_clean,
+        ), patch(
+            "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
+            side_effect=lambda original, cleaned, texts, **kwargs: (cleaned, {}),
+        ), patch(
+            "vision_stack.runtime._clamp_image_to_limit_mask",
+            side_effect=lambda base, candidate, mask, texts, **kwargs: (candidate, int(np.count_nonzero(mask)), 0),
+        ), patch(
+            "inpainter._detect_inpaint_residual_text",
+            side_effect=[
+                dark_residual,
+                dark_residual,
+                {"has_residual": False, "flags": [], "score": 0.0},
+                {"has_residual": False, "flags": [], "score": 0.0},
+            ],
+        ), patch(
+            "inpainter._build_dark_residual_retry_mask",
+            return_value=retry_mask,
         ):
             result = inpaint_band_image(image, page)
 
@@ -4676,6 +4802,95 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertFalse(page.get("_strip_used_dark_panel_fill"))
         self.assertGreaterEqual(page.get("_strip_remaining_inpaint_blocks"), 1)
 
+    def test_filter_keeps_text_only_colored_card_fragment_with_fallback_mask_for_real_inpaint(self):
+        """A merged item card must not lose its safe OCR-glyph action mask.
+
+        The first paragraph can carry a rejected derived mask while the next
+        paragraph has only a bbox fallback.  Both still have OCR-pixel masks;
+        discarding the fallback used to discard the whole inpaint batch and
+        leave the English item description underneath the translation.
+        """
+        from inpainter import _filter_unsafe_auto_inpaint_blocks, _ocr_page_has_unsafe_auto_inpaint_evidence
+
+        evidence = _allowed_mask_evidence()
+        evidence.update({"kind": "ocr_pixels", "raw_mask_pixels": 1200, "expanded_mask_pixels": 3400})
+        base = {
+            "background_rgb": [244, 207, 105],
+            "layout_profile": "translucent_balloon",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["visual_text_only_inpaint_contract", "fast_fill_no_glyph_evidence"],
+            "mask_evidence": evidence,
+        }
+        primary = {
+            **base,
+            "id": "ocr_002",
+            "bbox": [207, 460, 487, 532],
+            "text_pixel_bbox": [208, 466, 517, 527],
+            "line_polygons": [[[208, 466], [517, 466], [517, 527], [208, 527]]],
+            "balloon_bbox": [146, 439, 548, 553],
+            "bubble_mask_source": "derived_white_crop_rejected",
+            "bubble_mask_error": "derived_mask_not_anchored_to_text",
+        }
+        continuation = {
+            **base,
+            "id": "ocr_003",
+            "bbox": [150, 571, 535, 708],
+            "text_pixel_bbox": [151, 574, 572, 704],
+            "line_polygons": [[[151, 574], [572, 574], [572, 704], [151, 704]]],
+            "balloon_bbox": [66, 530, 619, 749],
+            "bubble_mask_source": "rejected_derived_bubble_mask",
+            "bubble_mask_error": "missing_real_bubble_mask",
+        }
+        page = {"texts": [primary, continuation]}
+
+        remaining = _filter_unsafe_auto_inpaint_blocks(
+            page,
+            [dict(primary), dict(continuation)],
+            np.full((800, 700, 3), [244, 207, 105], dtype=np.uint8),
+        )
+
+        self.assertEqual([block["id"] for block in remaining], ["ocr_002", "ocr_003"])
+        self.assertFalse(_ocr_page_has_unsafe_auto_inpaint_evidence(page, remaining))
+        self.assertNotIn("real_inpaint_skipped_unsafe_mask", page.get("_strip_inpaint_decision_flags") or [])
+
+    def test_inpaint_band_image_runs_real_inpaint_for_text_only_colored_card_contract(self):
+        from inpainter import inpaint_band_image
+
+        image = np.full((180, 360, 3), [244, 207, 105], dtype=np.uint8)
+        image[:, :, 0] = np.linspace(216, 250, image.shape[1], dtype=np.uint8)
+        cv2.putText(image, "MOONSTONE ELIXIR", (64, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.64, (250, 250, 250), 2, cv2.LINE_AA)
+        evidence = _allowed_mask_evidence()
+        evidence.update({"kind": "ocr_pixels", "raw_mask_pixels": 1900, "expanded_mask_pixels": 4800})
+        text = {
+            "id": "ocr_003",
+            "trace_id": "ocr_003@page_002_band_033",
+            "text": "MOONSTONE ELIXIR",
+            "bbox": [56, 60, 314, 112],
+            "text_pixel_bbox": [56, 60, 314, 112],
+            "line_polygons": [[[64, 66], [314, 66], [314, 108], [64, 108]]],
+            "balloon_bbox": [34, 42, 330, 132],
+            "bubble_mask_source": "rejected_derived_bubble_mask",
+            "bubble_mask_error": "missing_real_bubble_mask",
+            "background_rgb": [244, 207, 105],
+            "layout_profile": "translucent_balloon",
+            "card_panel_text_context": True,
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["visual_text_only_inpaint_contract", "fast_fill_no_glyph_evidence"],
+            "mask_evidence": evidence,
+        }
+        page = {"texts": [dict(text)], "_vision_blocks": [dict(text)], "_band_y_top": 0}
+
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "0"}, clear=False), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            return_value=image.copy(),
+        ) as inpaint_round:
+            inpaint_band_image(image, page)
+
+        inpaint_round.assert_called_once()
+        self.assertTrue(page.get("_strip_used_real_inpaint"))
+        self.assertEqual(page["texts"][0]["layout_category"], "item_card")
+        self.assertEqual(page["texts"][0]["card_panel_child_index"], 0)
+
     def test_dark_bubble_with_ocr_evidence_uses_glyph_action_mask_not_panel_mask(self):
         from inpainter import _apply_fast_dark_panel_text_fill
 
@@ -4711,7 +4926,18 @@ class VisionStackInpainterTests(unittest.TestCase):
         }
         page = {"texts": [dict(text)]}
 
-        _result, _remaining, stats = _apply_fast_dark_panel_text_fill(image, page, [dict(text)])
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_INPAINT_POLICY": "legacy",
+                "TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "1",
+            },
+        ):
+            _result, _remaining, stats = _apply_fast_dark_panel_text_fill(
+                image,
+                page,
+                [dict(text)],
+            )
 
         self.assertEqual(stats["dark_panel_fill_count"], 1)
         fill_mask = page.get("_strip_dark_panel_fill_mask")
@@ -4777,6 +5003,336 @@ class VisionStackInpainterTests(unittest.TestCase):
         self.assertFalse(page.get("_strip_used_dark_panel_fill"))
         self.assertNotIn("real_inpaint_skipped_unsafe_mask", page.get("_strip_inpaint_decision_flags") or [])
         self.assertGreater(int(np.count_nonzero(np.any(result != image, axis=2))), 100)
+
+    def test_inpaint_band_image_keeps_glyph_only_card_row_without_bubble_mask_bbox(self):
+        from inpainter import inpaint_band_image
+
+        image = np.full((150, 360, 3), [18, 24, 72], dtype=np.uint8)
+        cv2.putText(image, "PERMANENTLY INCREASES", (42, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (245, 248, 255), 2, cv2.LINE_AA)
+        text = {
+            "id": "cardocr_003",
+            "trace_id": "cardocr_003@page_002_band_044",
+            "text": "PERMANENTLY INCREASES",
+            "bbox": [38, 48, 322, 82],
+            "text_pixel_bbox": [38, 48, 322, 82],
+            "line_polygons": [[[38, 48], [322, 48], [322, 82], [38, 82]]],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "block_profile": "colored_status_panel_row",
+            "layout_profile": "colored_status_panel_row",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["visual_text_only_inpaint_contract", "mask_outside_balloon_critical"],
+            "mask_evidence": _allowed_mask_evidence(),
+        }
+        page = {"texts": [dict(text)], "_vision_blocks": [dict(text)]}
+
+        def fake_round(img, payload, inpainter):
+            mask = payload.get("_precomputed_inpaint_mask")
+            result = img.copy()
+            result[mask > 0] = [18, 24, 72]
+            payload["_inpaint_round_stats"] = {
+                "_strip_inpaint_decision_flags": ["mask_outside_balloon_critical"],
+            }
+            return result
+
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_POLICY": "pure"}, clear=False), patch(
+            "vision_stack.runtime._apply_inpainting_round",
+            side_effect=fake_round,
+        ):
+            result = inpaint_band_image(image, page)
+
+        self.assertTrue(page.get("_strip_used_real_inpaint"))
+        self.assertNotIn("real_inpaint_skipped_unsafe_mask", page.get("_strip_inpaint_decision_flags") or [])
+        self.assertGreater(int(np.count_nonzero(np.any(result != image, axis=2))), 100)
+
+    def test_inpaint_band_image_uses_glyph_mask_for_band_edge_rejected_white_crop(self):
+        from inpainter import inpaint_band_image
+
+        image = np.full((497, 800, 3), 252, dtype=np.uint8)
+        cv2.putText(image, "SIMLAK TOO KIONT", (369, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (20, 20, 20), 1, cv2.LINE_AA)
+        evidence = _allowed_mask_evidence()
+        evidence.update({"kind": "ocr_pixels", "raw_mask_pixels": 1207, "expanded_mask_pixels": 2816})
+        text = {
+            "id": "ocr_001",
+            "trace_id": "ocr_001@page_002_band_043",
+            "text": "SIMLAK TOO KIONT",
+            "bbox": [338, 0, 645, 22],
+            "text_pixel_bbox": [369, 2, 617, 15],
+            "line_polygons": [[[369, 2], [617, 2], [617, 15], [369, 15]]],
+            "balloon_bbox": [271, 0, 712, 34],
+            "bubble_mask_bbox": [338, 0, 645, 22],
+            "bubble_mask_source": "derived_white_crop_rejected",
+            "block_profile": "white_balloon",
+            "route_action": "translate_inpaint_render",
+            "qa_flags": ["band_edge_clipped_text_mask", "rejected_derived_bubble_mask"],
+            "mask_evidence": evidence,
+        }
+        page = {"texts": [dict(text)], "_vision_blocks": [dict(text)]}
+
+        def fake_round(img, payload, inpainter):
+            mask = payload.get("_precomputed_inpaint_mask")
+            result = img.copy()
+            result[mask > 0] = 252
+            payload["_inpaint_round_stats"] = {
+                "_strip_inpaint_decision_flags": ["mask_outside_balloon_critical"],
+            }
+            return result
+
+        with patch("vision_stack.runtime._apply_inpainting_round", side_effect=fake_round):
+            result = inpaint_band_image(image, page)
+
+        self.assertTrue(page.get("_strip_used_real_inpaint"))
+        self.assertNotIn("real_inpaint_skipped_unsafe_mask", page.get("_strip_inpaint_decision_flags") or [])
+        self.assertGreater(int(np.count_nonzero(np.any(result != image, axis=2))), 100)
+
+    def test_multi_row_visual_card_allows_dense_glyph_only_action_mask(self):
+        from inpainter import _rejected_card_action_mask_allows_real_inpaint, _visual_card_action_prefers_local_inpaint
+
+        shape = (220, 360)
+        action = np.zeros(shape, dtype=np.uint8)
+        blocks = []
+        for index, y1 in enumerate((22, 82, 142), start=1):
+            bbox = [36, y1, 324, y1 + 24]
+            action[y1 : y1 + 24, 36:324] = 255
+            blocks.append(
+                {
+                    "id": f"cardocr_{index:03d}",
+                    "trace_id": f"cardocr_{index:03d}@page_002_band_044",
+                    "bbox": bbox,
+                    "text_pixel_bbox": bbox,
+                    "line_polygons": [[[36, y1], [324, y1], [324, y1 + 24], [36, y1 + 24]]],
+                    "bubble_mask_source": "image_dark_panel_mask",
+                    "block_profile": "colored_status_panel_row",
+                    "route_action": "translate_inpaint_render",
+                    "qa_flags": ["visual_text_only_inpaint_contract", "mask_outside_balloon_critical"],
+                    "mask_evidence": _allowed_mask_evidence(),
+                }
+            )
+        page = {"texts": [dict(block) for block in blocks], "_vision_blocks": [dict(block) for block in blocks]}
+
+        allowed = _rejected_card_action_mask_allows_real_inpaint(page, blocks, action, shape)
+
+        self.assertGreater(np.count_nonzero(action) / float(action.size), 0.12)
+        self.assertTrue(allowed)
+        self.assertTrue(_visual_card_action_prefers_local_inpaint(page, blocks, action, shape))
+        unsafe_blocks = [dict(block) for block in blocks]
+        unsafe_blocks[0]["qa_flags"] = []
+        self.assertFalse(_visual_card_action_prefers_local_inpaint({"texts": unsafe_blocks}, unsafe_blocks, action, shape))
+
+    def test_multi_row_image_panel_allows_one_row_without_glyph_evidence_when_action_is_contained(self):
+        from inpainter import _rejected_card_action_mask_allows_real_inpaint, _visual_card_action_prefers_local_inpaint
+
+        shape = (620, 800)
+        action = np.zeros(shape, dtype=np.uint8)
+        action[145:260, 250:710] = 255
+        action[250:400, 240:720] = 255
+        action[390:465, 250:710] = 255
+        blocks = []
+        for index, (bbox, has_evidence) in enumerate(
+            (
+                ([336, 159, 632, 252], False),
+                ([260, 262, 703, 386], True),
+                ([266, 398, 701, 456], True),
+            ),
+            start=1,
+        ):
+            x1, y1, x2, y2 = bbox
+            evidence = _allowed_mask_evidence() if has_evidence else {
+                "kind": "none",
+                "raw_mask_pixels": 0,
+                "expanded_mask_pixels": 0,
+                "fast_fill_allowed": False,
+            }
+            blocks.append(
+                {
+                    "id": f"ocr_{index:03d}",
+                    "trace_id": f"ocr_{index:03d}@page_002_band_046",
+                    "bbox": bbox,
+                    "text_pixel_bbox": bbox,
+                    "line_polygons": [[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]],
+                    "balloon_bbox": [171, 132, 796, 473],
+                    "bubble_mask_bbox": [171, 132, 796, 473],
+                    "bubble_mask_source": "image_dark_panel_mask",
+                    "block_profile": "colored_status_panel_row",
+                    "route_action": "translate_inpaint_render",
+                    "qa_flags": ["visual_text_only_inpaint_contract"] + ([] if has_evidence else ["fast_fill_no_glyph_evidence"]),
+                    "mask_evidence": evidence,
+                }
+            )
+        page = {"texts": [dict(block) for block in blocks], "_vision_blocks": [dict(block) for block in blocks]}
+
+        allowed = _rejected_card_action_mask_allows_real_inpaint(page, blocks, action, shape)
+
+        self.assertGreater(np.count_nonzero(action) / float(action.size), 0.12)
+        self.assertTrue(allowed)
+        self.assertTrue(_visual_card_action_prefers_local_inpaint(page, blocks, action, shape))
+
+    def test_visual_card_residual_retry_expands_glyph_rows_only_inside_shared_panel(self):
+        from inpainter import _build_visual_card_residual_retry_mask
+
+        shape = (500, 800)
+        original = np.full((500, 800, 3), [252, 210, 108], dtype=np.uint8)
+        cleaned = original.copy()
+        base = np.zeros(shape, dtype=np.uint8)
+        base[150:190, 160:640] = 255
+        base[220:250, 180:620] = 255
+        cv2.putText(original, "PERMANENTLY INCREASES", (180, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 245), 2, cv2.LINE_AA)
+        cv2.putText(cleaned, "PERMANENTLY INCREASES", (180, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (232, 194, 104), 2, cv2.LINE_AA)
+        cv2.putText(original, "UPON CONSUMPTION", (200, 243), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 245), 2, cv2.LINE_AA)
+        cv2.putText(cleaned, "UPON CONSUMPTION", (200, 243), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (232, 194, 104), 2, cv2.LINE_AA)
+        texts = []
+        for index, bbox in enumerate(([150, 145, 650, 195], [170, 215, 630, 255]), start=1):
+            texts.append(
+                {
+                    "id": f"cardocr_{index:03d}",
+                    "bbox": bbox,
+                    "text_pixel_bbox": bbox,
+                    "bubble_mask_bbox": [130, 120, 670, 280],
+                    "bubble_mask_source": "image_dark_panel_mask",
+                    "layout_profile": "colored_status_panel_row",
+                    "qa_flags": ["visual_text_only_inpaint_contract"],
+                }
+            )
+
+        retry = _build_visual_card_residual_retry_mask(original, cleaned, base, texts, shape)
+
+        self.assertIsInstance(retry, np.ndarray)
+        self.assertGreater(int(np.count_nonzero(retry)), 0)
+        self.assertLess(int(np.count_nonzero(retry)), int(np.count_nonzero(base)))
+        self.assertEqual(int(np.count_nonzero(retry[:120])), 0)
+        self.assertEqual(int(np.count_nonzero(retry[280:])), 0)
+        self.assertEqual(int(np.count_nonzero(retry[:, :130])), 0)
+        self.assertEqual(int(np.count_nonzero(retry[:, 670:])), 0)
+
+    def test_visual_card_local_inpaint_mask_uses_glyph_pixels_not_full_row_rectangles(self):
+        from inpainter import _build_visual_card_local_inpaint_mask
+
+        shape = (240, 520)
+        image = np.full((shape[0], shape[1], 3), [252, 210, 108], dtype=np.uint8)
+        base = np.zeros(shape, dtype=np.uint8)
+        texts = []
+        for index, (label, y1) in enumerate((("GRADE B PLUS", 48), ("INCREASES STRENGTH", 132)), start=1):
+            bbox = [48, y1, 472, y1 + 42]
+            base[y1 : y1 + 42, 48:472] = 255
+            cv2.putText(image, label, (62, y1 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 245), 2, cv2.LINE_AA)
+            texts.append(
+                {
+                    "id": f"cardocr_{index:03d}",
+                    "bbox": bbox,
+                    "text_pixel_bbox": bbox,
+                    "line_polygons": [[[48, y1], [472, y1], [472, y1 + 42], [48, y1 + 42]]],
+                    "bubble_mask_source": "derived_card_panel_mask",
+                    "block_profile": "colored_status_panel_row",
+                    "route_action": "translate_inpaint_render",
+                    "qa_flags": ["visual_card_ocr_recall", "visual_text_only_inpaint_contract"],
+                    "mask_evidence": _allowed_mask_evidence(),
+                }
+            )
+
+        local = _build_visual_card_local_inpaint_mask(image, base, texts, shape)
+
+        self.assertIsInstance(local, np.ndarray)
+        self.assertGreater(int(np.count_nonzero(local)), 250)
+        self.assertLess(int(np.count_nonzero(local)), int(np.count_nonzero(base)) * 0.55)
+        self.assertEqual(int(np.count_nonzero(local[base == 0])), 0)
+
+    def test_light_visual_card_uses_blurred_model_guide_and_clamps_outside_mask(self):
+        from inpainter import _apply_visual_card_guided_model_inpaint, _visual_card_prefers_blurred_model_guide
+
+        height, width = 180, 360
+        x_gradient = np.linspace(220, 252, width, dtype=np.uint8)
+        image = np.repeat(x_gradient[np.newaxis, :, np.newaxis], height, axis=0)
+        image = np.repeat(image, 3, axis=2)
+        cv2.putText(image, "GRADE B PLUS", (72, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 250), 3, cv2.LINE_AA)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        mask[60:112, 54:314] = 255
+
+        class GuideReturningInpainter:
+            def inpaint(self, guide, action_mask, **_kwargs):
+                self.guide = guide.copy()
+                self.mask = action_mask.copy()
+                return guide.copy()
+
+        inpainter = GuideReturningInpainter()
+        outside = mask == 0
+
+        self.assertTrue(_visual_card_prefers_blurred_model_guide(image, mask))
+        result = _apply_visual_card_guided_model_inpaint(image, mask, inpainter)
+
+        self.assertTrue(np.array_equal(result[outside], image[outside]))
+        self.assertLess(float(np.std(inpainter.guide[mask > 0])), float(np.std(image[mask > 0])))
+        dark = np.full_like(image, 24)
+        self.assertFalse(_visual_card_prefers_blurred_model_guide(dark, mask))
+
+    def test_visual_card_guided_model_feathers_inside_edge_without_touching_outside(self):
+        from inpainter import _apply_visual_card_guided_model_inpaint
+
+        image = np.full((120, 220, 3), 220, dtype=np.uint8)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[30:90, 40:180] = 255
+
+        class FlatInpainter:
+            def inpaint(self, guide, action_mask, **_kwargs):
+                result = guide.copy()
+                result[action_mask > 0] = 100
+                return result
+
+        result = _apply_visual_card_guided_model_inpaint(image, mask, FlatInpainter())
+
+        self.assertTrue(np.array_equal(result[mask == 0], image[mask == 0]))
+        self.assertLess(int(np.max(np.abs(result[30, 40:180].astype(int) - 220))), 30)
+        self.assertLess(int(np.mean(result[52:68, 92:128])), 140)
+
+    def test_visual_card_residual_retry_handles_truncated_debug_text_samples(self):
+        from inpainter import _build_visual_card_residual_retry_mask
+
+        shape = (500, 800)
+        original = np.full((500, 800, 3), [252, 210, 108], dtype=np.uint8)
+        cleaned = original.copy()
+        base = np.zeros(shape, dtype=np.uint8)
+        base[150:190, 160:640] = 255
+        base[330:360, 180:620] = 255
+        cv2.putText(original, "TOP CARD ROW", (190, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 245), 2, cv2.LINE_AA)
+        cv2.putText(cleaned, "TOP CARD ROW", (190, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (232, 194, 104), 2, cv2.LINE_AA)
+        cv2.putText(original, "OMITTED SAMPLE ROW", (200, 355), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 245), 2, cv2.LINE_AA)
+        cv2.putText(cleaned, "OMITTED SAMPLE ROW", (200, 355), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (232, 194, 104), 2, cv2.LINE_AA)
+        texts = [
+            {
+                "id": "ocr_001",
+                "text_pixel_bbox": [150, 145, 650, 195],
+                "bubble_mask_bbox": [130, 120, 670, 220],
+                "bubble_mask_source": "derived_white_crop_rejected",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "cardocr_002",
+                "text_pixel_bbox": [170, 215, 630, 255],
+                "bubble_mask_bbox": [130, 210, 670, 280],
+                "bubble_mask_source": "derived_card_panel_mask",
+                "qa_flags": ["visual_card_ocr_recall", "visual_text_only_inpaint_contract"],
+            },
+        ]
+
+        retry = _build_visual_card_residual_retry_mask(original, cleaned, base, texts, shape)
+
+        self.assertIsInstance(retry, np.ndarray)
+        self.assertGreater(int(np.count_nonzero(retry[320:370])), 0)
+        self.assertLess(int(np.count_nonzero(retry)), int(np.count_nonzero(base)))
+
+    def test_visual_card_residual_telea_reduces_ghost_contrast_without_touching_outside_mask(self):
+        from inpainter import _apply_visual_card_residual_inpaint
+
+        image = np.full((120, 420, 3), [252, 210, 108], dtype=np.uint8)
+        cv2.putText(image, "PERMANENTLY", (62, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (218, 178, 94), 3, cv2.LINE_AA)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        cv2.putText(mask, "PERMANENTLY", (62, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.0, 255, 7, cv2.LINE_AA)
+        outside = mask == 0
+        before_std = float(np.std(cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)[mask > 0]))
+
+        result = _apply_visual_card_residual_inpaint(image, mask)
+
+        after_std = float(np.std(cv2.cvtColor(result, cv2.COLOR_RGB2GRAY)[mask > 0]))
+        self.assertLess(after_std, before_std * 0.55)
+        self.assertTrue(np.array_equal(result[outside], image[outside]))
 
     def test_white_image_rect_mask_not_blocked_by_stale_unsafe_flag(self):
         from inpainter import inpaint_band_image
@@ -6354,6 +6910,179 @@ class VisionStackInpainterTests(unittest.TestCase):
         samples = page.get("_strip_koharu_fast_fill_samples") or []
         self.assertTrue(any(sample.get("reason") == "visual_contract_missing_bubble_mask" for sample in samples))
         self.assertTrue(np.array_equal(result[80, 80], np.asarray([4, 8, 12], dtype=np.uint8)))
+
+    def test_colored_item_card_contract_fill_prefers_panel_color_over_black_shadow(self):
+        from inpainter import _sample_dark_panel_contract_fill_rgb
+
+        image = np.full((180, 420, 3), (249, 210, 107), dtype=np.uint8)
+        cv2.rectangle(image, (92, 62), (328, 116), (0, 0, 0), -1)
+        cv2.putText(
+            image,
+            "MOONSTONE ELIXIR",
+            (100, 96),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (255, 254, 221),
+            2,
+            cv2.LINE_AA,
+        )
+        fill_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        fill_mask[58:121, 88:332] = 255
+        text = {
+            "bbox": [92, 62, 328, 116],
+            "text_pixel_bbox": [92, 62, 328, 116],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "background_rgb": [249, 210, 107],
+            "background_type": "colored_status_panel",
+            "layout_profile": "colored_status_panel",
+            "layout_category": "item_card",
+            "qa_flags": ["visual_text_only_inpaint_contract"],
+            "dark_panel_effect_colors": {"panel_fill_rgb": [249, 210, 107]},
+            "qa_metrics": {
+                "derived_card_panel_mask": {"panel_fill_rgb": [249, 210, 107]},
+            },
+        }
+
+        fill_rgb = _sample_dark_panel_contract_fill_rgb(
+            image,
+            fill_mask,
+            text,
+            image.shape[1],
+            image.shape[0],
+        )
+
+        self.assertIsInstance(fill_rgb, np.ndarray)
+        self.assertTrue(np.allclose(fill_rgb, np.asarray([249, 210, 107]), atol=3))
+        self.assertEqual(
+            (text["qa_metrics"].get("dark_panel_sampled_contract_fill_rgb") or {}).get("source"),
+            "visual_card_panel_color",
+        )
+
+    def test_recalled_colored_item_card_samples_clean_panel_when_color_metadata_is_missing(self):
+        from inpainter import _sample_dark_panel_contract_fill_rgb
+
+        image = np.full((180, 420, 3), (247, 208, 106), dtype=np.uint8)
+        cv2.rectangle(image, (92, 62), (328, 116), (0, 0, 0), -1)
+        cv2.putText(
+            image,
+            "MOONSTONE ELIXIR",
+            (100, 96),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (255, 254, 221),
+            2,
+            cv2.LINE_AA,
+        )
+        fill_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        fill_mask[58:121, 88:332] = 255
+        text = {
+            "bbox": [92, 62, 328, 116],
+            "text_pixel_bbox": [92, 62, 328, 116],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "layout_profile": "dark_panel",
+            "card_panel_text_context": True,
+            "qa_flags": ["visual_card_ocr_recall", "visual_text_only_inpaint_contract"],
+        }
+
+        fill_rgb = _sample_dark_panel_contract_fill_rgb(
+            image,
+            fill_mask,
+            text,
+            image.shape[1],
+            image.shape[0],
+        )
+
+        self.assertIsInstance(fill_rgb, np.ndarray)
+        self.assertTrue(np.allclose(fill_rgb, np.asarray([247, 208, 106]), atol=5))
+        self.assertEqual(
+            (text["qa_metrics"].get("dark_panel_sampled_contract_fill_rgb") or {}).get("source"),
+            "local_colored_panel_context",
+        )
+
+    def test_visual_item_card_contract_cleanup_covers_every_row_after_earlier_routes(self):
+        from inpainter import _apply_visual_item_card_contract_cleanup
+
+        image = np.full((220, 520, 3), (248, 209, 107), dtype=np.uint8)
+        cv2.putText(image, "MOONSTONE ELIXIR", (112, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (15, 10, 4), 7, cv2.LINE_AA)
+        cv2.putText(image, "MOONSTONE ELIXIR", (112, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 253, 221), 2, cv2.LINE_AA)
+        cv2.putText(image, "GRADE: B+", (170, 146), cv2.FONT_HERSHEY_SIMPLEX, 0.74, (15, 10, 4), 7, cv2.LINE_AA)
+        cv2.putText(image, "GRADE: B+", (170, 146), cv2.FONT_HERSHEY_SIMPLEX, 0.74, (255, 253, 221), 2, cv2.LINE_AA)
+        texts = [
+            {
+                "id": "cardocr_title",
+                "bbox": [105, 42, 410, 82],
+                "text_pixel_bbox": [105, 42, 410, 82],
+                "line_polygons": [[[105, 42], [410, 42], [410, 82], [105, 82]]],
+                "bubble_mask_source": "image_dark_panel_mask",
+                "block_profile": "colored_status_panel",
+                "card_panel_text_context": True,
+                "qa_flags": ["visual_card_ocr_recall", "visual_text_only_inpaint_contract"],
+            },
+            {
+                "id": "ocr_grade",
+                "bbox": [160, 112, 350, 156],
+                "text_pixel_bbox": [160, 112, 350, 156],
+                "line_polygons": [[[160, 112], [350, 112], [350, 156], [160, 156]]],
+                "bubble_mask_source": "derived_card_panel_mask",
+                "background_rgb": [248, 209, 107],
+                "layout_category": "item_card",
+                "block_profile": "colored_status_panel",
+                "qa_flags": ["visual_text_only_inpaint_contract", "fast_fill_no_glyph_evidence"],
+                "_fast_fill_inpaint_resolved": True,
+            },
+        ]
+
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_POLICY": "fast"}):
+            cleaned, count, action_mask = _apply_visual_item_card_contract_cleanup(image, image, texts)
+
+        self.assertEqual(count, 2)
+        self.assertGreater(int(np.count_nonzero(action_mask)), 8000)
+        for text in texts:
+            x1, y1, x2, y2 = text["text_pixel_bbox"]
+            crop = cleaned[y1:y2, x1:x2]
+            luma = np.mean(crop.astype(np.float32), axis=2)
+            self.assertLess(int(np.count_nonzero(luma >= 245.0)), 12)
+            self.assertLess(int(np.count_nonzero(luma <= 80.0)), 12)
+            self.assertIn("visual_item_card_forced_contract_cleanup", text.get("qa_flags") or [])
+            metric = (text.get("qa_metrics") or {}).get("visual_item_card_forced_contract_cleanup") or {}
+            self.assertGreater(int(metric.get("mask_pixels") or 0), 1000)
+            self.assertEqual(metric.get("fill_rgb"), [248, 209, 107])
+
+    def test_pure_mode_skips_visual_item_card_forced_cleanup(self):
+        from inpainter import _apply_visual_item_card_contract_cleanup
+
+        image = np.full((80, 180, 3), (248, 209, 107), dtype=np.uint8)
+        cv2.putText(image, "GRADE B", (20, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (15, 10, 4), 3, cv2.LINE_AA)
+        text = {
+            "id": "cardocr_grade",
+            "bbox": [16, 18, 150, 58],
+            "text_pixel_bbox": [16, 18, 150, 58],
+            "line_polygons": [[[16, 18], [150, 18], [150, 58], [16, 58]]],
+            "bubble_mask_source": "image_dark_panel_mask",
+            "layout_category": "item_card",
+            "qa_flags": ["visual_text_only_inpaint_contract"],
+        }
+
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_POLICY": "pure"}):
+            cleaned, count, action_mask = _apply_visual_item_card_contract_cleanup(image, image, [text])
+
+        self.assertTrue(np.array_equal(cleaned, image))
+        self.assertEqual(count, 0)
+        self.assertEqual(int(np.count_nonzero(action_mask)), 0)
+        self.assertNotIn("visual_item_card_forced_contract_cleanup", text.get("qa_flags") or [])
+
+    def test_pure_mode_skips_expanded_white_residual_force_fill(self):
+        from inpainter import _apply_white_residual_expanded_mask_force_fill
+
+        image = np.full((64, 96, 3), 232, dtype=np.uint8)
+        image[20:44, 30:66] = (80, 90, 100)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[18:46, 28:68] = 255
+
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_POLICY": "pure"}):
+            cleaned = _apply_white_residual_expanded_mask_force_fill(image, mask)
+
+        self.assertTrue(np.array_equal(cleaned, image))
 
     def test_dark_bubble_connected_pair_uses_sibling_split_like_white_pair(self):
         from inpainter import _try_dark_panel_text_fill
@@ -8016,6 +8745,1195 @@ class VisionStackInpainterTests(unittest.TestCase):
 
         filled = result[mask > 0]
         self.assertLess(float(np.mean(filled)), 40.0)
+
+    def test_wide_contour_balloon_skips_expanded_white_residual_force_fill(self):
+        from inpainter import _should_skip_expanded_white_residual_force_fill
+
+        text = {
+            "bubble_mask_source": "image_contour_bubble_mask",
+            "balloon_bbox": [0, 0, 800, 340],
+            "bubble_mask_bbox": [189, 8, 483, 130],
+            "bubble_inner_bbox": [197, 7, 602, 168],
+            "qa_flags": ["band_edge_clipped_balloon_mask", "ocr_geometry_overmerged"],
+        }
+
+        self.assertTrue(_should_skip_expanded_white_residual_force_fill([text]))
+
+    def test_missing_real_bubble_mask_skips_expanded_white_residual_force_fill(self):
+        from inpainter import _should_skip_expanded_white_residual_force_fill
+
+        text = {
+            "bubble_mask_source": "bbox_fallback",
+            "qa_flags": ["missing_real_bubble_mask", "debug_derived_bubble_mask_rejected"],
+        }
+
+        self.assertTrue(_should_skip_expanded_white_residual_force_fill([text]))
+
+    def test_translucent_white_balloon_profile_blocks_dark_panel_route(self):
+        from inpainter import (
+            _apply_dark_panel_text_fills,
+            _apply_fast_dark_panel_text_fill,
+            _constrain_translucent_balloon_action_masks,
+            _fast_local_rejection_reason,
+            _fast_white_rejection_reason,
+        )
+
+        image = np.full((100, 180, 3), 32, dtype=np.uint8)
+        gradient = np.tile(np.linspace(210, 245, 120, dtype=np.uint8), (70, 1))
+        image[15:85, 30:150] = np.stack([gradient, gradient, gradient], axis=2)
+        text = {
+            "id": "ocr_001",
+            "text_pixel_bbox": [60, 42, 120, 58],
+            "bbox": [60, 42, 120, 58],
+            "balloon_bbox": [30, 15, 150, 85],
+            "bubble_mask_source": "image_white_bubble_mask",
+            "layout_profile": "standard",
+            "block_profile": "standard",
+            "route_action": "translate_inpaint_render",
+        }
+
+        _, fill_count = _apply_dark_panel_text_fills(image, {"texts": [text]})
+
+        self.assertEqual(fill_count, 0)
+        self.assertEqual(text["layout_profile"], "translucent_balloon")
+        self.assertEqual(text["block_profile"], "translucent_balloon")
+        self.assertIn("translucent_balloon", text["qa_metrics"])
+        self.assertEqual(_fast_white_rejection_reason(text), "translucent_balloon")
+        self.assertEqual(_fast_local_rejection_reason(text), "translucent_balloon")
+
+        broad_mask = np.zeros((100, 180), dtype=np.uint8)
+        broad_mask[10:90, 20:160] = 255
+        constrained_raw, constrained_expanded = _constrain_translucent_balloon_action_masks(
+            broad_mask,
+            broad_mask,
+            [text],
+            image,
+        )
+        self.assertLess(np.count_nonzero(constrained_raw), np.count_nonzero(broad_mask))
+        self.assertGreaterEqual(np.count_nonzero(constrained_expanded), np.count_nonzero(constrained_raw))
+        self.assertLess(np.count_nonzero(constrained_expanded), np.count_nonzero(broad_mask))
+
+        glyph_mask = np.zeros((100, 180), dtype=np.uint8)
+        glyph_mask[40:50, 76:104] = 255
+        narrow_raw, narrow_expanded = _constrain_translucent_balloon_action_masks(
+            glyph_mask,
+            broad_mask,
+            [text],
+            image,
+        )
+        self.assertGreater(np.count_nonzero(narrow_expanded), np.count_nonzero(narrow_raw))
+        # Text over art needs enough room to cover the anti-aliased edge and
+        # outline of a glyph.  The expansion must be stronger than the
+        # generic 2 px glyph halo while remaining far below the broad balloon.
+        self.assertGreaterEqual(np.count_nonzero(narrow_expanded), 900)
+        self.assertLess(np.count_nonzero(narrow_expanded), np.count_nonzero(broad_mask) // 4)
+
+        recovery_image = image.copy()
+        recovery_image[43:49, 107:113] = 0
+        recovered_raw, _recovered_expanded = _constrain_translucent_balloon_action_masks(
+            glyph_mask,
+            glyph_mask,
+            [text],
+            recovery_image,
+        )
+        self.assertGreater(int(recovered_raw[45, 110]), 0)
+
+        page = {"texts": [dict(text)]}
+        with patch.dict("os.environ", {"TRADUZAI_STRIP_FAST_DARK_PANEL_FILL": "1"}, clear=False):
+            fast_result, remaining, stats = _apply_fast_dark_panel_text_fill(image, page, [dict(text)])
+        self.assertTrue(np.array_equal(fast_result, image))
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(stats["dark_panel_fill_count"], 0)
+        self.assertEqual(stats["remaining_blocks"], 1)
+        self.assertEqual(page["_strip_fast_dark_rejection_reasons"], {"translucent_balloon": 1})
+
+    def test_translucent_balloon_skips_white_residual_force_fill(self):
+        from vision_stack.runtime import _apply_white_balloon_residual_force_fill
+
+        original = np.full((80, 120, 3), 255, dtype=np.uint8)
+        original[28:44, 34:86] = 0
+        cleaned = original.copy()
+        cleaned[28:44, 34:86] = 100
+        text = {
+            "bbox": [30, 24, 90, 48],
+            "text_pixel_bbox": [34, 28, 86, 44],
+            "line_polygons": [[[34, 28], [86, 28], [86, 44], [34, 44]]],
+            "balloon_bbox": [20, 16, 100, 60],
+            "bubble_mask_source": "image_white_bubble_mask",
+        }
+
+        opaque_result = _apply_white_balloon_residual_force_fill(original, cleaned, [dict(text)])
+        translucent = dict(text, layout_profile="translucent_balloon", block_profile="translucent_balloon")
+        translucent_result = _apply_white_balloon_residual_force_fill(original, cleaned, [translucent])
+
+        self.assertFalse(np.array_equal(opaque_result, cleaned))
+        self.assertTrue(np.array_equal(translucent_result, cleaned))
+
+    def test_translucent_balloon_uses_local_text_over_art_reconstruction(self):
+        from inpainter import _apply_translucent_balloon_text_over_art_inpaint
+
+        original = np.full((80, 120, 3), 220, dtype=np.uint8)
+        original[:, :, 0] = np.tile(np.linspace(190, 240, 120, dtype=np.uint8), (80, 1))
+        original[30:46, 38:82] = 15
+        current = np.full_like(original, 255)
+        action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        action_mask[26:50, 32:88] = 255
+        text = {
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "balloon_bbox": [20, 16, 100, 60],
+        }
+
+        result, pixels = _apply_translucent_balloon_text_over_art_inpaint(
+            original,
+            current,
+            action_mask,
+            [text],
+        )
+
+        self.assertEqual(pixels, int(np.count_nonzero(action_mask)))
+        self.assertFalse(np.array_equal(result[action_mask > 0], current[action_mask > 0]))
+        self.assertTrue(np.array_equal(result[action_mask == 0], current[action_mask == 0]))
+
+    def test_white_outline_translucent_panel_keeps_normal_inpaint_result(self):
+        from inpainter import _apply_translucent_balloon_text_over_art_inpaint
+
+        original = np.full((80, 120, 3), 220, dtype=np.uint8)
+        original[30:46, 38:82] = 255
+        current = np.full_like(original, 190)
+        action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        action_mask[26:50, 32:88] = 255
+        text = {
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "inpaint_profile": "white_outline_translucent_panel",
+            "balloon_bbox": [20, 16, 100, 60],
+        }
+
+        result, pixels = _apply_translucent_balloon_text_over_art_inpaint(
+            original,
+            current,
+            action_mask,
+            [text],
+        )
+
+        self.assertEqual(pixels, 0)
+        self.assertTrue(np.array_equal(result, current))
+
+    def test_translucent_separator_split_keeps_the_region_inpaint_result(self):
+        from inpainter import _apply_translucent_balloon_text_over_art_inpaint
+
+        original = np.full((80, 120, 3), 220, dtype=np.uint8)
+        current = np.full_like(original, 190)
+        action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        action_mask[26:50, 32:88] = 255
+        text = {
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "inpaint_profile": "translucent_separator_split",
+            "balloon_bbox": [20, 16, 100, 60],
+        }
+
+        result, pixels = _apply_translucent_balloon_text_over_art_inpaint(
+            original,
+            current,
+            action_mask,
+            [text],
+        )
+
+        self.assertEqual(pixels, 0)
+        self.assertTrue(np.array_equal(result, current))
+
+    def test_translucent_separator_reconstruction_blends_a_long_horizontal_panel_edge(self):
+        from inpainter import _blend_translucent_horizontal_separator_edges
+
+        original = np.full((80, 120, 3), 230, dtype=np.uint8)
+        original[39:42, :28] = 20
+        original[39:42, 92:] = 20
+        current = original.copy()
+        current[39:42, 28:92] = 205
+        action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+        action_mask[20:62, 28:92] = 255
+
+        result, restored_pixels = _blend_translucent_horizontal_separator_edges(
+            original,
+            current,
+            action_mask,
+        )
+
+        self.assertGreaterEqual(restored_pixels, 64)
+        self.assertTrue(np.all((result[39:42, 28:92] >= 140) & (result[39:42, 28:92] <= 190)))
+        self.assertTrue(np.array_equal(result[action_mask == 0], current[action_mask == 0]))
+
+    def test_translucent_fallback_context_copy_interpolates_clean_side_samples(self):
+        from inpainter import _copy_translucent_fallback_context_rows
+
+        current = np.full((80, 160, 3), 220, dtype=np.uint8)
+        current[20:60, 44:116] = 40
+        current[20:60, 20:44] = 205
+        current[20:60, 116:140] = 235
+        current[34:37, :44] = 20
+        current[34:37, 116:] = 20
+        action_mask = np.zeros(current.shape[:2], dtype=np.uint8)
+        action_mask[20:60, 44:116] = 255
+        text = {
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "bubble_mask_source": "bbox_fallback",
+            "inpaint_profile": "translucent_divider_white_lower",
+        }
+
+        result, copied_pixels = _copy_translucent_fallback_context_rows(current, action_mask, [text])
+
+        self.assertGreater(copied_pixels, 0)
+        self.assertTrue(np.all(result[25, 76] == 40))
+        self.assertTrue(np.all((result[40, 76] >= 215) & (result[40, 76] <= 225)))
+        self.assertTrue(np.array_equal(result[action_mask == 0], current[action_mask == 0]))
+
+    def test_translucent_context_copy_tiles_clean_side_texture(self):
+        from inpainter import _copy_translucent_fallback_context_rows
+
+        current = np.full((50, 120, 3), 220, dtype=np.uint8)
+        texture = np.array([[90, 90, 90], [230, 230, 230]] * 12, dtype=np.uint8)
+        current[12:38, 16:40] = texture
+        current[12:38, 40:80] = 40
+        current[12:38, 80:104] = texture
+        action_mask = np.zeros(current.shape[:2], dtype=np.uint8)
+        action_mask[12:38, 40:80] = 255
+        text = {
+            "layout_profile": "translucent_balloon",
+            "block_profile": "translucent_balloon",
+            "inpaint_profile": "translucent_context_copy",
+        }
+
+        result, copied_pixels = _copy_translucent_fallback_context_rows(current, action_mask, [text])
+
+        self.assertGreaterEqual(copied_pixels, 40 * 26)
+        self.assertTrue(np.array_equal(result[24, 40:64], texture))
+        self.assertTrue(np.array_equal(result[action_mask == 0], current[action_mask == 0]))
+
+    def test_translucent_profile_rejects_a_balloon_collapsed_to_art_text(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((100, 180, 3), 220, dtype=np.uint8)
+        image[42:58, 64:116] = 10
+        text = {
+            "text_pixel_bbox": [64, 42, 116, 58],
+            "bbox": [64, 42, 116, 58],
+            "line_polygons": [[[64, 42], [116, 42], [116, 58], [64, 58]]],
+            "balloon_bbox": [64, 42, 116, 58],
+            "bubble_mask_source": "image_white_bubble_mask",
+        }
+
+        self.assertFalse(_promote_translucent_balloon_profile(image, text))
+        self.assertNotEqual(text.get("layout_profile"), "translucent_balloon")
+
+    def test_translucent_profile_rejects_an_opaque_white_balloon(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((100, 180, 3), 255, dtype=np.uint8)
+        image[42:58, 64:116] = 10
+        text = {
+            "text_pixel_bbox": [64, 42, 116, 58],
+            "bbox": [60, 38, 120, 62],
+            "line_polygons": [[[64, 42], [116, 42], [116, 58], [64, 58]]],
+            "balloon_bbox": [30, 18, 150, 82],
+            "bubble_mask_source": "image_white_bubble_mask",
+        }
+
+        self.assertFalse(_promote_translucent_balloon_profile(image, text))
+        self.assertNotEqual(text.get("layout_profile"), "translucent_balloon")
+
+    def test_translucent_profile_accepts_a_tight_balloon_with_visible_background(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((100, 180, 3), 215, dtype=np.uint8)
+        gradient = np.tile(np.linspace(205, 240, 120, dtype=np.uint8), (60, 1))
+        image[20:80, 30:150] = np.stack([gradient, gradient, gradient], axis=2)
+        image[45:61, 38:150] = 10
+        text = {
+            "text_pixel_bbox": [38, 26, 143, 74],
+            "bbox": [38, 26, 143, 74],
+            "line_polygons": [[[38, 26], [143, 26], [143, 74], [38, 74]]],
+            "balloon_bbox": [30, 20, 150, 80],
+            "bubble_mask_source": "image_white_bubble_mask",
+        }
+
+        self.assertTrue(_promote_translucent_balloon_profile(image, text))
+        self.assertEqual(text.get("layout_profile"), "translucent_balloon")
+
+    def test_translucent_profile_promotes_visible_panel_separator_for_split_inpaint(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((110, 200, 3), 218, dtype=np.uint8)
+        image[56:, :] = 250
+        image[50:53, 24:58] = 18
+        image[50:53, 142:176] = 18
+        image[42:68, 58:142] = 10
+        text = {
+            "text_pixel_bbox": [58, 42, 142, 68],
+            "bbox": [58, 42, 142, 68],
+            "line_polygons": [[[58, 42], [142, 42], [142, 68], [58, 68]]],
+            "balloon_bbox": [24, 18, 176, 92],
+            "bubble_mask_source": "image_white_bubble_mask",
+        }
+
+        self.assertTrue(_promote_translucent_balloon_profile(image, text))
+        self.assertEqual(text.get("layout_profile"), "translucent_balloon")
+        self.assertEqual(text.get("inpaint_profile"), "translucent_separator_split")
+
+    def test_translucent_profile_accepts_rejected_white_crop_with_visible_texture(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((110, 200, 3), 235, dtype=np.uint8)
+        image[:, 24:176:8] = 110
+        image[42:68, 58:142] = 10
+        text = {
+            "text_pixel_bbox": [58, 42, 142, 68],
+            "bbox": [58, 42, 142, 68],
+            "line_polygons": [[[58, 42], [142, 42], [142, 68], [58, 68]]],
+            "balloon_bbox": [24, 18, 176, 92],
+            "bubble_mask_source": "derived_white_crop_rejected",
+            "qa_flags": ["missing_real_bubble_mask", "rejected_derived_bubble_mask"],
+        }
+
+        self.assertTrue(_promote_translucent_balloon_profile(image, text))
+        self.assertEqual(text.get("layout_profile"), "translucent_balloon")
+        self.assertEqual(text.get("inpaint_profile"), "translucent_context_copy")
+
+    def test_translucent_profile_accepts_fallback_mask_with_visible_texture(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((110, 200, 3), 235, dtype=np.uint8)
+        image[:, 24:176:8] = 110
+        image[42:68, 58:142] = 10
+        text = {
+            "text_pixel_bbox": [58, 42, 142, 68],
+            "bbox": [58, 42, 142, 68],
+            "line_polygons": [[[58, 42], [142, 42], [142, 68], [58, 68]]],
+            "balloon_bbox": [24, 18, 176, 92],
+            "bubble_mask_source": "bbox_fallback",
+            "bubble_mask_error": "missing_real_bubble_mask",
+            "qa_flags": ["missing_real_bubble_mask"],
+        }
+
+        self.assertTrue(_promote_translucent_balloon_profile(image, text))
+        self.assertEqual(text.get("layout_profile"), "translucent_balloon")
+
+    def test_translucent_fallback_divider_receives_white_lower_context_profile(self):
+        from inpainter import _promote_translucent_balloon_profile
+
+        image = np.full((110, 200, 3), 235, dtype=np.uint8)
+        image[:, 24:176:8] = 110
+        image[42:68, 58:142] = 10
+        image[50:53, 24:58] = 20
+        image[50:53, 142:176] = 20
+        text = {
+            "text_pixel_bbox": [58, 42, 142, 68],
+            "bbox": [58, 42, 142, 68],
+            "line_polygons": [[[58, 42], [142, 42], [142, 68], [58, 68]]],
+            "balloon_bbox": [24, 18, 176, 92],
+            "bubble_mask_source": "bbox_fallback",
+            "bubble_mask_error": "missing_real_bubble_mask",
+        }
+
+        self.assertTrue(_promote_translucent_balloon_profile(image, text))
+        self.assertEqual(text.get("inpaint_profile"), "translucent_divider_white_lower")
+
+    def test_translucent_balloon_does_not_receive_a_second_runtime_mask_expansion(self):
+        from vision_stack.runtime import _run_masked_inpaint_passes
+
+        class IdentityInpainter:
+            def inpaint(self, image, _mask, **_kwargs):
+                return image.copy()
+
+        image = np.full((72, 96, 3), 180, dtype=np.uint8)
+        glyph_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        glyph_mask[28:40, 34:62] = 255
+
+        result = _run_masked_inpaint_passes(
+            IdentityInpainter(),
+            image,
+            glyph_mask,
+            texts=[{"layout_profile": "translucent_balloon"}],
+            expand_mask=True,
+        )
+
+        self.assertTrue(np.array_equal(result["expanded_mask"], glyph_mask))
+
+    def test_inpaint_changed_pixels_are_subset_of_action_mask(self):
+        from inpainter import inpaint_band_image
+        from inpainter.owner_mask import (
+            OwnerMaskEvidence,
+            UnsafeOwnerMaskError,
+            build_owner_mask_plan,
+        )
+        from ownership.model import TextOwner
+
+        class LeakyFixtureInpainter:
+            engine_name = "fixture_leaky"
+
+            def __init__(self):
+                self.calls = 0
+
+            def inpaint(self, image, _mask, **_kwargs):
+                self.calls += 1
+                return np.full_like(image, 17)
+
+        image = np.full((30, 44, 3), 210, dtype=np.uint8)
+        glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+        glyph[9:19, 12:31] = 255
+        owner = TextOwner(
+            owner_id="own_page_001_body",
+            page_id="page_001",
+            component_ids=["cmp_body"],
+            observation_ids=["obs_body"],
+            selected_observation_ids=["obs_body"],
+            semantic_role="dialogue_body",
+            source_payload="SOURCE",
+            translated_payload="DESTINO",
+            disposition="owned",
+            state="translated",
+            route_action="translate_inpaint_render",
+            execution_tile_id="tile_executor",
+        )
+        plan = build_owner_mask_plan(
+            image,
+            owner,
+            [
+                OwnerMaskEvidence(
+                    evidence_id="glyph",
+                    component_id="cmp_body",
+                    glyph_mask=glyph,
+                )
+            ],
+            owner_component_bboxes_page={"cmp_body": (12, 9, 31, 19)},
+        )
+
+        page = {
+                "texts": [
+                    {
+                        "owner_id": owner.owner_id,
+                        "page_id": owner.page_id,
+                        "execution_tile_id": owner.execution_tile_id,
+                        "disposition": "owned",
+                        "state": "mask_ready",
+                        "route_action": "translate_inpaint_render",
+                        "action_mask_ref": plan.action_mask_ref,
+                        "source_payload": "SOURCE",
+                        "translated_payload": "DESTINO",
+                    }
+                ],
+                "_page_id": "page_001",
+                "_band_id": "tile_executor",
+                "_owner_coordinate_space": "logical_page",
+                "_page_shape": [30, 44],
+                "_owner_component_bboxes_page": {
+                    "cmp_body": [12, 9, 31, 19]
+                },
+                "_owner_execution_projection": {
+                    "owner_id": "own_page_001_body",
+                    "tile_id": "tile_executor",
+                    "role": "executor",
+                    "bbox_page": [12, 9, 31, 19],
+                    "bbox_tile": [12, 9, 31, 19],
+                    "offset_xy": [0, 0],
+                },
+            }
+        engine = LeakyFixtureInpainter()
+        mutation = inpaint_band_image(
+            image,
+            page,
+            owner_mask_plan=plan,
+            owner_inpainter=engine,
+        )
+
+        assert not np.any((mutation.changed_mask > 0) & (plan.action_mask == 0))
+        assert mutation.changed_outside_owner_pixels == 0
+        np.testing.assert_array_equal(
+            mutation.result_rgb[plan.action_mask == 0],
+            image[plan.action_mask == 0],
+        )
+        self.assertEqual(engine.calls, 1)
+
+        page["_owner_component_bboxes_page"]["cmp_body"] = [0, 0, 44, 30]
+        rejected_engine = LeakyFixtureInpainter()
+        with self.assertRaisesRegex(UnsafeOwnerMaskError, "component|geometry"):
+            inpaint_band_image(
+                image,
+                page,
+                owner_mask_plan=plan,
+                owner_inpainter=rejected_engine,
+            )
+        self.assertEqual(rejected_engine.calls, 0)
+
+    def test_protected_art_is_unchanged_even_when_touching_text(self):
+        from inpainter import inpaint_band_image
+        from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
+        from ownership.model import TextOwner
+
+        class LeakyFixtureInpainter:
+            engine_name = "fixture_leaky"
+
+            def inpaint(self, image, _mask, **_kwargs):
+                return np.zeros_like(image)
+
+        image = np.full((34, 48, 3), [180, 120, 70], dtype=np.uint8)
+        glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+        cv2.putText(
+            glyph,
+            "TXT",
+            (10, 21),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            255,
+            1,
+            cv2.LINE_8,
+        )
+        protected = np.zeros(image.shape[:2], dtype=np.uint8)
+        protected[14:27, 35:42] = 255
+        owner = TextOwner(
+            owner_id="own_page_001_body",
+            page_id="page_001",
+            component_ids=["cmp_body"],
+            observation_ids=["obs_body"],
+            selected_observation_ids=["obs_body"],
+            semantic_role="dialogue_body",
+            source_payload="SOURCE",
+            translated_payload="DESTINO",
+            disposition="owned",
+            state="translated",
+            route_action="translate_inpaint_render",
+            execution_tile_id="tile_executor",
+        )
+        plan = build_owner_mask_plan(
+            image,
+            owner,
+            [
+                OwnerMaskEvidence(
+                    evidence_id="touching_glyph",
+                    component_id="cmp_body",
+                    glyph_mask=glyph,
+                    protected_art_mask=protected,
+                )
+            ],
+            owner_component_bboxes_page={"cmp_body": (10, 9, 35, 23)},
+        )
+
+        mutation = inpaint_band_image(
+            image,
+            {
+                "texts": [
+                    {
+                        "owner_id": owner.owner_id,
+                        "page_id": owner.page_id,
+                        "execution_tile_id": owner.execution_tile_id,
+                        "disposition": "owned",
+                        "state": "mask_ready",
+                        "route_action": "translate_inpaint_render",
+                        "action_mask_ref": plan.action_mask_ref,
+                        "source_payload": "SOURCE",
+                        "translated_payload": "DESTINO",
+                    }
+                ],
+                "_page_id": "page_001",
+                "_band_id": "tile_executor",
+                "_owner_coordinate_space": "logical_page",
+                "_page_shape": [34, 48],
+                "_owner_component_bboxes_page": {
+                    "cmp_body": [10, 9, 35, 23]
+                },
+                "_owner_execution_projection": {
+                    "owner_id": "own_page_001_body",
+                    "page_id": "page_001",
+                    "tile_id": "tile_executor",
+                    "role": "executor",
+                    "bbox_page": [10, 9, 35, 23],
+                    "bbox_tile": [10, 9, 35, 23],
+                    "offset_xy": [0, 0],
+                },
+            },
+            owner_mask_plan=plan,
+            owner_inpainter=LeakyFixtureInpainter(),
+        )
+
+        np.testing.assert_array_equal(
+            mutation.result_rgb[protected > 0],
+            image[protected > 0],
+        )
+        assert mutation.protected_art_changed_pixels == 0
+
+    def test_owner_inpaint_rejects_tile_space_context_and_page_crop(self):
+        from inpainter import inpaint_band_image
+        from inpainter.owner_mask import (
+            OwnerMaskEvidence,
+            UnsafeOwnerMaskError,
+            build_owner_mask_plan,
+        )
+        from ownership.model import TextOwner
+
+        class FixtureInpainter:
+            def inpaint(self, image, mask, **_kwargs):
+                result = image.copy()
+                result[mask > 0] = 17
+                return result
+
+        image = np.full((40, 40, 3), 210, dtype=np.uint8)
+        glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+        glyph[25:30, 12:24] = 255
+        owner = TextOwner(
+            owner_id="own_page_001_body",
+            page_id="page_001",
+            component_ids=["cmp_body"],
+            observation_ids=["obs_body"],
+            selected_observation_ids=["obs_body"],
+            semantic_role="dialogue_body",
+            source_payload="SOURCE",
+            translated_payload="DESTINO",
+            disposition="owned",
+            state="translated",
+            route_action="translate_inpaint_render",
+            execution_tile_id="tile_executor",
+        )
+        plan = build_owner_mask_plan(
+            image,
+            owner,
+            [
+                OwnerMaskEvidence(
+                    evidence_id="page_glyph",
+                    component_id="cmp_body",
+                    glyph_mask=glyph,
+                )
+            ],
+            owner_component_bboxes_page={"cmp_body": (12, 25, 24, 30)},
+        )
+
+        def context(coordinate_space):
+            return {
+                "texts": [
+                    {
+                        "owner_id": owner.owner_id,
+                        "page_id": owner.page_id,
+                        "execution_tile_id": owner.execution_tile_id,
+                        "disposition": "owned",
+                        "state": "mask_ready",
+                        "route_action": "translate_inpaint_render",
+                        "action_mask_ref": plan.action_mask_ref,
+                        "source_payload": "SOURCE",
+                        "translated_payload": "DESTINO",
+                    }
+                ],
+                "_page_id": owner.page_id,
+                "_band_id": owner.execution_tile_id,
+                "_owner_coordinate_space": coordinate_space,
+                "_page_shape": [40, 40],
+                "_owner_component_bboxes_page": {
+                    "cmp_body": [12, 25, 24, 30]
+                },
+                "_owner_execution_projection": {
+                    "owner_id": owner.owner_id,
+                    "page_id": owner.page_id,
+                    "tile_id": owner.execution_tile_id,
+                    "role": "executor",
+                    "bbox_page": [12, 25, 24, 30],
+                    "bbox_tile": [12, 5, 24, 10],
+                    "offset_xy": [0, 20],
+                },
+            }
+
+        for coordinate_space in (None, "tile", " page ", "page"):
+            with self.subTest(coordinate_space=coordinate_space):
+                page = context(coordinate_space)
+                with self.assertRaisesRegex(UnsafeOwnerMaskError, "coordinate|page"):
+                    inpaint_band_image(
+                        image,
+                        page,
+                        owner_mask_plan=plan,
+                        owner_inpainter=FixtureInpainter(),
+                    )
+
+        page = context("logical_page")
+        with self.assertRaisesRegex(UnsafeOwnerMaskError, "shape|source|page"):
+            inpaint_band_image(
+                image[20:40],
+                page,
+                owner_mask_plan=plan,
+                owner_inpainter=FixtureInpainter(),
+            )
+
+        valid_page = context("logical_page")
+        valid_page["_owner_execution_projection"]["bbox_tile"] = [20, 5, 32, 10]
+        valid_page["_owner_execution_projection"]["offset_xy"] = [-8, 20]
+        mutation = inpaint_band_image(
+            image,
+            valid_page,
+            owner_mask_plan=plan,
+            owner_inpainter=FixtureInpainter(),
+        )
+        self.assertEqual(mutation.coordinate_space, "logical_page")
+        self.assertEqual(mutation.result_rgb.shape, image.shape)
+        self.assertTrue(np.any(mutation.changed_mask[25:30, 12:24]))
+
+        malformed_records = []
+        duplicate = context("logical_page")
+        duplicate_record = dict(duplicate["texts"][0])
+        duplicate_record["translated_payload"] = "OUTRA TRADUCAO"
+        duplicate["texts"].append(duplicate_record)
+        malformed_records.append(duplicate)
+        for field, invalid_value in (
+            ("page_id", "page_other"),
+            ("execution_tile_id", "tile_other"),
+            ("source_payload", ""),
+            ("translated_payload", None),
+        ):
+            invalid = context("logical_page")
+            invalid["texts"][0][field] = invalid_value
+            malformed_records.append(invalid)
+
+        for invalid_page in malformed_records:
+            with self.subTest(invalid_record=invalid_page["texts"]):
+                with self.assertRaisesRegex(
+                    UnsafeOwnerMaskError,
+                    "operational|record|payload|identity|eligible",
+                ):
+                    inpaint_band_image(
+                        image,
+                        invalid_page,
+                        owner_mask_plan=plan,
+                        owner_inpainter=FixtureInpainter(),
+                    )
+
+    def test_owner_inpaint_rejects_wrong_page_or_executor_tile_context(self):
+        from inpainter import inpaint_band_image
+        from inpainter.owner_mask import (
+            OwnerMaskEvidence,
+            UnsafeOwnerMaskError,
+            build_owner_mask_plan,
+        )
+        from ownership.model import TextOwner
+
+        class FixtureInpainter:
+            def inpaint(self, image, mask, **_kwargs):
+                result = image.copy()
+                result[mask > 0] = 17
+                return result
+
+        image = np.full((24, 36, 3), 210, dtype=np.uint8)
+        glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+        glyph[8:16, 11:25] = 255
+        owner = TextOwner(
+            owner_id="own_page_001_body",
+            page_id="page_001",
+            component_ids=["cmp_body"],
+            observation_ids=["obs_body"],
+            selected_observation_ids=["obs_body"],
+            semantic_role="dialogue_body",
+            source_payload="SOURCE",
+            translated_payload="DESTINO",
+            disposition="owned",
+            state="translated",
+            route_action="translate_inpaint_render",
+            execution_tile_id="tile_executor",
+        )
+        plan = build_owner_mask_plan(
+            image,
+            owner,
+            [
+                OwnerMaskEvidence(
+                    evidence_id="glyph",
+                    component_id="cmp_body",
+                    glyph_mask=glyph,
+                )
+            ],
+            owner_component_bboxes_page={"cmp_body": (11, 8, 25, 16)},
+        )
+
+        for page_id, tile_id, role, owner_id in (
+            ("page_999", "tile_executor", "executor", "own_page_001_body"),
+            ("page_001", "tile_neighbor", "executor", "own_page_001_body"),
+            ("page_001", "tile_executor", "context_only", "own_page_001_body"),
+            ("page_001", "tile_executor", "executor", "own_page_001_other"),
+        ):
+            with self.subTest(
+                page_id=page_id,
+                tile_id=tile_id,
+                role=role,
+                owner_id=owner_id,
+            ), self.assertRaises(UnsafeOwnerMaskError):
+                page = {
+                    "texts": [
+                        {
+                            "owner_id": owner_id,
+                            "page_id": page_id,
+                            "execution_tile_id": tile_id,
+                            "disposition": "owned",
+                            "state": "translated",
+                            "route_action": "translate_inpaint_render",
+                            "action_mask_ref": plan.action_mask_ref,
+                            "source_payload": "SOURCE",
+                            "translated_payload": "DESTINO",
+                        }
+                    ],
+                    "_page_id": page_id,
+                    "_band_id": tile_id,
+                    "_owner_coordinate_space": "page",
+                    "_page_shape": [24, 36],
+                    "_owner_component_bboxes_page": {
+                        "cmp_body": [11, 8, 25, 16]
+                    },
+                    "_owner_execution_projection": {
+                        "owner_id": owner_id,
+                        "page_id": page_id,
+                        "tile_id": tile_id,
+                        "role": role,
+                        "bbox_page": [11, 8, 25, 16],
+                        "bbox_tile": [11, 8, 25, 16],
+                        "offset_xy": [0, 0],
+                    },
+                }
+                inpaint_band_image(
+                    image,
+                    page,
+                    owner_mask_plan=plan,
+                    owner_inpainter=FixtureInpainter(),
+                )
+            self.assertEqual(page["texts"][0]["state"], "review_required")
+            self.assertEqual(page["texts"][0]["route_action"], "review_required")
+            self.assertTrue(page.get("_strip_owner_mask_error"))
+
+        for context_band_id in ("tile_neighbor", None, 123, " tile_executor "):
+            with self.subTest(context_band_id=context_band_id):
+                page = {
+                    "texts": [
+                        {
+                            "owner_id": owner.owner_id,
+                            "page_id": owner.page_id,
+                            "execution_tile_id": owner.execution_tile_id,
+                            "disposition": "owned",
+                            "state": "translated",
+                            "route_action": "translate_inpaint_render",
+                            "action_mask_ref": plan.action_mask_ref,
+                            "source_payload": "SOURCE",
+                            "translated_payload": "DESTINO",
+                        }
+                    ],
+                    "_page_id": owner.page_id,
+                    "_owner_coordinate_space": "page",
+                    "_page_shape": [24, 36],
+                    "_owner_component_bboxes_page": {
+                        "cmp_body": [11, 8, 25, 16]
+                    },
+                    "_owner_execution_projection": {
+                        "owner_id": owner.owner_id,
+                        "page_id": owner.page_id,
+                        "tile_id": owner.execution_tile_id,
+                        "role": "executor",
+                        "bbox_page": [11, 8, 25, 16],
+                        "bbox_tile": [11, 8, 25, 16],
+                        "offset_xy": [0, 0],
+                    },
+                }
+                if context_band_id is not None:
+                    page["_band_id"] = context_band_id
+                with self.assertRaises(UnsafeOwnerMaskError):
+                    inpaint_band_image(
+                        image,
+                        page,
+                        owner_mask_plan=plan,
+                        owner_inpainter=FixtureInpainter(),
+                    )
+                self.assertEqual(page["texts"][0]["state"], "review_required")
+                self.assertTrue(page.get("_strip_owner_mask_error"))
+
+        for current_state, current_route, action_mask_ref in (
+            ("review_required", "review_required", None),
+            ("translated", "translate_inpaint_render", None),
+            ("translated", "translate_render_only", None),
+            ("rendered", "translate_inpaint_render", plan.action_mask_ref),
+            ("mask_ready", "translate_inpaint_render", "owner_masks/stale.png"),
+        ):
+            with self.subTest(
+                current_state=current_state,
+                current_route=current_route,
+                action_mask_ref=action_mask_ref,
+            ):
+                page = {
+                    "texts": [
+                        {
+                            "owner_id": owner.owner_id,
+                            "page_id": owner.page_id,
+                            "execution_tile_id": owner.execution_tile_id,
+                            "disposition": "owned",
+                            "state": current_state,
+                            "route_action": current_route,
+                            "action_mask_ref": action_mask_ref,
+                            "source_payload": "SOURCE",
+                            "translated_payload": "DESTINO",
+                        }
+                    ],
+                    "_page_id": owner.page_id,
+                    "_band_id": owner.execution_tile_id,
+                    "_owner_coordinate_space": "page",
+                    "_page_shape": [24, 36],
+                    "_owner_component_bboxes_page": {
+                        "cmp_body": [11, 8, 25, 16]
+                    },
+                    "_owner_execution_projection": {
+                        "owner_id": owner.owner_id,
+                        "page_id": owner.page_id,
+                        "tile_id": owner.execution_tile_id,
+                        "role": "executor",
+                        "bbox_page": [11, 8, 25, 16],
+                        "bbox_tile": [11, 8, 25, 16],
+                        "offset_xy": [0, 0],
+                    },
+                }
+                with self.assertRaises(UnsafeOwnerMaskError):
+                    inpaint_band_image(
+                        image,
+                        page,
+                        owner_mask_plan=plan,
+                        owner_inpainter=FixtureInpainter(),
+                    )
+                self.assertEqual(page["texts"][0]["state"], "review_required")
+                self.assertTrue(page.get("_strip_owner_mask_error"))
+
+        non_owned_page = {
+            "texts": [
+                {
+                    "owner_id": owner.owner_id,
+                    "page_id": owner.page_id,
+                    "execution_tile_id": owner.execution_tile_id,
+                    "disposition": "preserve",
+                    "state": "mask_ready",
+                    "route_action": "translate_inpaint_render",
+                    "action_mask_ref": plan.action_mask_ref,
+                    "source_payload": "SOURCE",
+                    "translated_payload": "DESTINO",
+                }
+            ],
+            "_page_id": owner.page_id,
+            "_band_id": owner.execution_tile_id,
+            "_owner_coordinate_space": "page",
+            "_page_shape": [24, 36],
+            "_owner_component_bboxes_page": {
+                "cmp_body": [11, 8, 25, 16]
+            },
+            "_owner_execution_projection": {
+                "owner_id": owner.owner_id,
+                "page_id": owner.page_id,
+                "tile_id": owner.execution_tile_id,
+                "role": "executor",
+                "bbox_page": [11, 8, 25, 16],
+                "bbox_tile": [11, 8, 25, 16],
+                "offset_xy": [0, 0],
+            },
+        }
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(
+                image,
+                non_owned_page,
+                owner_mask_plan=plan,
+                owner_inpainter=FixtureInpainter(),
+            )
+        self.assertEqual(non_owned_page["texts"][0]["state"], "review_required")
+        self.assertTrue(non_owned_page.get("_strip_owner_mask_error"))
+
+        projection_only_page = {
+            "texts": [],
+            "_page_id": owner.page_id,
+            "_band_id": owner.execution_tile_id,
+            "_owner_coordinate_space": "page",
+            "_page_shape": [24, 36],
+            "_owner_component_bboxes_page": {
+                "cmp_body": [11, 8, 25, 16]
+            },
+            "_owner_execution_projection": {
+                "owner_id": owner.owner_id,
+                "page_id": owner.page_id,
+                "tile_id": owner.execution_tile_id,
+                "role": "executor",
+                "bbox_page": [11, 8, 25, 16],
+                "bbox_tile": [11, 8, 25, 16],
+                "offset_xy": [0, 0],
+            },
+        }
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(
+                image,
+                projection_only_page,
+                owner_mask_plan=plan,
+                owner_inpainter=FixtureInpainter(),
+            )
+        self.assertTrue(projection_only_page.get("_strip_owner_mask_error"))
+
+        class NoopInpainter:
+            def inpaint(self, image, _mask, **_kwargs):
+                return image.copy()
+
+        noop_page = {
+            "texts": [
+                {
+                    "owner_id": "own_page_001_body",
+                    "page_id": "page_001",
+                    "execution_tile_id": "tile_executor",
+                    "disposition": "owned",
+                    "state": "mask_ready",
+                    "route_action": "translate_inpaint_render",
+                    "action_mask_ref": plan.action_mask_ref,
+                    "source_payload": "SOURCE",
+                    "translated_payload": "DESTINO",
+                }
+            ],
+            "_page_id": "page_001",
+            "_band_id": "tile_executor",
+            "_owner_coordinate_space": "page",
+            "_page_shape": [24, 36],
+            "_owner_component_bboxes_page": {
+                "cmp_body": [11, 8, 25, 16]
+            },
+            "_owner_execution_projection": {
+                "owner_id": "own_page_001_body",
+                "page_id": "page_001",
+                "tile_id": "tile_executor",
+                "role": "executor",
+                "bbox_page": [11, 8, 25, 16],
+                "bbox_tile": [11, 8, 25, 16],
+                "offset_xy": [0, 0],
+            },
+        }
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(
+                image,
+                noop_page,
+                owner_mask_plan=plan,
+                owner_inpainter=NoopInpainter(),
+            )
+        self.assertEqual(noop_page["texts"][0]["state"], "review_required")
+        self.assertEqual(noop_page["texts"][0]["route_action"], "review_required")
+        self.assertTrue(noop_page.get("_strip_owner_mask_error"))
+
+    def test_owner_identity_without_mask_plan_cannot_fall_back_to_legacy_bbox(self):
+        from inpainter import inpaint_band_image
+        from inpainter.owner_mask import UnsafeOwnerMaskError
+
+        image = np.full((24, 36, 3), 210, dtype=np.uint8)
+        page = {
+            "texts": [
+                {
+                    "owner_id": "own_page_001_body",
+                    "bbox": [8, 7, 28, 18],
+                    "line_polygons": [[[8, 7], [28, 7], [28, 18], [8, 18]]],
+                }
+            ],
+            "_page_id": "page_001",
+            "_band_id": "tile_executor",
+        }
+
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(image, page)
+
+        self.assertEqual(page["texts"][0]["state"], "review_required")
+        self.assertEqual(page["texts"][0]["route_action"], "review_required")
+
+        for malformed_owner_id in (None, 123, "", "   ", " owner "):
+            with self.subTest(malformed_text_owner_id=malformed_owner_id):
+                malformed_owner_page = {
+                    "texts": [
+                        {
+                            "owner_id": malformed_owner_id,
+                            "bbox": [8, 7, 28, 18],
+                            "line_polygons": [
+                                [[8, 7], [28, 7], [28, 18], [8, 18]]
+                            ],
+                        }
+                    ],
+                    "_page_id": "page_001",
+                    "_band_id": "tile_executor",
+                }
+                with self.assertRaises(UnsafeOwnerMaskError):
+                    inpaint_band_image(image, malformed_owner_page)
+                self.assertEqual(
+                    malformed_owner_page["texts"][0]["state"],
+                    "review_required",
+                )
+                self.assertEqual(
+                    malformed_owner_page.get("_strip_owner_mask_error"),
+                    "owner_identity_invalid",
+                )
+
+        projection_only_page = {
+            "texts": [],
+            "_page_id": "page_001",
+            "_band_id": "tile_executor",
+            "_owner_execution_projection": {
+                "owner_id": "own_page_001_body",
+                "page_id": "page_001",
+                "tile_id": "tile_executor",
+                "role": "executor",
+            },
+        }
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(image, projection_only_page)
+        self.assertEqual(
+            projection_only_page.get("_strip_owner_mask_error"),
+            "owner_mask_plan_missing",
+        )
+
+        scoped_projection_page = {
+            "texts": [
+                {
+                    "owner_id": "own_page_001_body",
+                    "state": "translated",
+                    "route_action": "translate_inpaint_render",
+                },
+                {
+                    "owner_id": "own_page_001_neighbor",
+                    "state": "translated",
+                    "route_action": "translate_inpaint_render",
+                },
+            ],
+            "_page_id": "page_001",
+            "_band_id": "tile_executor",
+            "_owner_execution_projection": {
+                "owner_id": "own_page_001_body",
+                "page_id": "page_001",
+                "tile_id": "tile_executor",
+                "role": "executor",
+            },
+        }
+        with self.assertRaises(UnsafeOwnerMaskError):
+            inpaint_band_image(image, scoped_projection_page)
+        self.assertEqual(
+            scoped_projection_page["texts"][0]["state"],
+            "review_required",
+        )
+        self.assertEqual(
+            scoped_projection_page["texts"][1]["state"],
+            "translated",
+        )
+
+        for malformed_owner_id in (None, 123, "missing"):
+            with self.subTest(malformed_owner_id=malformed_owner_id):
+                projection = {
+                    "page_id": "page_001",
+                    "tile_id": "tile_executor",
+                    "role": "executor",
+                }
+                if malformed_owner_id != "missing":
+                    projection["owner_id"] = malformed_owner_id
+                malformed_projection_page = {
+                    "texts": [],
+                    "_page_id": "page_001",
+                    "_band_id": "tile_executor",
+                    "_owner_execution_projection": projection,
+                }
+                with self.assertRaises(UnsafeOwnerMaskError):
+                    inpaint_band_image(image, malformed_projection_page)
+                self.assertEqual(
+                    malformed_projection_page.get("_strip_owner_mask_error"),
+                    "owner_mask_plan_missing",
+                )
 
 
 if __name__ == "__main__":

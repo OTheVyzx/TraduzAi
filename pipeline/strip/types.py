@@ -7,9 +7,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from ownership.model import (
+        OwnerGraph,
+        OwnerProjection,
+        PageCompositionResult,
+        SourceTextComponent,
+        TextObservation,
+    )
+    from ownership.ocr_adapter import TileProjection
+    from strip.page_pipeline import PageExecutionResult
+    from ownership.execution import PageExecutionEvidenceRef
+    from strip.page_surface_geometry import PageSurfaceGeometry
 
 
 @dataclass
@@ -46,6 +59,10 @@ class VerticalStrip:
     height: int
     source_page_breaks: list[int] = field(default_factory=list)
     page_x_offsets: list[int] = field(default_factory=list)  # letterbox offset por página
+    source_page_widths: list[int] = field(default_factory=list)
+    source_components_by_page: dict[str, list["SourceTextComponent"]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -55,6 +72,12 @@ class Balloon:
     confidence: float
     lobe_count: int = 1
     metadata: dict = field(default_factory=dict)
+
+    @property
+    def region_id(self) -> Optional[str]:
+        """Stable page-global visual identity, when assigned by detection."""
+        value = self.metadata.get("region_id")
+        return str(value) if value else None
 
 
 @dataclass
@@ -69,11 +92,41 @@ class Band:
     rendered_slice: Optional[np.ndarray] = None
     ocr_result: Optional[dict] = None
     perf: dict = field(default_factory=dict)
+    tile_id: Optional[str] = None
+    strip_offset_xy: tuple[int, int] = (0, 0)
 
 
     @property
     def height(self) -> int:
         return max(0, self.y_bottom - self.y_top)
+
+
+@dataclass(frozen=True)
+class BandEvidenceResult:
+    """Immutable-enough control-plane snapshot collected before translation."""
+
+    page_id: str
+    tile_id: str
+    band_index: int
+    source_page_number: Optional[int]
+    band: Band
+    tile_projection: "TileProjection"
+    ocr_page: dict
+    observations: list["TextObservation"] = field(default_factory=list)
+    components: list["SourceTextComponent"] = field(default_factory=list)
+    terminal_reason: Optional[str] = None
+    perf: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class OwnerExecutionResult:
+    """Auditable result of applying one owner projection to one execution tile."""
+
+    band: Band
+    graph: "OwnerGraph"
+    projection: "OwnerProjection"
+    mutated: bool
+    skipped_reason: Optional[str] = None
 
 
 @dataclass
@@ -89,3 +142,15 @@ class OutputPage:
     text_layers: dict = field(default_factory=dict)
     page_profile: Optional[dict] = None
     inpaint_blocks: Optional[list] = None
+    owner_graph: Optional["OwnerGraph"] = None
+    owner_composition: Optional["PageCompositionResult"] = None
+    page_surface_geometry: Optional["PageSurfaceGeometry"] = None
+    owner_page_evidence_ref: Optional["PageExecutionEvidenceRef"] = None
+    owner_page_result: Optional["PageExecutionResult"] = None
+
+    @property
+    def page_surface_geometry_sha256(self) -> Optional[str]:
+        """Expose the bound frame contract without duplicating mutable state."""
+
+        geometry = self.page_surface_geometry
+        return str(geometry.geometry_sha256) if geometry is not None else None

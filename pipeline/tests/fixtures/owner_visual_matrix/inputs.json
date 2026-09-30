@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "hash_algorithm": "sha256-tree-v1",
+  "inputs": {
+    "mythic_colored_cards": {
+      "environment_variable": "TRADUZAI_MATRIX_MYTHIC_SOURCE",
+      "input_type": "directory",
+      "expected_sha256": "78242a961ff07fd1120b6da3156a015bc509a077b06fcc395b24d326071e06d3"
+    },
+    "one_second_cross_tile": {
+      "environment_variable": "TRADUZAI_MATRIX_ONE_SECOND_SOURCE",
+      "input_type": "directory",
+      "expected_sha256": "bf8591406a1ed1639d3121178bb85c43383963098aa57b83e1d257e88225b40e"
+    },
+    "grand_finale_dark_panels": {
+      "environment_variable": "TRADUZAI_MATRIX_GRAND_FINALE_SOURCE",
+      "input_type": "directory",
+      "expected_sha256": "fd8ce2fec0e3453f7fae994ac97245ce716bcac2d34ca2e5ce8d1fbf699338af"
+    },
+    "mitch_items_ch39": {
+      "environment_variable": "TRADUZAI_MATRIX_MITCH39_SOURCE",
+      "input_type": "directory",
+      "expected_sha256": "a6788d2a8b1779505835dc0259053d9b9dad08b9d956941d6bf4c6d77a66c786"
+    }
+  }
+}

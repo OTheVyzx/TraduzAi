@@ -8,6 +8,28 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
+def test_owner_render_plan_filters_review_required_before_serialization(tmp_path):
+    from debug_tools import DebugRecorder
+    from ownership.artifacts import OwnerArtifactPublisher
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-owner-render")
+    graph = {
+        "page_id": "page_001",
+        "components": [],
+        "observations": [],
+        "component_dispositions": [],
+        "violations": [],
+        "owners": [
+            {"owner_id": "render_me", "state": "rendered", "route_action": "translate_render_only"},
+            {"owner_id": "review_me", "state": "review_required", "route_action": "review_required"},
+        ],
+    }
+    OwnerArtifactPublisher(recorder).publish(graphs={"page_001": graph})
+    path = tmp_path / "debug/e2e/09_typeset/owner_render_plan.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [row["owner_id"] for row in rows] == ["render_me"]
+
+
 def test_render_band_image_records_render_plan_and_preserves_debug_geometry(tmp_path):
     from debug_tools import DebugRecorder, bind_recorder
     from typesetter import renderer as renderer_mod

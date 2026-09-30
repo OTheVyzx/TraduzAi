@@ -4,20 +4,272 @@ Suporta manga-ocr (japonês/inglês) e PaddleOCR (multilingual)
 Batching para máxima performance na GPU
 """
 
+import copy
+from dataclasses import replace
 import logging
 import math
 import os
 import hashlib
 import re
+import threading
 from collections import OrderedDict
 from difflib import SequenceMatcher
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 import cv2
 import numpy as np
 import torch
 from PIL import Image
 
+from ownership.hash_contract import canonical_page_sha256, canonical_json_sha256, sha256_text
+from ownership.ocr_contract import (
+    OCRAttempt,
+    OCRBlock,
+    OCRDiagnostics,
+    OCRInputPixelIdentityError,
+    OCRInvocationResult,
+    OCRObservationRecord,
+    OCRRequest,
+    OCRTransformOperation,
+    OCRTransformSpec,
+    normalize_ocr_payload_text,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def _normalize_ocr_rgb(image: np.ndarray) -> np.ndarray:
+    array = np.asarray(image)
+    if array.dtype != np.uint8:
+        raise TypeError("OCR provider input must use uint8 samples")
+    if array.ndim == 2:
+        array = cv2.cvtColor(array, cv2.COLOR_GRAY2RGB)
+    elif array.ndim == 3 and array.shape[2] == 1:
+        array = cv2.cvtColor(array[:, :, 0], cv2.COLOR_GRAY2RGB)
+    elif array.ndim == 3 and array.shape[2] == 4:
+        array = cv2.cvtColor(array, cv2.COLOR_RGBA2RGB)
+    elif array.ndim != 3 or array.shape[2] != 3:
+        raise ValueError("OCR provider input must be HxW, HxWx1, HxWx3 or HxWx4")
+    if array.shape[0] <= 0 or array.shape[1] <= 0:
+        raise ValueError("OCR provider input cannot be empty")
+    return np.ascontiguousarray(array, dtype=np.uint8)
+
+
+def _iter_provider_text_lines(raw_result):
+    if isinstance(raw_result, str):
+        yield raw_result, 0.0, ()
+        return
+    payload = raw_result
+    if isinstance(payload, list) and len(payload) == 1 and isinstance(payload[0], list):
+        payload = payload[0]
+    if not isinstance(payload, (list, tuple)):
+        return
+    for item in payload:
+        if isinstance(item, str):
+            yield item, 0.0, ()
+            continue
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        polygon_raw, metadata = item[0], item[1]
+        if not isinstance(metadata, (list, tuple)) or not metadata:
+            continue
+        text = str(metadata[0] or "")
+        try:
+            confidence = float(metadata[1]) if len(metadata) >= 2 else 0.0
+        except (TypeError, ValueError):
+            confidence = 0.0
+        polygon: list[tuple[int, int]] = []
+        if isinstance(polygon_raw, (list, tuple)):
+            for point in polygon_raw:
+                if isinstance(point, (list, tuple)) and len(point) >= 2:
+                    polygon.append((int(round(float(point[0]))), int(round(float(point[1])))))
+        yield text, max(0.0, min(1.0, confidence)), tuple(polygon)
+
+
+def _legacy_local_ocr_request(
+    pixels: np.ndarray,
+    *,
+    variant_id: str,
+    provider_family: str,
+) -> OCRRequest:
+    pixel_sha256 = canonical_page_sha256(_normalize_ocr_rgb(pixels))
+    return OCRRequest(
+        run_id=f"legacy-local-{pixel_sha256[:20]}",
+        origin_execution_id=f"legacy-execution-{pixel_sha256[:20]}",
+        page_id=f"legacy-page-{pixel_sha256[:20]}",
+        page_source_sha256=pixel_sha256,
+        root_input_pixel_sha256=pixel_sha256,
+        invocation_id=f"legacy:{variant_id}:{pixel_sha256[:20]}",
+        provider_family=provider_family,
+    )
+
+
+def _identity_transform_spec() -> OCRTransformSpec:
+    return OCRTransformSpec.build((OCRTransformOperation(kind="identity"),))
+
+
+class _ProviderRecordBatch(tuple):
+    """Transient records plus raw provider output for legacy parsing only."""
+
+    def __new__(cls, records, raw_result):
+        instance = super().__new__(cls, records)
+        instance.raw_result = raw_result
+        return instance
+
+
+def execute_hash_bound_provider_attempt(
+    *,
+    request: OCRRequest,
+    root_input_rgb: np.ndarray,
+    actual_input_rgb: np.ndarray,
+    transform_spec: OCRTransformSpec,
+    variant_id: str,
+    provider,
+    expected_input_pixel_sha256: str | None = None,
+    parent_input_pixel_sha256: str | None = None,
+    input_bbox_page: tuple[int, int, int, int] | None = None,
+    input_kind: str | None = None,
+    provider_kwargs: dict | None = None,
+    provider_mode: str = "callable",
+    attempt_ordinal: int = 1,
+    source: str | None = None,
+    execution_recorder: Callable[[object], None] | None = None,
+) -> tuple[OCRAttempt, tuple[OCRObservationRecord, ...]]:
+    """Execute one physical OCR attempt after verifying its pixel identity."""
+
+    root_rgb = _normalize_ocr_rgb(root_input_rgb)
+    physical_rgb = _normalize_ocr_rgb(actual_input_rgb)
+    root_hash = canonical_page_sha256(root_rgb)
+    if root_hash != request.root_input_pixel_sha256:
+        raise OCRInputPixelIdentityError("OCR request root hash does not match root_input_rgb")
+    replayed = transform_spec.replay(root_rgb)
+    if not np.array_equal(replayed, physical_rgb):
+        raise OCRInputPixelIdentityError("OCR transform replay differs from physical provider input")
+    input_hash = canonical_page_sha256(physical_rgb)
+    if expected_input_pixel_sha256 is not None and input_hash != expected_input_pixel_sha256:
+        raise OCRInputPixelIdentityError("declared OCR input hash differs from physical provider input")
+    parent_hash = parent_input_pixel_sha256 or root_hash
+    attempt_seed = canonical_json_sha256(
+        {
+            "attempt_ordinal": int(attempt_ordinal),
+            "input_pixel_sha256": input_hash,
+            "request_identity": list(request.identity),
+            "transform_spec_sha256": transform_spec.sha256,
+            "variant_id": str(variant_id),
+        }
+    )
+    attempt_id = f"ocr_attempt_{attempt_seed[:20]}"
+
+    if provider_mode == "manga_ocr":
+        processor = provider["processor"]
+        model = provider["model"]
+        tokenizer = provider["tokenizer"]
+        pixel_values = processor(
+            images=[Image.fromarray(physical_rgb, "RGB")],
+            return_tensors="pt",
+        ).pixel_values.to(provider["device"])
+        if provider.get("half"):
+            pixel_values = pixel_values.half()
+        with torch.inference_mode():
+            generated_ids = model.generate(
+                pixel_values,
+                max_new_tokens=300,
+                num_beams=1,
+                do_sample=False,
+            )
+        raw_result = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+    elif provider_mode == "callable":
+        raw_result = provider(physical_rgb, **dict(provider_kwargs or {}))
+    else:
+        raise ValueError(f"unsupported OCR provider mode: {provider_mode}")
+    if execution_recorder is not None:
+        execution_recorder(raw_result)
+    attempt = OCRAttempt(
+        attempt_id=attempt_id,
+        run_id=request.run_id,
+        origin_execution_id=request.origin_execution_id,
+        page_id=request.page_id,
+        page_source_sha256=request.page_source_sha256,
+        root_input_pixel_sha256=request.root_input_pixel_sha256,
+        invocation_id=request.invocation_id,
+        provider_family=request.provider_family,
+        variant_id=str(variant_id),
+        input_pixel_sha256=input_hash,
+        parent_input_pixel_sha256=parent_hash,
+        input_bbox_page=input_bbox_page,
+        input_kind=str(input_kind or variant_id),
+        transform_spec=transform_spec,
+        input_width=int(physical_rgb.shape[1]),
+        input_height=int(physical_rgb.shape[0]),
+        input_mode="RGB",
+        provider_called=True,
+        cache_hit=False,
+    )
+    records: list[OCRObservationRecord] = []
+    for index, (text, confidence, polygon) in enumerate(_iter_provider_text_lines(raw_result), 1):
+        if polygon:
+            xs = [point[0] for point in polygon]
+            ys = [point[1] for point in polygon]
+            bbox = (min(xs), min(ys), max(xs), max(ys))
+        elif input_bbox_page is not None:
+            bbox = input_bbox_page
+        else:
+            bbox = (0, 0, int(physical_rgb.shape[1]), int(physical_rgb.shape[0]))
+        normalized_text = normalize_ocr_payload_text(text)
+        observation_seed = sha256_text(f"{attempt_id}|{index}|{normalized_text}|{bbox}")
+        records.append(
+            OCRObservationRecord(
+                observation_id=f"ocr_observation_{observation_seed[:20]}",
+                attempt_id=attempt_id,
+                run_id=request.run_id,
+                origin_execution_id=request.origin_execution_id,
+                page_id=request.page_id,
+                page_source_sha256=request.page_source_sha256,
+                root_input_pixel_sha256=request.root_input_pixel_sha256,
+                input_pixel_sha256=input_hash,
+                invocation_id=request.invocation_id,
+                provider_family=request.provider_family,
+                variant_id=str(variant_id),
+                payload_sha256=sha256_text(normalized_text),
+                text=normalized_text,
+                confidence=confidence,
+                bbox_page=bbox,
+                polygon_page=polygon,
+                source=str(source or request.provider_family),
+            )
+        )
+    return attempt, _ProviderRecordBatch(records, raw_result)
+
+
+def _records_in_page_space(
+    records: tuple[OCRObservationRecord, ...],
+    *,
+    bbox_page: tuple[int, int, int, int],
+    input_width: int,
+    input_height: int,
+) -> tuple[OCRObservationRecord, ...]:
+    """Project provider-local geometry back into the authoritative page."""
+
+    x1, y1, x2, y2 = bbox_page
+    scale_x = (x2 - x1) / float(max(1, input_width))
+    scale_y = (y2 - y1) / float(max(1, input_height))
+
+    def point(value: tuple[int, int]) -> tuple[int, int]:
+        return (
+            int(round(x1 + value[0] * scale_x)),
+            int(round(y1 + value[1] * scale_y)),
+        )
+
+    projected: list[OCRObservationRecord] = []
+    for record in records:
+        polygon = tuple(point(value) for value in record.polygon_page)
+        if polygon:
+            xs = [value[0] for value in polygon]
+            ys = [value[1] for value in polygon]
+            bbox = (min(xs), min(ys), max(xs), max(ys))
+        else:
+            bbox = bbox_page
+        projected.append(replace(record, bbox_page=bbox, polygon_page=polygon))
+    return tuple(projected)
 
 
 class OcrBackendUnavailable(RuntimeError):
@@ -616,7 +868,7 @@ class OCREngine:
         self._model = None
         self._processor = None
         self._ocr_cache: OrderedDict[str, str] = OrderedDict()
-        self._last_batch_cache_stats = {"ocr_cache_hits": 0, "ocr_cache_misses": 0}
+        self._observation_records_local = threading.local()
         self._load_model()
 
     def _resolve_device(self, device: str) -> torch.device:
@@ -740,16 +992,280 @@ class OCREngine:
             execution_context="chapter",
         )
 
-    def _run_paddle_ocr_raw(self, image: np.ndarray, *, cls: bool = False):
-        result = self._model.ocr(image, det=True, rec=True, cls=bool(cls))
-        self._record_raw_model_execution(result)
-        return result
+    def _observation_state(self):
+        state = getattr(self, "_observation_records_local", None)
+        if state is None:
+            state = threading.local()
+            self._observation_records_local = state
+        if not hasattr(state, "records"):
+            state.records = []
+            state.next_attempt = 1
+            state.stats = {}
+            state.full_page_lines = []
+        return state
+
+    def _reset_observation_records(self) -> None:
+        state = self._observation_state()
+        state.records = []
+        state.next_attempt = 1
+        state.stats = {}
+        state.full_page_lines = []
+
+    def _append_observation_record(
+        self,
+        *,
+        provider: str,
+        text: str = "",
+        raw_text: str | None = None,
+        confidence: float = 0.0,
+        bbox=None,
+        line_polygons=None,
+        accepted: bool,
+        rejection_reason: str | None,
+        variant: str,
+        **metadata,
+    ) -> str:
+        state = self._observation_state()
+        attempt_id = f"ocr_attempt_{int(state.next_attempt):04d}"
+        state.next_attempt = int(state.next_attempt) + 1
+        normalized_polygons = _normalize_line_polygons(line_polygons or [])
+        normalized_bbox = _coerce_bbox(bbox)
+        if normalized_bbox is None and normalized_polygons:
+            normalized_bbox = _bbox_from_polygons(normalized_polygons)
+        try:
+            normalized_confidence = float(confidence or 0.0)
+        except (TypeError, ValueError):
+            normalized_confidence = 0.0
+        cleaned_text = str(text or "")
+        record = {
+            "provider": str(provider or "ocr"),
+            "attempt_id": attempt_id,
+            "variant": str(variant or "native"),
+            "text": cleaned_text,
+            "raw_text": str(cleaned_text if raw_text is None else raw_text),
+            "confidence": normalized_confidence,
+            "bbox": list(normalized_bbox or []),
+            "line_polygons": normalized_polygons,
+            "accepted": bool(accepted),
+            "rejection_reason": str(rejection_reason) if rejection_reason else None,
+        }
+        for key, value in metadata.items():
+            if value is not None:
+                record[str(key)] = copy.deepcopy(value)
+        state.records.append(record)
+        return attempt_id
+
+    def _crop_observation_provider(self) -> str:
+        backend = str(getattr(self, "_backend", getattr(self, "model_name", "ocr")) or "ocr")
+        if backend == "paddleocr":
+            return "paddle_crop"
+        if backend == "manga-ocr":
+            return "manga_ocr_crop"
+        return "ocr_crop"
+
+    def recognize_page_with_evidence(
+        self,
+        page_rgb: np.ndarray,
+        blocks: list,
+        *,
+        request: OCRRequest,
+        **options,
+    ) -> OCRInvocationResult:
+        """Recognize one page and return all evidence in one immutable value."""
+
+        root_rgb = _normalize_ocr_rgb(page_rgb)
+        if request.root_input_pixel_sha256 != canonical_page_sha256(root_rgb):
+            raise OCRInputPixelIdentityError("OCR request is not bound to the supplied page")
+        if getattr(self, "_backend", "") != "paddleocr":
+            raise OcrBackendUnavailable("atomic OCR evidence currently requires PaddleOCR")
+        model = getattr(self, "_model", None)
+        provider = getattr(model, "ocr", None)
+        if not callable(provider):
+            raise OcrBackendUnavailable("PaddleOCR provider is unavailable")
+        operations = [OCRTransformOperation(kind="identity")]
+        if bool(options.get("force_downscale")):
+            operations.append(
+                OCRTransformOperation(
+                    kind="resize",
+                    output_size=(
+                        max(1, root_rgb.shape[1] // 2),
+                        max(1, root_rgb.shape[0] // 2),
+                    ),
+                    interpolation="area",
+                )
+            )
+        transform_spec = OCRTransformSpec.build(tuple(operations))
+        provider_rgb = transform_spec.replay(root_rgb)
+        attempt, full_page_lines = execute_hash_bound_provider_attempt(
+            request=request,
+            root_input_rgb=root_rgb,
+            actual_input_rgb=provider_rgb,
+            transform_spec=transform_spec,
+            variant_id="full_page",
+            provider=provider,
+            expected_input_pixel_sha256=canonical_page_sha256(provider_rgb),
+            input_kind="full_page",
+            provider_kwargs={"det": True, "rec": True, "cls": False},
+            source="paddle_full_page",
+            execution_recorder=self._record_raw_model_execution,
+        )
+        if provider_rgb.shape[:2] != root_rgb.shape[:2]:
+            full_page_lines = _records_in_page_space(
+                full_page_lines,
+                bbox_page=(0, 0, root_rgb.shape[1], root_rgb.shape[0]),
+                input_width=provider_rgb.shape[1],
+                input_height=provider_rgb.shape[0],
+            )
+
+        output_blocks: list[OCRBlock] = []
+        if blocks:
+            for index, block in enumerate(blocks):
+                raw_bbox = getattr(block, "xyxy", (0, 0, root_rgb.shape[1], root_rgb.shape[0]))
+                bbox = tuple(int(round(float(value))) for value in raw_bbox)
+                bx1, by1, bx2, by2 = bbox
+                matching: list[OCRObservationRecord] = []
+                for record in full_page_lines:
+                    rx1, ry1, rx2, ry2 = record.bbox_page
+                    intersection = max(0, min(bx2, rx2) - max(bx1, rx1)) * max(0, min(by2, ry2) - max(by1, ry1))
+                    record_area = max(1, (rx2 - rx1) * (ry2 - ry1))
+                    if intersection / record_area >= 0.18:
+                        matching.append(record)
+                text = " ".join(record.text for record in matching if record.text).strip()
+                confidence = max((record.confidence for record in matching), default=0.0)
+                polygons = tuple(point for record in matching for point in record.polygon_page)
+                block_id = str(
+                    getattr(block, "region_id", "")
+                    or getattr(block, "component_id", "")
+                    or f"ocr_block_{index + 1:04d}"
+                )
+                output_blocks.append(OCRBlock(block_id, text, confidence, bbox, polygons))
+        else:
+            for index, record in enumerate(full_page_lines):
+                output_blocks.append(
+                    OCRBlock(
+                        f"ocr_block_{index + 1:04d}",
+                        record.text,
+                        record.confidence,
+                        record.bbox_page,
+                        record.polygon_page,
+                    )
+                )
+
+        diagnostics = OCRDiagnostics(
+            provider=request.provider_family,
+            extras={
+                "block_count": len(blocks),
+                "full_page_line_count": len(full_page_lines),
+                "full_page_mapped": sum(1 for block in output_blocks if block.text),
+            },
+        )
+        return OCRInvocationResult.build(
+            request=request,
+            blocks=tuple(output_blocks),
+            observations=full_page_lines,
+            full_page_lines=full_page_lines,
+            attempts=(attempt,),
+            diagnostics=diagnostics,
+        )
+
+    def recognize_region_with_evidence(
+        self,
+        page_rgb: np.ndarray,
+        *,
+        bbox_page: tuple[int, int, int, int],
+        request: OCRRequest,
+        variants: tuple[str, ...] = ("anchored_crop",),
+        stop_on_first_text: bool = False,
+    ) -> OCRInvocationResult:
+        """Run hash-bound OCR variants for one component-anchored page crop."""
+
+        root_rgb = _normalize_ocr_rgb(page_rgb)
+        if request.root_input_pixel_sha256 != canonical_page_sha256(root_rgb):
+            raise OCRInputPixelIdentityError("OCR request is not bound to the supplied page")
+        x1, y1, x2, y2 = tuple(int(value) for value in bbox_page)
+        if x1 < 0 or y1 < 0 or x2 > root_rgb.shape[1] or y2 > root_rgb.shape[0] or x2 <= x1 or y2 <= y1:
+            raise ValueError("anchored OCR bbox is outside the supplied page")
+        if getattr(self, "_backend", "") != "paddleocr":
+            raise OcrBackendUnavailable("atomic anchored OCR currently requires PaddleOCR")
+        provider = getattr(getattr(self, "_model", None), "ocr", None)
+        if not callable(provider):
+            raise OcrBackendUnavailable("PaddleOCR provider is unavailable")
+
+        attempts: list[OCRAttempt] = []
+        observations: list[OCRObservationRecord] = []
+        for ordinal, variant in enumerate(tuple(variants), 1):
+            operations: list[OCRTransformOperation] = [
+                OCRTransformOperation(kind="crop", bbox_page=(x1, y1, x2, y2))
+            ]
+            if variant == "gray":
+                operations.append(OCRTransformOperation(kind="grayscale_to_rgb"))
+            elif variant == "inverted":
+                operations.append(OCRTransformOperation(kind="invert"))
+            elif variant == "scale_2x":
+                operations.append(
+                    OCRTransformOperation(
+                        kind="resize",
+                        output_size=((x2 - x1) * 2, (y2 - y1) * 2),
+                        interpolation="cubic",
+                    )
+                )
+            elif variant not in {"native", "anchored_crop"}:
+                raise ValueError(f"unsupported anchored OCR variant: {variant}")
+            transform_spec = OCRTransformSpec.build(tuple(operations))
+            provider_rgb = transform_spec.replay(root_rgb)
+            attempt, records = execute_hash_bound_provider_attempt(
+                request=request,
+                root_input_rgb=root_rgb,
+                actual_input_rgb=provider_rgb,
+                transform_spec=transform_spec,
+                variant_id=variant,
+                provider=provider,
+                expected_input_pixel_sha256=canonical_page_sha256(provider_rgb),
+                input_bbox_page=(x1, y1, x2, y2),
+                input_kind="anchored_crop",
+                provider_kwargs={"det": True, "rec": True, "cls": False},
+                attempt_ordinal=ordinal,
+                source=f"paddle_anchored_{variant}",
+            )
+            attempts.append(attempt)
+            observations.extend(
+                _records_in_page_space(
+                    records,
+                    bbox_page=(x1, y1, x2, y2),
+                    input_width=provider_rgb.shape[1],
+                    input_height=provider_rgb.shape[0],
+                )
+            )
+            if stop_on_first_text and records:
+                break
+
+        blocks = tuple(
+            OCRBlock(
+                f"anchored_block_{index:04d}",
+                record.text,
+                record.confidence,
+                record.bbox_page,
+                record.polygon_page,
+            )
+            for index, record in enumerate(observations, 1)
+        )
+        return OCRInvocationResult.build(
+            request=request,
+            blocks=blocks,
+            observations=tuple(observations),
+            attempts=tuple(attempts),
+            diagnostics=OCRDiagnostics(
+                request.provider_family,
+                {"bbox_page": list(bbox_page), "variants": list(variants)},
+            ),
+        )
 
     def recognize_batch(self, crops: list[np.ndarray]) -> list[str]:
         """
         Reconhece texto em múltiplas imagens recortadas.
         Processa em batches para máxima eficiência GPU.
         """
+        self._reset_observation_records()
         if not crops:
             return []
 
@@ -770,6 +1286,24 @@ class OCREngine:
                 hits += 1
                 self._ocr_cache.move_to_end(cache_key)
                 results[index] = self._ocr_cache[cache_key]
+                cached_text = str(results[index] or "")
+                crop_height, crop_width = (
+                    crop.shape[:2]
+                    if isinstance(crop, np.ndarray) and crop.ndim >= 2
+                    else (0, 0)
+                )
+                self._append_observation_record(
+                    provider=self._crop_observation_provider(),
+                    text=cached_text,
+                    confidence=0.0,
+                    bbox=[0, 0, int(crop_width), int(crop_height)],
+                    line_polygons=[],
+                    accepted=bool(cached_text.strip()),
+                    rejection_reason=None if cached_text.strip() else "empty_result",
+                    variant="cache_hit",
+                    coordinate_space="crop",
+                    crop_index=index,
+                )
                 continue
             misses += 1
             pending.append(crop)
@@ -778,10 +1312,35 @@ class OCREngine:
 
         for i in range(0, len(pending), self.batch_size):
             batch = pending[i : i + self.batch_size]
-            batch_results = self._recognize_batch_impl(batch)
+            state = self._observation_state()
+            state.active_crop_indices = pending_indices[i : i + len(batch)]
+            try:
+                batch_results = self._recognize_batch_impl(batch)
+            finally:
+                state.active_crop_indices = None
             for offset, text in enumerate(batch_results):
                 result_index = pending_indices[i + offset]
                 results[result_index] = text
+                if self._crop_observation_provider() != "paddle_crop":
+                    crop = batch[offset]
+                    crop_height, crop_width = (
+                        crop.shape[:2]
+                        if isinstance(crop, np.ndarray) and crop.ndim >= 2
+                        else (0, 0)
+                    )
+                    cleaned_text = str(text or "")
+                    self._append_observation_record(
+                        provider=self._crop_observation_provider(),
+                        text=cleaned_text,
+                        confidence=0.0,
+                        bbox=[0, 0, int(crop_width), int(crop_height)],
+                        line_polygons=[],
+                        accepted=bool(cleaned_text.strip()),
+                        rejection_reason=None if cleaned_text.strip() else "empty_result",
+                        variant="native",
+                        coordinate_space="crop",
+                        crop_index=result_index,
+                    )
                 key = pending_keys[i + offset]
                 if cache_enabled and key:
                     self._ocr_cache[key] = text
@@ -789,7 +1348,7 @@ class OCREngine:
                     while len(self._ocr_cache) > 256:
                         self._ocr_cache.popitem(last=False)
 
-        self._last_batch_cache_stats = {
+        self._observation_state().stats = {
             "ocr_cache_hits": int(hits),
             "ocr_cache_misses": int(misses),
         }
@@ -818,8 +1377,9 @@ class OCREngine:
         Otimiza o backend PaddleOCR: evita rodar detecção repetidamente por crop.
         Faz 1 pass de OCR na página inteira e associa as linhas reconhecidas aos blocos.
         """
+        self._reset_observation_records()
         if not blocks:
-            self._last_recognize_blocks_stats = {
+            self._observation_state().stats = {
                 "block_count": 0,
                 "full_page_mapped": 0,
                 "crop_fallback_max": 0,
@@ -829,7 +1389,7 @@ class OCREngine:
             return []
 
         if not isinstance(page_rgb, np.ndarray) or page_rgb.size == 0:
-            self._last_recognize_blocks_stats = {
+            self._observation_state().stats = {
                 "block_count": len(blocks),
                 "full_page_mapped": 0,
                 "crop_fallback_max": 0,
@@ -880,7 +1440,13 @@ class OCREngine:
                 if not self._crop_might_have_text(crop):
                     continue
                 attempts += 1
-                recovered = self._recognize_single_paddle_with_retry(crop)
+                recovered = self._recognize_single_paddle_with_retry(
+                    crop,
+                    observation_bbox=self._block_bbox(block),
+                    observation_line_polygons=getattr(block, "line_polygons", None),
+                    observation_coordinate_space="page",
+                    crop_index=index,
+                )
                 recovered_by_crop[index] = recovered
                 if str(recovered or "").strip():
                     recovered_count += 1
@@ -888,7 +1454,7 @@ class OCREngine:
                     shadow_would_skip += 1
                     if str(recovered or "").strip():
                         shadow_recovered_after_limit += 1
-            self._last_recognize_blocks_stats = {
+            self._observation_state().stats = {
                 "block_count": len(blocks),
                 "full_page_mapping_failed": True,
                 "full_page_mapped": 0,
@@ -899,7 +1465,7 @@ class OCREngine:
                 "crop_fallback_suppressed": 0,
             }
             if shadow_enabled:
-                self._last_recognize_blocks_stats.update(
+                self._observation_state().stats.update(
                     {
                         "fallback_shadow_attempt_limit": int(shadow_limit),
                         "fallback_shadow_attempts_saved_or_would_skip": int(shadow_would_skip),
@@ -908,11 +1474,11 @@ class OCREngine:
                     }
                 )
             if _env_bool("TRADUZAI_OCR_DEDUP", False):
-                self._last_recognize_blocks_stats["ocr_dedup_removed"] = int(
+                self._observation_state().stats["ocr_dedup_removed"] = int(
                     self._dedupe_ocr_records_in_place(recovered_by_crop, blocks)
                 )
             else:
-                self._last_recognize_blocks_stats["ocr_dedup_removed"] = 0
+                self._observation_state().stats["ocr_dedup_removed"] = 0
             return recovered_by_crop
 
         # Fallback por crop apenas para casos prováveis, evitando custo alto em falsos positivos.
@@ -951,7 +1517,13 @@ class OCREngine:
                 continue
             attempted += 1
             stats["crop_fallback_attempts"] += 1
-            recovered = self._recognize_single_paddle_with_retry(crop)
+            recovered = self._recognize_single_paddle_with_retry(
+                crop,
+                observation_bbox=self._block_bbox(blocks[index]),
+                observation_line_polygons=getattr(blocks[index], "line_polygons", None),
+                observation_coordinate_space="page",
+                crop_index=index,
+            )
             if str(recovered or "").strip():
                 stats["crop_fallback_recovered"] += 1
             if shadow_enabled and attempted > shadow_limit:
@@ -993,7 +1565,7 @@ class OCREngine:
             stats["ocr_dedup_removed"] = int(self._dedupe_ocr_records_in_place(texts, blocks))
         else:
             stats["ocr_dedup_removed"] = 0
-        self._last_recognize_blocks_stats = stats
+        self._observation_state().stats = stats
         return texts
 
     @staticmethod
@@ -1069,11 +1641,31 @@ class OCREngine:
                 current_conf = 0.0
                 kept_conf = 0.0
             if current_conf > kept_conf:
+                dropped_index = duplicate_of
+                dropped_record = records[duplicate_of]
+                dropped_confidence = kept_conf
                 records[duplicate_of] = self._clear_record_text(records[duplicate_of])
                 kept.remove(duplicate_of)
                 kept.append(index)
             else:
+                dropped_index = index
+                dropped_record = record
+                dropped_confidence = current_conf
                 records[index] = self._clear_record_text(record)
+            dropped_text = self._record_text(dropped_record).strip()
+            dropped_polygons = dropped_record.get("line_polygons") if isinstance(dropped_record, dict) else []
+            self._append_observation_record(
+                provider="ocr_dedupe",
+                text=dropped_text,
+                confidence=dropped_confidence,
+                bbox=self._block_bbox(blocks[dropped_index]),
+                line_polygons=dropped_polygons or [],
+                accepted=False,
+                rejection_reason="duplicate_ocr_record",
+                variant="dedupe",
+                coordinate_space="page",
+                duplicate_of_index=int(index if dropped_index == duplicate_of else duplicate_of),
+            )
             removed += 1
         return removed
 
@@ -1088,7 +1680,8 @@ class OCREngine:
         if self._backend == "easyocr":
             raise OcrBackendUnavailable("EasyOCR esta desativado; PaddleOCR e obrigatorio.")
         else:
-            return self._paddle_ocr_batch(crops)
+            crop_indices = getattr(self._observation_state(), "active_crop_indices", None)
+            return self._paddle_ocr_batch(crops, crop_indices=crop_indices)
 
     def _easyocr_batch(self, crops: list[np.ndarray]) -> list[str]:
         del crops
@@ -1096,7 +1689,7 @@ class OCREngine:
 
     def _manga_ocr_batch(self, crops: list[np.ndarray]) -> list[str]:
         """Inferência batched com manga-ocr."""
-        pil_images = []
+        texts: list[str] = []
         for crop in crops:
             if isinstance(crop, np.ndarray):
                 img = Image.fromarray(crop).convert("RGB")
@@ -1105,46 +1698,88 @@ class OCREngine:
             
             # manga-ocr funciona melhor com imagens quadradas
             img = self._pad_to_square(img)
-            pil_images.append(img)
-
-        # Tokeniza batch
-        pixel_values = self._processor(
-            images=pil_images,
-            return_tensors="pt",
-        ).pixel_values.to(self.device)
-
-        if self.half:
-            pixel_values = pixel_values.half()
-
-        with torch.inference_mode():
-            generated_ids = self._model.generate(
-                pixel_values,
-                max_new_tokens=300,
-                num_beams=1,          # greedy — mais rápido, boa qualidade
-                do_sample=False,
+            physical_rgb = np.asarray(img, dtype=np.uint8)
+            request = _legacy_local_ocr_request(
+                physical_rgb,
+                variant_id="manga_native",
+                provider_family="manga-ocr",
             )
+            _attempt, records = execute_hash_bound_provider_attempt(
+                request=request,
+                root_input_rgb=physical_rgb,
+                actual_input_rgb=physical_rgb,
+                transform_spec=_identity_transform_spec(),
+                variant_id="manga_native",
+                provider={
+                    "processor": self._processor,
+                    "model": self._model,
+                    "tokenizer": self._tokenizer,
+                    "device": self.device,
+                    "half": self.half,
+                },
+                provider_mode="manga_ocr",
+                expected_input_pixel_sha256=request.root_input_pixel_sha256,
+                source="manga_ocr_crop",
+                execution_recorder=self._record_raw_model_execution,
+            )
+            texts.append(" ".join(record.text for record in records if record.text).strip())
 
-        self._record_raw_model_execution(generated_ids)
-        texts = self._tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-        return [t.strip() for t in texts]
+        return texts
 
-    def _paddle_ocr_batch(self, crops: list[np.ndarray]) -> list[str]:
+    def _paddle_ocr_batch(
+        self,
+        crops: list[np.ndarray],
+        *,
+        crop_indices: list[int] | None = None,
+    ) -> list[str]:
         """PaddleOCR processa uma imagem por vez (não tem batch nativo)."""
         texts = []
-        for crop in crops:
+        for local_index, crop in enumerate(crops):
+            crop_index = (
+                int(crop_indices[local_index])
+                if crop_indices is not None and local_index < len(crop_indices)
+                else int(local_index)
+            )
             if crop.size == 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
                 texts.append("")
+                crop_height, crop_width = crop.shape[:2] if crop.ndim >= 2 else (0, 0)
+                self._append_observation_record(
+                    provider="paddle_crop",
+                    text="",
+                    confidence=0.0,
+                    bbox=[0, 0, int(crop_width), int(crop_height)],
+                    line_polygons=[],
+                    accepted=False,
+                    rejection_reason="invalid_crop",
+                    variant="native",
+                    coordinate_space="crop",
+                    crop_index=crop_index,
+                )
                 continue
-            texts.append(self._recognize_single_paddle_with_retry(crop))
+            texts.append(self._recognize_single_paddle_with_retry(crop, crop_index=crop_index))
         return texts
 
     def _recognize_single_paddle(self, crop: np.ndarray, *, cls: bool = False) -> str:
         try:
-            result = self._run_paddle_ocr_raw(crop, cls=cls)
-            if result and result[0]:
-                lines = [line[1][0] for line in result[0] if line and line[1]]
-                return " ".join(lines).strip()
-            return ""
+            physical_rgb = _normalize_ocr_rgb(crop)
+            request = _legacy_local_ocr_request(
+                physical_rgb,
+                variant_id="crop_native",
+                provider_family="paddleocr",
+            )
+            _attempt, records = execute_hash_bound_provider_attempt(
+                request=request,
+                root_input_rgb=physical_rgb,
+                actual_input_rgb=physical_rgb,
+                transform_spec=_identity_transform_spec(),
+                variant_id="crop_native",
+                provider=self._model.ocr,
+                provider_kwargs={"det": True, "rec": True, "cls": bool(cls)},
+                expected_input_pixel_sha256=request.root_input_pixel_sha256,
+                source="paddle_crop",
+                execution_recorder=self._record_raw_model_execution,
+            )
+            return " ".join(record.text for record in records if record.text).strip()
         except Exception as e:
             logger.warning(f"OCR error: {e}")
             return ""
@@ -1244,26 +1879,85 @@ class OCREngine:
 
         return "." * len(components)
 
-    def _recognize_single_paddle_with_retry(self, crop: np.ndarray) -> str:
+    def _recognize_single_paddle_with_retry(
+        self,
+        crop: np.ndarray,
+        *,
+        observation_bbox=None,
+        observation_line_polygons=None,
+        observation_coordinate_space: str = "crop",
+        crop_index: int | None = None,
+    ) -> str:
+        crop_height, crop_width = (
+            crop.shape[:2]
+            if isinstance(crop, np.ndarray) and crop.ndim >= 2
+            else (0, 0)
+        )
+        record_bbox = _coerce_bbox(observation_bbox) or [0, 0, int(crop_width), int(crop_height)]
+        attempts: list[tuple[str, str]] = []
+
+        def _record_attempts(selected_index: int | None = None) -> None:
+            for attempt_index, (variant_name, attempt_text) in enumerate(attempts):
+                cleaned_attempt = str(attempt_text or "").strip()
+                is_selected = selected_index is not None and attempt_index == selected_index
+                if is_selected:
+                    rejection_reason = None
+                elif not cleaned_attempt:
+                    rejection_reason = "empty_result"
+                else:
+                    rejection_reason = "lower_score"
+                self._append_observation_record(
+                    provider="paddle_crop",
+                    text=cleaned_attempt,
+                    confidence=0.0,
+                    bbox=record_bbox,
+                    line_polygons=observation_line_polygons or [],
+                    accepted=is_selected,
+                    rejection_reason=rejection_reason,
+                    variant=variant_name,
+                    coordinate_space=observation_coordinate_space,
+                    crop_index=crop_index,
+                )
+
         use_angle_cls = bool(getattr(self, "_paddle_use_angle_cls", False))
         text = self._recognize_single_paddle(crop, cls=use_angle_cls)
+        attempts.append(("native", str(text or "")))
         if text:
+            _record_attempts(selected_index=0)
             return text
 
         best_text = ""
         best_score = self._score_ocr_candidate("")
-        for variant in self._build_paddle_retry_variants(crop):
+        best_attempt_index: int | None = None
+        for variant_index, variant in enumerate(self._build_paddle_retry_variants(crop), start=1):
             candidate = self._recognize_single_paddle(variant, cls=use_angle_cls)
+            attempts.append((f"retry_{variant_index}", str(candidate or "")))
             score = self._score_ocr_candidate(candidate)
             if score > best_score:
                 best_score = score
                 best_text = candidate
+                best_attempt_index = len(attempts) - 1
             # Early exit: good enough result, skip remaining variants
             if score >= (3, 3, 4):
                 break
         if best_text.strip():
+            _record_attempts(selected_index=best_attempt_index)
             return best_text.strip()
-        return self._detect_dot_run_fallback(crop)
+        _record_attempts(selected_index=None)
+        dot_fallback = self._detect_dot_run_fallback(crop)
+        self._append_observation_record(
+            provider="paddle_crop",
+            text=dot_fallback,
+            confidence=0.0,
+            bbox=record_bbox,
+            line_polygons=observation_line_polygons or [],
+            accepted=bool(str(dot_fallback or "").strip()),
+            rejection_reason=None if str(dot_fallback or "").strip() else "empty_result",
+            variant="dot_run",
+            coordinate_space=observation_coordinate_space,
+            crop_index=crop_index,
+        )
+        return dot_fallback
 
     @staticmethod
     def _crop_block_from_page(page_rgb: np.ndarray, block, padding: int = 4) -> np.ndarray:
@@ -1421,23 +2115,76 @@ class OCREngine:
         if rotated is None or inverse_matrix is None:
             return []
         try:
-            result = self._run_paddle_ocr_raw(rotated, cls=False)
+            physical_rgb = _normalize_ocr_rgb(rotated)
+            request = _legacy_local_ocr_request(
+                physical_rgb,
+                variant_id=f"deskew_{float(rotation_deg):.2f}",
+                provider_family="paddleocr",
+            )
+            _attempt, provider_records = execute_hash_bound_provider_attempt(
+                request=request,
+                root_input_rgb=physical_rgb,
+                actual_input_rgb=physical_rgb,
+                transform_spec=_identity_transform_spec(),
+                variant_id=f"deskew_{float(rotation_deg):.2f}",
+                provider=self._model.ocr,
+                provider_kwargs={"det": True, "rec": True, "cls": False},
+                expected_input_pixel_sha256=request.root_input_pixel_sha256,
+                source="paddle_skewed_recovery",
+                execution_recorder=self._record_raw_model_execution,
+            )
         except Exception as exc:
             logger.debug("OCR deskew para texto inclinado falhou: %s", exc)
             return []
-        raw_lines = result[0] if isinstance(result, list) and result else []
+        provider_raw = provider_records.raw_result
+        raw_lines = provider_raw[0] if isinstance(provider_raw, list) and provider_raw else []
         recovered: list[dict] = []
         for item in raw_lines or []:
             if not item or len(item) < 2:
+                self._append_observation_record(
+                    provider="paddle_skewed_recovery",
+                    text="",
+                    confidence=0.0,
+                    bbox=block_bbox,
+                    line_polygons=[],
+                    accepted=False,
+                    rejection_reason="invalid_provider_item",
+                    variant=f"deskew_{float(rotation_deg):.2f}",
+                    coordinate_space="page",
+                )
                 continue
             box = item[0]
             meta = item[1]
-            text = meta[0] if isinstance(meta, (list, tuple)) and len(meta) >= 1 else ""
-            text = str(text or "").strip()
+            provider_text = meta[0] if isinstance(meta, (list, tuple)) and len(meta) >= 1 else ""
+            text = str(provider_text or "").strip()
             if not text:
+                self._append_observation_record(
+                    provider="paddle_skewed_recovery",
+                    text="",
+                    raw_text=str(provider_text or ""),
+                    confidence=0.0,
+                    bbox=block_bbox,
+                    line_polygons=[],
+                    accepted=False,
+                    rejection_reason="empty_text",
+                    variant=f"deskew_{float(rotation_deg):.2f}",
+                    coordinate_space="page",
+                )
                 continue
             confidence = float(meta[1]) if isinstance(meta, (list, tuple)) and len(meta) >= 2 else 0.0
             if confidence < 0.45:
+                self._append_observation_record(
+                    provider="paddle_skewed_recovery",
+                    text=text,
+                    raw_text=str(provider_text or ""),
+                    confidence=confidence,
+                    bbox=block_bbox,
+                    line_polygons=[],
+                    accepted=False,
+                    rejection_reason="below_min_confidence",
+                    variant=f"deskew_{float(rotation_deg):.2f}",
+                    coordinate_space="page",
+                )
                 continue
             rotated_polygon = _normalize_line_polygons([box])
             rotated_line_bbox = _bbox_from_polygons(rotated_polygon) or []
@@ -1446,7 +2193,31 @@ class OCREngine:
             normalized_polygon = polygon[0] if polygon else []
             line_bbox = _bbox_from_polygons([normalized_polygon]) if normalized_polygon else None
             if not line_bbox:
+                self._append_observation_record(
+                    provider="paddle_skewed_recovery",
+                    text=text,
+                    raw_text=str(provider_text or ""),
+                    confidence=confidence,
+                    bbox=block_bbox,
+                    line_polygons=[],
+                    accepted=False,
+                    rejection_reason="invalid_polygon",
+                    variant=f"deskew_{float(rotation_deg):.2f}",
+                    coordinate_space="page",
+                )
                 continue
+            self._append_observation_record(
+                provider="paddle_skewed_recovery",
+                text=text,
+                raw_text=str(provider_text or ""),
+                confidence=confidence,
+                bbox=line_bbox,
+                line_polygons=[normalized_polygon],
+                accepted=True,
+                rejection_reason=None,
+                variant=f"deskew_{float(rotation_deg):.2f}",
+                coordinate_space="page",
+            )
             recovered.append(
                 {
                     "line_bbox": line_bbox,
@@ -1503,14 +2274,67 @@ class OCREngine:
                 )
                 scale_x = scaled_w / float(max(1, input_w))
                 scale_y = scaled_h / float(max(1, input_h))
+        self._observation_state().full_page_lines = []
         try:
-            result = self._run_paddle_ocr_raw(model_input, cls=False)
+            root_rgb = _normalize_ocr_rgb(page_bgr)
+            physical_rgb = _normalize_ocr_rgb(model_input)
+            if physical_rgb.shape[:2] == root_rgb.shape[:2]:
+                transform_spec = _identity_transform_spec()
+            else:
+                transform_spec = OCRTransformSpec.build((
+                    OCRTransformOperation(
+                        kind="resize",
+                        output_size=(int(physical_rgb.shape[1]), int(physical_rgb.shape[0])),
+                        interpolation="area",
+                    ),
+                ))
+            request = _legacy_local_ocr_request(
+                root_rgb,
+                variant_id="full_page",
+                provider_family="paddleocr",
+            )
+            _attempt, provider_records = execute_hash_bound_provider_attempt(
+                request=request,
+                root_input_rgb=root_rgb,
+                actual_input_rgb=physical_rgb,
+                transform_spec=transform_spec,
+                variant_id="full_page",
+                provider=self._model.ocr,
+                provider_kwargs={"det": True, "rec": True, "cls": False},
+                expected_input_pixel_sha256=canonical_page_sha256(physical_rgb),
+                source="paddle_full_page",
+                execution_recorder=self._record_raw_model_execution,
+            )
         except Exception as exc:
             logger.warning("PaddleOCR full-page falhou; fallback por crop: %s", exc)
+            self._append_observation_record(
+                provider="paddle_full_page",
+                text="",
+                confidence=0.0,
+                bbox=[],
+                line_polygons=[],
+                accepted=False,
+                rejection_reason="provider_error",
+                variant="native",
+                coordinate_space="page",
+                error=str(exc),
+            )
             return None
 
-        raw_lines = result[0] if isinstance(result, list) and result else []
+        provider_raw = provider_records.raw_result
+        raw_lines = provider_raw[0] if isinstance(provider_raw, list) and provider_raw else []
         if not raw_lines:
+            self._append_observation_record(
+                provider="paddle_full_page",
+                text="",
+                confidence=0.0,
+                bbox=[],
+                line_polygons=[],
+                accepted=False,
+                rejection_reason="no_output",
+                variant="native",
+                coordinate_space="page",
+            )
             return None
 
         original_block_bboxes: list[list[int]] = []
@@ -1539,22 +2363,63 @@ class OCREngine:
                 page_rgb = page_bgr
 
         assigned: list[list[dict]] = [[] for _ in blocks]
+        full_page_line_records: list[dict] = []
 
         for item in raw_lines:
             if not item or len(item) < 2:
+                self._append_observation_record(
+                    provider="paddle_full_page",
+                    text="",
+                    confidence=0.0,
+                    bbox=[],
+                    line_polygons=[],
+                    accepted=False,
+                    rejection_reason="invalid_provider_item",
+                    variant="native",
+                    coordinate_space="page",
+                )
                 continue
             box = item[0]
             meta = item[1]
-            if not isinstance(box, (list, tuple)) or len(box) < 4:
-                continue
-
             text = meta[0] if isinstance(meta, (list, tuple)) and len(meta) >= 1 else ""
-            if not str(text or "").strip():
+            try:
+                observation_confidence = (
+                    float(meta[1])
+                    if isinstance(meta, (list, tuple)) and len(meta) >= 2
+                    else 0.0
+                )
+            except (TypeError, ValueError):
+                observation_confidence = 0.0
+            if not isinstance(box, (list, tuple)) or len(box) < 4:
+                self._append_observation_record(
+                    provider="paddle_full_page",
+                    text=str(text or "").strip(),
+                    raw_text=str(text or ""),
+                    confidence=observation_confidence,
+                    bbox=[],
+                    line_polygons=[],
+                    accepted=False,
+                    rejection_reason="invalid_polygon",
+                    variant="native",
+                    coordinate_space="page",
+                )
                 continue
 
             xs = [float(p[0]) for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
             ys = [float(p[1]) for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
             if not xs or not ys:
+                self._append_observation_record(
+                    provider="paddle_full_page",
+                    text=str(text or "").strip(),
+                    raw_text=str(text or ""),
+                    confidence=observation_confidence,
+                    bbox=[],
+                    line_polygons=[],
+                    accepted=False,
+                    rejection_reason="invalid_polygon",
+                    variant="native",
+                    coordinate_space="page",
+                )
                 continue
 
             scaled_line_bbox = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
@@ -1568,6 +2433,38 @@ class OCREngine:
             normalized_polygon = line_polygon[0] if line_polygon else []
             if normalized_polygon and (scale_x != 1.0 or scale_y != 1.0):
                 normalized_polygon = _scale_polygon_points(normalized_polygon, 1.0 / scale_x, 1.0 / scale_y)
+
+            if not str(text or "").strip():
+                self._append_observation_record(
+                    provider="paddle_full_page",
+                    text="",
+                    raw_text=str(text or ""),
+                    confidence=observation_confidence,
+                    bbox=line_bbox,
+                    line_polygons=[normalized_polygon] if normalized_polygon else [],
+                    accepted=False,
+                    rejection_reason="empty_text",
+                    variant="native",
+                    coordinate_space="page",
+                )
+                continue
+
+            confidence = float(meta[1]) if isinstance(meta, (list, tuple)) and len(meta) >= 2 else 0.0
+            full_page_line_records.append(
+                {
+                    "text": str(text).strip(),
+                    "source_bbox": list(line_bbox),
+                    "bbox": list(line_bbox),
+                    "text_pixel_bbox": _derive_text_pixel_bbox(
+                        page_rgb,
+                        line_bbox,
+                        [normalized_polygon] if normalized_polygon else [],
+                    ) or list(line_bbox),
+                    "line_polygons": [normalized_polygon] if normalized_polygon else [],
+                    "confidence": confidence,
+                    "detector": "paddle_full_page_line",
+                }
+            )
 
             best_index = None
             best_score = 0.0
@@ -1588,9 +2485,24 @@ class OCREngine:
                         "line_bbox": line_bbox,
                         "text": str(text).strip(),
                         "line_polygon": normalized_polygon,
-                        "confidence": float(meta[1]) if isinstance(meta, (list, tuple)) and len(meta) >= 2 else 0.0,
+                        "confidence": confidence,
                     }
                 )
+            mapping_accepted = best_index is not None and best_score >= 0.18
+            self._append_observation_record(
+                provider="paddle_full_page",
+                text=str(text).strip(),
+                raw_text=str(text),
+                confidence=confidence,
+                bbox=line_bbox,
+                line_polygons=[normalized_polygon] if normalized_polygon else [],
+                accepted=mapping_accepted,
+                rejection_reason=None if mapping_accepted else "unmapped_to_detector_block",
+                variant="native",
+                coordinate_space="page",
+                mapped_block_index=int(best_index) if mapping_accepted else None,
+                mapping_score=round(float(best_score), 6),
+            )
 
         texts: list[dict] = []
         non_empty = 0
@@ -1641,6 +2553,7 @@ class OCREngine:
                 record
             )
 
+        self._observation_state().full_page_lines = full_page_line_records
         if non_empty == 0:
             return None
 
@@ -1661,6 +2574,7 @@ class OCREngine:
         rotations: tuple[int, ...] = (90, 270),
         min_confidence: float = 0.80,
     ) -> list[dict]:
+        self._reset_observation_records()
         if getattr(self, "_backend", "") != "paddleocr":
             return []
         if not isinstance(page_rgb, np.ndarray) or page_rgb.size == 0:
@@ -1671,30 +2585,67 @@ class OCREngine:
         for rotation_deg in rotations:
             rotated = _rotate_orthogonal(page_rgb, int(rotation_deg))
             try:
-                result = self._run_paddle_ocr_raw(rotated, cls=False)
+                physical_rgb = _normalize_ocr_rgb(rotated)
+                request = _legacy_local_ocr_request(
+                    physical_rgb,
+                    variant_id=f"rotation_{int(rotation_deg) % 360}",
+                    provider_family="paddleocr",
+                )
+                _attempt, provider_records = execute_hash_bound_provider_attempt(
+                    request=request,
+                    root_input_rgb=physical_rgb,
+                    actual_input_rgb=physical_rgb,
+                    transform_spec=_identity_transform_spec(),
+                    variant_id=f"rotation_{int(rotation_deg) % 360}",
+                    provider=self._model.ocr,
+                    provider_kwargs={"det": True, "rec": True, "cls": False},
+                    expected_input_pixel_sha256=request.root_input_pixel_sha256,
+                    source="paddle_rotated_full_page",
+                    execution_recorder=self._record_raw_model_execution,
+                )
             except Exception as exc:
                 logger.debug("PaddleOCR rotated-page recovery falhou (%s): %s", rotation_deg, exc)
                 continue
-            raw_lines = result[0] if isinstance(result, list) and result else []
+            provider_raw = provider_records.raw_result
+            raw_lines = provider_raw[0] if isinstance(provider_raw, list) and provider_raw else []
             if raw_lines is None:
                 raw_lines = []
             for item in raw_lines:
                 if not item or len(item) < 2:
+                    self._append_observation_record(
+                        provider="paddle_rotated_full_page",
+                        text="",
+                        confidence=0.0,
+                        bbox=[],
+                        line_polygons=[],
+                        accepted=False,
+                        rejection_reason="invalid_provider_item",
+                        variant=f"rotation_{int(rotation_deg) % 360}",
+                        coordinate_space="page",
+                    )
                     continue
                 box = item[0]
                 meta = item[1]
-                text = meta[0] if isinstance(meta, (list, tuple)) and len(meta) >= 1 else ""
-                text = _repair_rotated_ocr_edge_clipping(str(text or "").strip())
-                if not text:
-                    continue
+                provider_text = meta[0] if isinstance(meta, (list, tuple)) and len(meta) >= 1 else ""
+                text = _repair_rotated_ocr_edge_clipping(str(provider_text or "").strip())
                 try:
                     confidence = float(meta[1]) if isinstance(meta, (list, tuple)) and len(meta) >= 2 else 0.0
                 except Exception:
                     confidence = 0.0
-                if confidence < float(min_confidence):
-                    continue
                 rotated_polygons = _normalize_line_polygons([box])
                 if not rotated_polygons:
+                    self._append_observation_record(
+                        provider="paddle_rotated_full_page",
+                        text=text,
+                        raw_text=str(provider_text or ""),
+                        confidence=confidence,
+                        bbox=[],
+                        line_polygons=[],
+                        accepted=False,
+                        rejection_reason="invalid_polygon",
+                        variant=f"rotation_{int(rotation_deg) % 360}",
+                        coordinate_space="page",
+                    )
                     continue
                 polygon = _unrotate_orthogonal_polygon(
                     rotated_polygons[0],
@@ -1703,13 +2654,57 @@ class OCREngine:
                     rotation_deg=int(rotation_deg),
                 )
                 if len(polygon) < 4:
+                    self._append_observation_record(
+                        provider="paddle_rotated_full_page",
+                        text=text,
+                        raw_text=str(provider_text or ""),
+                        confidence=confidence,
+                        bbox=[],
+                        line_polygons=[],
+                        accepted=False,
+                        rejection_reason="invalid_polygon",
+                        variant=f"rotation_{int(rotation_deg) % 360}",
+                        coordinate_space="page",
+                    )
                     continue
                 line_polygons = [polygon]
                 source_bbox = _bbox_from_polygons(line_polygons)
                 if source_bbox is None:
+                    self._append_observation_record(
+                        provider="paddle_rotated_full_page",
+                        text=text,
+                        raw_text=str(provider_text or ""),
+                        confidence=confidence,
+                        bbox=[],
+                        line_polygons=line_polygons,
+                        accepted=False,
+                        rejection_reason="invalid_bbox",
+                        variant=f"rotation_{int(rotation_deg) % 360}",
+                        coordinate_space="page",
+                    )
                     continue
                 rotation = infer_rotation_deg_from_line_polygons(line_polygons)
-                if abs(rotation) < 35.0:
+                rejection_reason = None
+                if not text:
+                    rejection_reason = "empty_text"
+                elif confidence < float(min_confidence):
+                    rejection_reason = "below_min_confidence"
+                elif abs(rotation) < 35.0:
+                    rejection_reason = "not_rotated_enough"
+                self._append_observation_record(
+                    provider="paddle_rotated_full_page",
+                    text=text,
+                    raw_text=str(provider_text or ""),
+                    confidence=confidence,
+                    bbox=source_bbox,
+                    line_polygons=line_polygons,
+                    accepted=rejection_reason is None,
+                    rejection_reason=rejection_reason,
+                    variant=f"rotation_{int(rotation_deg) % 360}",
+                    coordinate_space="page",
+                    rotation_deg=rotation,
+                )
+                if rejection_reason is not None:
                     continue
                 xs = [float(p[0]) for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
                 ys = [float(p[1]) for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]

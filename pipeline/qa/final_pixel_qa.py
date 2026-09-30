@@ -1,0 +1,933 @@
+"""Fail-closed QA over fresh OCR observations of persisted final pixels."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import re
+from types import MappingProxyType
+from typing import Any, Mapping, Sequence
+import unicodedata
+
+import cv2
+import numpy as np
+
+from ownership.delivery import (
+    OwnerTextDeliveryContract,
+    OwnerTextExecutionAuthority,
+    validate_owner_text_delivery_contract,
+)
+from ownership.model import OwnerGraph, PageCompositionResult
+from ownership.translation import TranslationBinding
+from qa.final_pixel_observer import FinalPixelObservation, FinalPixelObserver
+from qa.language_residual import (
+    ResidualRegion,
+    classify_language_residual,
+    classify_unowned_text,
+    deduplicate_language_issues,
+)
+from translator.language_policy import (
+    build_page_language_evidence,
+    validate_target_language,
+)
+
+
+_CONTRACT_NAMES = (
+    "source_coverage_contract",
+    "owner_graph_contract",
+    "route_state_contract",
+    "pixel_ownership_contract",
+    "final_language_contract",
+    "layout_legibility_contract",
+    "residual_cleanup_contract",
+    "protected_art_contract",
+    "qa_integrity_contract",
+)
+_RENDER_ROUTES = frozenset(
+    {"translate_inpaint_render", "translate_sfx_inpaint_render", "translate_render_only"}
+)
+_MIN_SOURCE_SUPPORT_CLEANUP_RATIO = 0.35
+
+
+@dataclass(frozen=True)
+class FinalPixelQaIssue:
+    issue_id: str
+    page_id: str
+    owner_id: str | None
+    component_ids: tuple[str, ...]
+    severity: str
+    reason: str
+    offenders: tuple[str, ...]
+    contract: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "issue_id": self.issue_id,
+            "page_id": self.page_id,
+            "owner_id": self.owner_id,
+            "component_ids": list(self.component_ids),
+            "severity": self.severity,
+            "reason": self.reason,
+            "offenders": list(self.offenders),
+            "contract": self.contract,
+        }
+
+
+@dataclass(frozen=True)
+class FinalPixelQaReport:
+    page_id: str
+    persisted_sha256: str
+    issues: tuple[FinalPixelQaIssue, ...]
+    contracts: dict[str, str]
+    passed: bool
+    observed_text_count: int
+    geometry_projection_count: int = 0
+    owner_support_bbox_frame: tuple[int, int, int, int] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "issues", tuple(self.issues))
+        object.__setattr__(self, "contracts", MappingProxyType(dict(self.contracts)))
+
+
+def _tokens(value: Any) -> tuple[str, ...]:
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", str(value or ""))
+        if not unicodedata.combining(character)
+    ).casefold()
+    normalized = re.sub(r"(?<=\d)(?=[^\W\d_])|(?<=[^\W\d_])(?=\d)", " ", normalized)
+    return tuple(
+        token
+        for token in re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+        if len(token) >= 2
+    )
+
+
+def source_payload_visible(
+    source_payload: str,
+    observed_text: str,
+    *,
+    translated_payload: str | None = None,
+) -> bool:
+    source = _tokens(source_payload)
+    observed = _tokens(observed_text)
+    translated = _tokens(translated_payload)
+    if translated and source == translated:
+        # A verified target-language repaint can legitimately render the same
+        # lexical payload after the original pixels were removed.  Pixel
+        # replacement and target-materialization contracts own that proof;
+        # OCR cannot distinguish old glyphs from the freshly rendered target.
+        return False
+    if translated and source != translated:
+        translated_set = set(translated)
+        source = tuple(token for token in source if token not in translated_set)
+    if not source or not observed:
+        return False
+    observed_set = set(observed)
+    if len(source) == 1:
+        return len(source[0]) >= 4 and source[0] in observed_set
+    source_bigrams = set(zip(source, source[1:]))
+    observed_bigrams = set(zip(observed, observed[1:]))
+    if source_bigrams & observed_bigrams:
+        return True
+    matched = sum(token in observed_set for token in source)
+    return matched >= 2 and matched / len(source) >= 0.75
+
+
+def _target_payload_observed(target_payload: str, observed_text: str) -> bool:
+    target = _tokens(target_payload)
+    observed = _tokens(observed_text)
+    if not target or not observed:
+        return False
+    target_set = set(target)
+    observed_set = set(observed)
+    if observed_set <= target_set or target_set <= observed_set:
+        return True
+    return bool(set(zip(target, target[1:])) & set(zip(observed, observed[1:])))
+
+
+def is_verified_target_language_no_repaint(owner: Any) -> bool:
+    """Recognize the terminal owner state backed by an accepted PT-BR identity binding."""
+
+    def field(name: str) -> Any:
+        return owner.get(name) if isinstance(owner, Mapping) else getattr(owner, name, None)
+
+    source = " ".join(
+        unicodedata.normalize("NFC", str(field("source_payload") or "")).split()
+    )
+    target = " ".join(
+        unicodedata.normalize("NFC", str(field("translated_payload") or "")).split()
+    )
+    return bool(
+        field("state") == "target_ready"
+        and field("route_action") in _RENDER_ROUTES
+        and source
+        and source == target
+    )
+
+
+def _is_verified_no_repaint_owner(owner: Any) -> bool:
+    return is_verified_target_language_no_repaint(owner)
+
+
+def _is_verified_target_language_observation(text: str) -> bool:
+    """Accept terminal PT-BR/no-lexical text without weakening English detection."""
+
+    evidence = build_page_language_evidence(
+        texts=[text],
+        coverage_complete=True,
+    )
+    verdict = validate_target_language(
+        source=text,
+        target=text,
+        role="dialogue",
+        page_language_evidence=evidence,
+    )
+    if not verdict.accepted:
+        return False
+    return verdict.reason in {"already_target_language", "source_neutral_nonlexical"}
+
+
+def _bbox(value: Any) -> tuple[int, int, int, int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = (int(round(float(item))) for item in value[:4])
+    except (TypeError, ValueError):
+        return None
+    if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _overlap_ratio(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> float:
+    x1, y1 = max(left[0], right[0]), max(left[1], right[1])
+    x2, y2 = min(left[2], right[2]), min(left[3], right[3])
+    overlap = max(0, x2 - x1) * max(0, y2 - y1)
+    left_area = max(1, (left[2] - left[0]) * (left[3] - left[1]))
+    return overlap / float(left_area)
+
+
+def _record_text(record: dict[str, Any]) -> str:
+    for key in ("text", "raw_ocr", "original"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _record_bbox(record: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    for key in ("bbox", "text_pixel_bbox", "source_bbox"):
+        value = _bbox(record.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _explicit_preserve_policy(reason: str | None) -> bool:
+    normalized = str(reason or "").strip().casefold()
+    return normalized.startswith("policy:") and len(normalized) > len("policy:")
+
+
+def classify_final_observation_language(
+    *,
+    observation: FinalPixelObservation,
+    bindings: Sequence[TranslationBinding],
+    regions_by_owner: Mapping[str, ResidualRegion],
+    run_id: str,
+    execution_id: str,
+    page_source_sha256: str,
+    page_output_pixel_sha256: str,
+    containers: Sequence[Mapping[str, Any]] = (),
+):
+    """Classify fresh final OCR by binding and canonical owner/container regions."""
+
+    if not isinstance(observation, FinalPixelObservation):
+        raise TypeError("final language classification requires FinalPixelObservation")
+    binding_by_owner = {binding.owner_id: binding for binding in bindings}
+    issues = []
+    for index, raw_record in enumerate(observation.ocr_records):
+        record = dict(raw_record)
+        text = _record_text(record)
+        bbox = _record_bbox(record)
+        if not text or bbox is None:
+            continue
+        invocation_id = str(
+            record.get("invocation_id")
+            or record.get("final_probe_invocation_id")
+            or f"final-qa:{index}"
+        )
+        candidates = sorted(
+            (
+                (_overlap_ratio(bbox, region.bbox_page), owner_id, region)
+                for owner_id, region in regions_by_owner.items()
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )
+        selected = candidates[0] if candidates and candidates[0][0] >= 0.2 else None
+        if selected is not None:
+            _, owner_id, base_region = selected
+            binding = binding_by_owner.get(owner_id)
+            if binding is not None:
+                region = ResidualRegion(
+                    run_id=base_region.run_id,
+                    execution_id=base_region.execution_id,
+                    page_id=base_region.page_id,
+                    page_source_sha256=base_region.page_source_sha256,
+                    page_output_pixel_sha256=base_region.page_output_pixel_sha256,
+                    bbox_page=base_region.bbox_page,
+                    owner_id=base_region.owner_id,
+                    component_id=base_region.component_id,
+                    container_id=base_region.container_id,
+                    invocation_ids=tuple((*base_region.invocation_ids, invocation_id)),
+                )
+                issues.extend(
+                    classify_language_residual(
+                        observed=text,
+                        binding=binding,
+                        region=region,
+                    )
+                )
+                continue
+
+        matching_container = next(
+            (
+                container
+                for container in containers
+                if (
+                    (container_bbox := _bbox(
+                        container.get("bbox_page") or container.get("bbox")
+                    ))
+                    is not None
+                    and _overlap_ratio(bbox, container_bbox) >= 0.2
+                )
+            ),
+            None,
+        )
+        issues.extend(
+            classify_unowned_text(
+                {
+                    **record,
+                    "text": text,
+                    "bbox": list(bbox),
+                    "glyph_support": bool(record.get("glyph_support", True)),
+                    "invocation_id": invocation_id,
+                    "run_id": run_id,
+                    "execution_id": execution_id,
+                    "page_id": observation.page_id,
+                    "page_source_sha256": page_source_sha256,
+                    "page_output_pixel_sha256": page_output_pixel_sha256,
+                },
+                matching_container,
+            )
+        )
+    return deduplicate_language_issues(issues)
+
+
+def evaluate_final_pixel_observation(
+    *,
+    graph: OwnerGraph,
+    composition: PageCompositionResult,
+    observation: FinalPixelObservation,
+) -> FinalPixelQaReport:
+    if not isinstance(graph, OwnerGraph):
+        raise TypeError("final pixel QA requires an OwnerGraph")
+    if not isinstance(composition, PageCompositionResult):
+        raise TypeError("final pixel QA requires a PageCompositionResult")
+    if not isinstance(observation, FinalPixelObservation):
+        raise TypeError("final pixel QA requires a FinalPixelObservation")
+
+    issues: list[FinalPixelQaIssue] = []
+
+    def add(
+        reason: str,
+        contract: str,
+        *,
+        owner_id: str | None = None,
+        component_ids: tuple[str, ...] = (),
+        offenders: tuple[str, ...] = (),
+        severity: str = "critical",
+    ) -> None:
+        identity = f"{graph.page_id}:{contract}:{reason}:{owner_id or '-'}:{len(issues) + 1}"
+        issues.append(
+            FinalPixelQaIssue(
+                issue_id=identity,
+                page_id=graph.page_id,
+                owner_id=owner_id,
+                component_ids=tuple(component_ids),
+                severity=severity,
+                reason=reason,
+                offenders=tuple(str(value) for value in offenders),
+                contract=contract,
+            )
+        )
+
+    if composition.page_id != graph.page_id:
+        add(
+            "composition_page_identity_mismatch",
+            "qa_integrity_contract",
+            offenders=(str(composition.page_id), graph.page_id),
+        )
+    for violation in graph.validate():
+        add(
+            violation.code,
+            "owner_graph_contract",
+            offenders=tuple(violation.offenders),
+        )
+
+    dispositions = {item.component_id: item for item in graph.component_dispositions}
+    for component in graph.components:
+        disposition = dispositions.get(component.component_id)
+        if disposition is None:
+            add(
+                "source_component_without_final_disposition",
+                "source_coverage_contract",
+                component_ids=(component.component_id,),
+                offenders=(component.component_id,),
+            )
+        elif disposition.decision == "preserve" and not _explicit_preserve_policy(
+            disposition.reason
+        ):
+            add(
+                "preserved_source_without_explicit_policy",
+                "source_coverage_contract",
+                owner_id=disposition.owner_id,
+                component_ids=(component.component_id,),
+                offenders=(component.component_id,),
+            )
+
+    geometry = composition.page_surface_geometry
+    geometry_hash = str(composition.page_surface_geometry_sha256 or "")
+    if composition.coordinate_space != "framed_page":
+        add("composition_not_in_framed_page", "qa_integrity_contract")
+    if geometry is None or not geometry_hash:
+        add("missing_page_surface_geometry", "qa_integrity_contract")
+    elif geometry.geometry_sha256 != geometry_hash:
+        add("page_surface_geometry_hash_mismatch", "qa_integrity_contract")
+    observation_geometry_hash = str(
+        getattr(observation, "page_surface_geometry_sha256", "") or ""
+    )
+    if geometry is not None and not observation_geometry_hash:
+        add("missing_observation_page_surface_geometry", "qa_integrity_contract")
+    elif observation_geometry_hash and observation_geometry_hash != geometry_hash:
+        add("observation_page_surface_geometry_mismatch", "qa_integrity_contract")
+    if str(getattr(observation, "observation_space", "") or "") != "logical_page":
+        add("observation_coordinate_space_invalid", "qa_integrity_contract")
+    if geometry is not None and int(
+        getattr(observation, "geometry_projection_count", 0) or 0
+    ) != 1:
+        add("geometry_projection_count_invalid", "qa_integrity_contract")
+
+    glyph_map = np.asarray(composition.glyph_owner_map)
+    cleanup_map = np.asarray(composition.cleanup_owner_map)
+    final_rgb = np.asarray(composition.final_rgb)
+    expected_shape = final_rgb.shape[:2]
+    if (
+        final_rgb.ndim != 3
+        or final_rgb.shape[2] != 3
+        or glyph_map.shape != expected_shape
+        or cleanup_map.shape != expected_shape
+        or observation.image_rgb.shape[:2] != expected_shape
+    ):
+        add("pixel_evidence_shape_mismatch", "qa_integrity_contract")
+    else:
+        owned_pixels = int(np.count_nonzero((glyph_map != "") | (cleanup_map != "")))
+        owned_mask = (glyph_map != "") | (cleanup_map != "")
+        final_changed = composition.write_counts.get("final_changed_pixels")
+        if (
+            not isinstance(final_changed, int)
+            or final_changed < 0
+            or final_changed > owned_pixels
+        ):
+            add(
+                "pixel_change_outside_owned_masks",
+                "pixel_ownership_contract",
+                offenders=(str(final_changed), str(owned_pixels)),
+            )
+        persisted_delta = np.max(
+            np.abs(
+                observation.image_rgb.astype(np.int16)
+                - final_rgb.astype(np.int16)
+            ),
+            axis=2,
+        )
+        material_outside = (persisted_delta > 24) & ~owned_mask
+        if np.any(material_outside):
+            add(
+                "pixel_change_outside_owned_masks",
+                "pixel_ownership_contract",
+                offenders=(
+                    f"persisted_material_pixels:{int(np.count_nonzero(material_outside))}",
+                ),
+            )
+        known_owner_ids = {owner.owner_id for owner in graph.owners}
+        mapped_owner_ids = {
+            str(value)
+            for owner_map in (glyph_map, cleanup_map)
+            for value in np.unique(owner_map)
+            if str(value)
+        }
+        unknown = tuple(sorted(mapped_owner_ids - known_owner_ids))
+        if unknown:
+            add(
+                "pixel_map_references_unknown_owner",
+                "pixel_ownership_contract",
+                offenders=unknown,
+            )
+
+    for conflict in composition.conflicts:
+        reason = (
+            "protected_art_damage"
+            if "protected" in str(conflict.code).casefold()
+            else "owner_composition_conflict"
+        )
+        add(
+            reason,
+            "pixel_ownership_contract",
+            owner_id=conflict.owner_ids[0] if len(conflict.owner_ids) == 1 else None,
+            offenders=tuple(conflict.owner_ids) or (conflict.code,),
+        )
+    if composition.committed is not True and not composition.conflicts:
+        add("owner_composition_not_committed", "pixel_ownership_contract")
+
+    owner_by_component = {
+        component_id: owner
+        for owner in graph.owners
+        for component_id in owner.component_ids
+    }
+    observations_by_owner = {
+        owner.owner_id: [
+            observation
+            for observation in graph.observations
+            if observation.observation_id in owner.observation_ids
+        ]
+        for owner in graph.owners
+    }
+    for owner in graph.owners:
+        preserves_original = _is_verified_no_repaint_owner(owner)
+        if owner.state == "review_required" or owner.route_action == "review_required":
+            add(
+                "owner_route_not_final",
+                "route_state_contract",
+                owner_id=owner.owner_id,
+                component_ids=tuple(owner.component_ids),
+                offenders=(owner.state, owner.route_action),
+            )
+        elif (
+            owner.route_action in _RENDER_ROUTES
+            and not preserves_original
+            and owner.state not in {
+            "rendered",
+            "verified",
+            }
+        ):
+            add(
+                "owner_route_not_final",
+                "route_state_contract",
+                owner_id=owner.owner_id,
+                component_ids=tuple(owner.component_ids),
+                offenders=(owner.state,),
+            )
+        if owner.route_action in _RENDER_ROUTES and owner.state in {
+            "rendered",
+            "verified",
+        }:
+            try:
+                authority = OwnerTextExecutionAuthority.from_dict(
+                    composition.owner_text_execution_authorities[owner.owner_id]
+                )
+                delivery = OwnerTextDeliveryContract.from_dict(
+                    composition.owner_text_delivery_contracts[owner.owner_id]
+                )
+                if (
+                    authority.source_payload
+                    != " ".join(
+                        unicodedata.normalize(
+                            "NFC", str(owner.source_payload or "")
+                        ).split()
+                    )
+                    or authority.translated_payload
+                    != " ".join(
+                        unicodedata.normalize(
+                            "NFC", str(owner.translated_payload or "")
+                        ).split()
+                    )
+                ):
+                    raise ValueError("translated_execution_authority_mismatch")
+                validate_owner_text_delivery_contract(
+                    delivery,
+                    execution_authority=authority,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                reason = f"owner_text_delivery_invalid:{exc}"
+                add(
+                    reason,
+                    "route_state_contract",
+                    owner_id=owner.owner_id,
+                    component_ids=tuple(owner.component_ids),
+                )
+                add(
+                    reason,
+                    "final_language_contract",
+                    owner_id=owner.owner_id,
+                    component_ids=tuple(owner.component_ids),
+                )
+        if (
+            owner.route_action in _RENDER_ROUTES
+            and not preserves_original
+            and not np.any(glyph_map == owner.owner_id)
+        ):
+            add(
+                "missing_owner_glyphs",
+                "pixel_ownership_contract",
+                owner_id=owner.owner_id,
+                component_ids=tuple(owner.component_ids),
+                offenders=(owner.owner_id,),
+            )
+        selected_tokens = set(_tokens(owner.source_payload))
+        for source_observation in observations_by_owner.get(owner.owner_id, []):
+            if source_observation.observation_id in owner.selected_observation_ids:
+                continue
+            if float(source_observation.confidence) < 0.80:
+                continue
+            candidate_tokens = set(_tokens(source_observation.text))
+            missing_tokens = candidate_tokens - selected_tokens
+            if missing_tokens and len(candidate_tokens) > len(selected_tokens):
+                add(
+                    "source_payload_incomplete",
+                    "source_coverage_contract",
+                    owner_id=owner.owner_id,
+                    component_ids=tuple(owner.component_ids),
+                    offenders=(
+                        source_observation.observation_id,
+                        source_observation.text,
+                        *tuple(sorted(missing_tokens)),
+                    ),
+                )
+
+        if owner.route_action in {
+            "translate_inpaint_render",
+            "translate_sfx_inpaint_render",
+        } and not preserves_original and cleanup_map.shape == expected_shape:
+            for component_id in owner.component_ids:
+                component = next(
+                    (item for item in graph.components if item.component_id == component_id),
+                    None,
+                )
+                disposition = dispositions.get(component_id)
+                if component is None or (
+                    disposition is not None
+                    and disposition.decision == "preserve"
+                    and _explicit_preserve_policy(disposition.reason)
+                ):
+                    continue
+                evidence_mask = np.zeros(expected_shape, dtype=np.uint8)
+                selected_polygons = [
+                    polygon
+                    for source_observation in observations_by_owner.get(
+                        owner.owner_id,
+                        [],
+                    )
+                    if source_observation.observation_id
+                    in set(owner.selected_observation_ids)
+                    and component_id in set(source_observation.component_ids)
+                    for polygon in source_observation.polygons_page
+                ]
+                for raw_polygon in selected_polygons or [component.polygon_page]:
+                    if geometry is not None:
+                        try:
+                            raw_polygon = geometry.logical_polygon_to_frame(raw_polygon)
+                        except ValueError:
+                            add(
+                                "owner_polygon_outside_page_surface",
+                                "qa_integrity_contract",
+                                owner_id=owner.owner_id,
+                                component_ids=(component_id,),
+                            )
+                            continue
+                    polygon = np.asarray(raw_polygon, dtype=np.int32)
+                    if polygon.ndim == 2 and polygon.shape[0] >= 3:
+                        cv2.fillPoly(evidence_mask, [polygon], 1)
+                outside = (evidence_mask > 0) & (cleanup_map != owner.owner_id)
+                evidence_pixels = int(np.count_nonzero(evidence_mask))
+                outside_pixels = int(np.count_nonzero(outside))
+                coverage_ratio = (
+                    1.0 - (outside_pixels / float(evidence_pixels))
+                    if evidence_pixels > 0
+                    else 0.0
+                )
+                if (
+                    evidence_pixels <= 0
+                    or coverage_ratio < _MIN_SOURCE_SUPPORT_CLEANUP_RATIO
+                ):
+                    add(
+                        "source_evidence_outside_cleanup",
+                        "pixel_ownership_contract",
+                        owner_id=owner.owner_id,
+                        component_ids=(component_id,),
+                        offenders=(
+                            component_id,
+                            f"outside_pixels:{outside_pixels}",
+                            f"coverage_ratio:{coverage_ratio:.6f}",
+                        ),
+                    )
+
+    for index, record in enumerate(observation.ocr_records):
+        text = _record_text(record)
+        if not text:
+            continue
+        text_tokens = _tokens(text)
+        if not text_tokens:
+            continue
+        bbox = _record_bbox(record)
+        candidate_owners: set[str] = set()
+        anchored_component_id = str(record.get("final_probe_target_id") or "")
+        if anchored_component_id.startswith("full-page:"):
+            # Full-page OCR variants are global language probes.  Their bbox
+            # intentionally covers the framed canvas, including letterbox,
+            # so it cannot be used as localized ownership evidence.  It still
+            # challenges every known source payload and can block a residual.
+            for owner in graph.owners:
+                if _is_verified_no_repaint_owner(owner):
+                    continue
+                source_candidates = [owner.source_payload] + [
+                    item.text for item in observations_by_owner.get(owner.owner_id, [])
+                ]
+                visible_source = next(
+                    (
+                        source
+                        for source in source_candidates
+                        if source_payload_visible(
+                            source,
+                            text,
+                            translated_payload=owner.translated_payload,
+                        )
+                    ),
+                    None,
+                )
+                if visible_source is not None:
+                    add(
+                        "source_payload_visible",
+                        "final_language_contract",
+                        owner_id=owner.owner_id,
+                        component_ids=tuple(owner.component_ids),
+                        offenders=(text, visible_source),
+                    )
+            continue
+        anchored_disposition = dispositions.get(anchored_component_id)
+        if (
+            anchored_disposition is not None
+            and anchored_disposition.decision == "suppress"
+            and len(text_tokens) == 1
+            and len(text_tokens[0]) <= 2
+        ):
+            continue
+        if anchored_component_id in owner_by_component:
+            candidate_owners.add(owner_by_component[anchored_component_id].owner_id)
+        frame_bbox = bbox
+        if bbox is not None and geometry is not None:
+            try:
+                frame_bbox = geometry.logical_bbox_to_frame(bbox)
+            except ValueError:
+                frame_bbox = None
+                add("observation_bbox_outside_logical_page", "qa_integrity_contract")
+        if frame_bbox is not None and glyph_map.shape == expected_shape:
+            x1 = max(0, min(expected_shape[1], frame_bbox[0]))
+            y1 = max(0, min(expected_shape[0], frame_bbox[1]))
+            x2 = max(x1, min(expected_shape[1], frame_bbox[2]))
+            y2 = max(y1, min(expected_shape[0], frame_bbox[3]))
+            candidate_owners.update(
+                str(value)
+                for value in np.unique(glyph_map[y1:y2, x1:x2])
+                if str(value) in known_owner_ids
+            )
+        candidate_owners.update(
+            owner.owner_id
+            for owner in graph.owners
+            if _target_payload_observed(owner.translated_payload, text)
+        )
+        matching_components = [
+            component
+            for component in graph.components
+            if (
+                bbox is not None
+                and (
+                    _overlap_ratio(bbox, component.bbox_page) >= 0.2
+                    or (
+                        frame_bbox is not None
+                        and frame_bbox != bbox
+                        and _overlap_ratio(frame_bbox, component.bbox_page) >= 0.2
+                    )
+                )
+            )
+        ]
+        scanlation_zone_top = min(
+            (
+                int(component.bbox_page[1])
+                for component in graph.components
+                if (
+                    (disposition := dispositions.get(component.component_id)) is not None
+                    and disposition.decision == "preserve"
+                    and disposition.reason == "policy:scanlation_apparatus"
+                )
+            ),
+            default=None,
+        )
+        if (
+            not matching_components
+            and not candidate_owners
+            and bbox is not None
+            and scanlation_zone_top is not None
+            and bbox[1] >= scanlation_zone_top
+        ):
+            continue
+        if not matching_components and not candidate_owners:
+            if _is_verified_target_language_observation(text):
+                continue
+            add(
+                "independently_detected_text_without_owner",
+                "source_coverage_contract",
+                offenders=(f"ocr_record_{index}", text),
+            )
+            continue
+        candidate_owners.update(
+            owner_by_component[component.component_id].owner_id
+            for component in matching_components
+            if component.component_id in owner_by_component
+        )
+        for owner_id in sorted(candidate_owners):
+            owner = next(item for item in graph.owners if item.owner_id == owner_id)
+            if _is_verified_no_repaint_owner(owner):
+                continue
+            source_candidates = [owner.source_payload] + [
+                item.text for item in observations_by_owner.get(owner_id, [])
+            ]
+            visible_source = next(
+                (
+                    source
+                    for source in source_candidates
+                    if source_payload_visible(
+                        source,
+                        text,
+                        translated_payload=owner.translated_payload,
+                    )
+                ),
+                None,
+            )
+            if visible_source is not None:
+                add(
+                    "source_payload_visible",
+                    "final_language_contract",
+                    owner_id=owner.owner_id,
+                    component_ids=tuple(owner.component_ids),
+                    offenders=(text, visible_source),
+                )
+        if not candidate_owners:
+            for component in matching_components:
+                disposition = dispositions.get(component.component_id)
+                source_observations = [
+                    item.text
+                    for item in graph.observations
+                    if component.component_id in item.component_ids
+                ]
+                if disposition is None or disposition.decision != "preserve":
+                    add(
+                        "independently_detected_text_without_owner",
+                        "source_coverage_contract",
+                        component_ids=(component.component_id,),
+                        offenders=(text,),
+                    )
+                elif not _explicit_preserve_policy(disposition.reason) and any(
+                    source_payload_visible(source, text) for source in source_observations
+                ):
+                    # The policy issue is already emitted above; do not hide the
+                    # independently observed source evidence behind metadata.
+                    pass
+
+    contracts = {
+        name: (
+            "BLOCK"
+            if any(issue.contract == name and issue.severity == "critical" for issue in issues)
+            else "PASS"
+        )
+        for name in _CONTRACT_NAMES
+    }
+    owner_support = (glyph_map != "") | (cleanup_map != "")
+    support_bbox = None
+    if owner_support.ndim == 2 and np.any(owner_support):
+        ys, xs = np.where(owner_support)
+        support_bbox = (
+            int(xs.min()),
+            int(ys.min()),
+            int(xs.max()) + 1,
+            int(ys.max()) + 1,
+        )
+    return FinalPixelQaReport(
+        page_id=graph.page_id,
+        persisted_sha256=observation.persisted_sha256,
+        issues=tuple(issues),
+        contracts=contracts,
+        passed=not any(issue.severity == "critical" for issue in issues),
+        observed_text_count=len(observation.ocr_records),
+        geometry_projection_count=(1 if geometry is not None else 0),
+        owner_support_bbox_frame=support_bbox,
+    )
+
+
+def evaluate_final_pixels(
+    *,
+    image_path: Path,
+    graph: OwnerGraph,
+    composition: PageCompositionResult,
+    observer: FinalPixelObserver,
+    source_language: str = "en",
+) -> FinalPixelQaReport:
+    dispositions = {
+        item.component_id: item for item in graph.component_dispositions
+    }
+    owner_by_component = {
+        component_id: owner
+        for owner in graph.owners
+        for component_id in owner.component_ids
+    }
+    source_challenges = []
+    for component in graph.components:
+        disposition = dispositions.get(component.component_id)
+        if (
+            disposition is not None
+            and disposition.decision == "preserve"
+            and _explicit_preserve_policy(disposition.reason)
+        ):
+            continue
+        owner = owner_by_component.get(component.component_id)
+        source_challenges.append(
+            {
+                "component_id": component.component_id,
+                "owner_id": owner.owner_id if owner is not None else "",
+                "bbox_page": list(component.bbox_page),
+                "polygon_page": [list(point) for point in component.polygon_page],
+                "source_candidates": [
+                    item.text
+                    for item in graph.observations
+                    if component.component_id in item.component_ids
+                ],
+                "selected_payload": owner.source_payload if owner is not None else "",
+                "preserve_policy": disposition.reason if disposition is not None else "",
+            }
+        )
+    page_match = re.search(r"(\d+)$", graph.page_id)
+    page_number = int(page_match.group(1)) if page_match else 0
+    observation = observer.observe(
+        Path(image_path),
+        source_language=source_language,
+        page_id=graph.page_id,
+        page_number=page_number,
+        source_challenges=source_challenges,
+    )
+    if Path(observation.image_path) != Path(image_path):
+        raise ValueError("final pixel observer returned evidence for another file")
+    return evaluate_final_pixel_observation(
+        graph=graph,
+        composition=composition,
+        observation=observation,
+    )

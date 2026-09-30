@@ -10,6 +10,104 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class BandToPageDictTests(unittest.TestCase):
+    def test_candidate_crop_reocr_accepts_wide_colored_card_line_but_rejects_textured_art(self):
+        import cv2
+        import numpy as np
+
+        from strip.process_bands import _candidate_crop_reocr_allows_colored_visual_card_line
+
+        card = np.full((140, 420, 3), (82, 190, 245), dtype=np.uint8)
+        cv2.putText(card, "ELIXIR OF SAVAGE MIGHT", (42, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 3)
+        self.assertTrue(
+            _candidate_crop_reocr_allows_colored_visual_card_line(
+                card,
+                [28, 38, 392, 100],
+                confidence=0.79,
+            )
+        )
+
+        textured = np.random.default_rng(7).integers(0, 256, size=(140, 420, 3), dtype=np.uint8)
+        cv2.putText(textured, "POTION", (115, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 3)
+        self.assertFalse(
+            _candidate_crop_reocr_allows_colored_visual_card_line(
+                textured,
+                [28, 38, 392, 100],
+                confidence=0.90,
+            )
+        )
+        self.assertFalse(
+            _candidate_crop_reocr_allows_colored_visual_card_line(
+                card,
+                [28, 20, 130, 116],
+                confidence=0.90,
+            )
+        )
+
+    def test_candidate_crop_reocr_promotes_wide_colored_card_title_contract(self):
+        from unittest.mock import MagicMock, patch
+
+        import cv2
+        import numpy as np
+
+        from strip.process_bands import _recover_empty_ocr_with_candidate_crops
+        from strip.types import BBox, Balloon, Band
+
+        image = np.full((180, 460, 3), (82, 190, 245), dtype=np.uint8)
+        cv2.putText(image, "ELIXIR OF SAVAGE MIGHT", (48, 104), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 3)
+        band = Band(
+            y_top=500,
+            y_bottom=680,
+            balloons=[Balloon(strip_bbox=BBox(30, 550, 430, 625), confidence=0.79)],
+            strip_slice=image,
+            original_slice=image.copy(),
+        )
+        runtime = MagicMock()
+        runtime.run_ocr_stage.return_value = {"texts": [], "_vision_blocks": []}
+        direct_page = {
+            "texts": [
+                {
+                    "id": "direct_paddle_reocr_001",
+                    "text_id": "direct_paddle_reocr_001",
+                    "text": "EUXIR OF SAVAGE MIGHT",
+                    "bbox": [25, 45, 330, 78],
+                    "source_bbox": [25, 45, 330, 78],
+                    "text_pixel_bbox": [25, 45, 330, 78],
+                    "confidence": 0.935,
+                    "qa_flags": ["candidate_crop_direct_paddle_reocr"],
+                }
+            ],
+            "_vision_blocks": [{"bbox": [25, 45, 330, 78], "confidence": 0.935}],
+        }
+        weak_evidence = {
+            "has_inner_dark_text": False,
+            "has_inner_light_text": False,
+            "inner_dark_component_count": 0,
+            "inner_dark_area": 0,
+            "inner_light_component_count": 0,
+            "inner_light_area": 0,
+            "significant_component_count": 0,
+            "significant_area": 0,
+            "bright_pixel_ratio": 0.2,
+            "dark_pixel_ratio": 0.0,
+        }
+
+        with patch("strip.detect_balloons._inner_dark_text_evidence", return_value=weak_evidence), patch(
+            "strip.process_bands._run_direct_paddle_candidate_crop_reocr", return_value=direct_page
+        ):
+            result = _recover_empty_ocr_with_candidate_crops(
+                band,
+                runtime=runtime,
+                page_dict={"width": 460, "height": 180, "idioma_origem": "en"},
+                band_id="page_002_band_040",
+            ).to_page_dict()
+
+        self.assertEqual(len(result["texts"]), 1)
+        recovered = result["texts"][0]
+        self.assertEqual(recovered["layout_category"], "item_card")
+        self.assertEqual(recovered["block_profile"], "colored_status_panel")
+        self.assertIn("candidate_crop_colored_visual_card_reocr", recovered["qa_flags"])
+        self.assertIn("visual_text_only_inpaint_contract", recovered["qa_flags"])
+
     def test_candidate_crop_reocr_does_not_replace_existing_white_balloon_ocr_with_sfx_prefix(self):
         from strip.process_bands import _merge_candidate_crop_recovery_into_ocr_page
 
@@ -6312,3 +6410,816 @@ class BandAdaptersTests(unittest.TestCase):
         rendered = render_band_image(band, page)
         self.assertEqual(rendered.shape, band.shape)
 
+
+def test_failed_render_restores_original_pixels_for_trace_mask():
+    import numpy as np
+    from strip.process_bands import _apply_atomic_inpaint_render_rollback
+    from strip.types import Band
+
+    original = np.full((60, 100, 3), 180, dtype=np.uint8)
+    cleaned = original.copy()
+    cleaned[20:40, 30:70] = 5
+    rendered = cleaned.copy()
+    mask = np.zeros((60, 100), dtype=np.uint8)
+    mask[20:40, 30:70] = 255
+    band = Band(y_top=0, y_bottom=60, original_slice=original.copy())
+    page = {"texts": [{"id": "t1", "translated": "OLA", "render_completed": False, "fit_status": "failed", "_precomputed_inpaint_mask": mask}]}
+
+    rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(band, cleaned, rendered, page)
+
+    assert np.array_equal(rolled_cleaned[mask > 0], original[mask > 0])
+    assert np.array_equal(rolled_rendered[mask > 0], original[mask > 0])
+    assert page["texts"][0]["route_reason"] == "atomic_inpaint_render_rollback"
+    assert "pure_inpaint_unresolved" in page["texts"][0]["qa_flags"]
+    assert page["texts"][0]["visible"] is False
+
+
+def test_unsafe_mask_never_leaves_empty_dark_rectangle():
+    import numpy as np
+    from strip.process_bands import _apply_atomic_inpaint_render_rollback
+    from strip.types import Band
+
+    original = np.full((50, 90, 3), 210, dtype=np.uint8)
+    cleaned = original.copy()
+    cleaned[10:35, 20:75] = 0
+    band = Band(y_top=0, y_bottom=50, original_slice=original.copy())
+    page = {"texts": [{"id": "t1", "translated": "TEXTO", "render_completed": False, "bbox": [20, 10, 75, 35]}]}
+
+    _, output = _apply_atomic_inpaint_render_rollback(band, cleaned, cleaned.copy(), page)
+
+    assert float(np.mean(output[10:35, 20:75])) == 210.0
+
+
+def test_owner_rollback_without_action_mask_never_falls_back_to_bbox():
+    import numpy as np
+    from strip.process_bands import _apply_atomic_inpaint_render_rollback
+    from strip.types import Band
+
+    original = np.full((50, 90, 3), 210, dtype=np.uint8)
+    cleaned = original.copy()
+    cleaned[10:35, 20:75] = 0
+    band = Band(y_top=0, y_bottom=50, original_slice=original.copy())
+    page = {
+        "texts": [
+            {
+                "id": "owner_a",
+                "owner_id": "owner_a",
+                "action_mask_ref": "owner_masks/owner_a/action_mask.png",
+                "translated": "TEXTO",
+                "render_completed": False,
+                "fit_status": "failed",
+                "bbox": [20, 10, 75, 35],
+            }
+        ]
+    }
+
+    rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+        band,
+        cleaned,
+        cleaned.copy(),
+        page,
+    )
+
+    np.testing.assert_array_equal(rolled_cleaned, cleaned)
+    np.testing.assert_array_equal(rolled_rendered, cleaned)
+    assert page["texts"][0]["route_action"] == "review_required"
+    assert page["texts"][0]["qa_metrics"]["atomic_inpaint_render_rollback"][
+        "restored_pixels"
+    ] == 0
+
+
+def test_owner_action_mask_is_rolled_back_without_successful_render_contract():
+    import numpy as np
+    from strip.process_bands import (
+        _apply_atomic_inpaint_render_rollback,
+        _owner_array_sha256,
+    )
+    from strip.types import Band
+
+    original = np.full((40, 70, 3), 205, dtype=np.uint8)
+    cleaned = original.copy()
+    action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    action_mask[12:22, 25:42] = 255
+    cleaned[action_mask > 0] = 15
+    band = Band(y_top=0, y_bottom=40, original_slice=original.copy())
+    action_mask_ref = (
+        "owner_masks/owner_a--fa73d8400133/tile_executor/action_mask.png"
+    )
+    page = {
+        "_owner_page_id": "page_001",
+        "_owner_tile_id": "tile_executor",
+        "_strip_owner_mutation": {
+            "owner_id": "owner_a",
+            "page_id": "page_001",
+            "coordinate_space": "logical_page",
+            "execution_tile_id": "tile_executor",
+            "action_mask_ref": action_mask_ref,
+            "action_mask_sha256": _owner_array_sha256(action_mask),
+            "mask_pixels": int(np.count_nonzero(action_mask)),
+        },
+        "texts": [
+            {
+                "id": "owner_a",
+                "owner_id": "owner_a",
+                "action_mask_ref": action_mask_ref,
+                "translated": "TEXTO",
+                "_precomputed_inpaint_mask": action_mask,
+            }
+        ]
+    }
+
+    rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+        band,
+        cleaned,
+        cleaned.copy(),
+        page,
+    )
+
+    np.testing.assert_array_equal(
+        rolled_cleaned[action_mask > 0],
+        original[action_mask > 0],
+    )
+    np.testing.assert_array_equal(
+        rolled_rendered[action_mask > 0],
+        original[action_mask > 0],
+    )
+    assert page["texts"][0]["route_action"] == "review_required"
+    assert page["texts"][0]["visible"] is False
+
+
+def _owner_atomic_copyback_fixture():
+    from hashlib import sha256
+
+    import numpy as np
+    from ownership.model import (
+        OwnerGlyphPatch,
+        OwnerMutation,
+        owner_residual_evidence_sha256,
+    )
+    from ownership.delivery import (
+        GlyphRunObservation,
+        build_owner_text_delivery_contract,
+        seal_owner_text_execution_authority,
+    )
+    from style_v2_fixtures import valid_owner_style_raster_contract
+    from strip import process_bands
+    from strip.types import Band
+    from typesetter.owner_render_quality import OwnerRenderQuality
+
+    original = np.full((20, 30, 3), 210, dtype=np.uint8)
+    original[2:5, 22:26] = (15, 25, 35)
+    action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    action_mask[8:12, 8:14] = 255
+    cleaned = original.copy()
+    cleaned[action_mask > 0] = (35, 45, 55)
+    changed_mask = np.where(
+        np.any(cleaned != original, axis=2),
+        255,
+        0,
+    ).astype(np.uint8)
+    protected = np.zeros(original.shape[:2], dtype=np.uint8)
+    owner_identity_hash = sha256(b"owner_a").hexdigest()[:12]
+    action_mask_ref = (
+        f"owner_masks/owner_a--{owner_identity_hash}/"
+        "tile_executor/action_mask.png"
+    )
+    before_sha256 = process_bands._owner_array_sha256(original)
+    after_sha256 = process_bands._owner_array_sha256(cleaned)
+    action_mask_sha256 = process_bands._owner_array_sha256(action_mask)
+    protected_art_mask_sha256 = process_bands._owner_array_sha256(protected)
+    component_geometry_sha256 = "a" * 64
+    from test_owner_atomic_execution import _render_geometry
+
+    render_geometry = _render_geometry(
+        owner_id="owner_a",
+        bbox=(8, 8, 14, 12),
+        shape=original.shape[:2],
+        protected_art_mask_sha256=protected_art_mask_sha256,
+    )
+    residual_evidence_sha256 = owner_residual_evidence_sha256(
+        owner_id="owner_a",
+        page_id="page_001",
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_mask_sha256,
+        protected_art_mask_sha256=protected_art_mask_sha256,
+        component_geometry_sha256=component_geometry_sha256,
+        residual_score=0.0,
+        residual_threshold=0.01,
+        residual_method="fixture_residual_v1",
+        residual_flags=(),
+    )
+    authority = seal_owner_text_execution_authority(
+        owner_id="owner_a", page_id="page_001", source_payload="SOURCE",
+        translated_payload="ALVO", normalized_chunks=["ALVO"],
+    )
+    mutation = OwnerMutation(
+        owner_id="owner_a",
+        page_id="page_001",
+        coordinate_space="logical_page",
+        action_mask_ref=action_mask_ref,
+        result_rgb=cleaned,
+        action_mask=action_mask,
+        protected_art_mask=protected,
+        changed_mask=changed_mask,
+        engine="fixture",
+        mask_pixels=int(np.count_nonzero(action_mask)),
+        changed_pixels=int(np.count_nonzero(changed_mask)),
+        changed_outside_owner_pixels=0,
+        protected_art_changed_pixels=0,
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+        action_mask_sha256=action_mask_sha256,
+        changed_mask_sha256=process_bands._owner_array_sha256(changed_mask),
+        engine_crop_bbox_page=(0, 0, 30, 20),
+        owner_bbox_page=(8, 8, 14, 12),
+        component_geometry_sha256=component_geometry_sha256,
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
+        protected_art_mask_sha256=protected_art_mask_sha256,
+        residual_score=0.0,
+        residual_verified=True,
+        residual_threshold=0.01,
+        residual_method="fixture_residual_v1",
+        residual_evidence_sha256=residual_evidence_sha256,
+        residual_flags=(),
+        execution_tile_id="tile_executor",
+        component_geometry_verified=True,
+        text_execution_authority_sha256=authority.authority_sha256,
+        text_execution_authority=authority,
+    )
+    glyph_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    glyph_mask[9:11, 9:13] = 255
+    rendered = cleaned.copy()
+    rendered[glyph_mask > 0] = (5, 10, 15)
+    style_contract = valid_owner_style_raster_contract(
+        owner_id="owner_a",
+        page_id="page_001",
+        before=cleaned,
+        result=rendered,
+        glyph_mask=glyph_mask,
+        component_geometry_sha256=mutation.component_geometry_sha256,
+    )
+    run = GlyphRunObservation.build(text="ALVO", font_identity="fixture-font", span_index=0)
+    delivery = build_owner_text_delivery_contract(
+        execution_authority=authority, layout_payload="ALVO",
+        rendered_lines=["ALVO"], rendered_glyph_runs=[run],
+        glyph_core_mask=glyph_mask, glyph_span_core_masks=[glyph_mask],
+        rendered_patch_sha256=style_contract.rendered_patch_sha256,
+    )
+    glyph_patch = OwnerGlyphPatch(
+        owner_id="owner_a",
+        page_id="page_001",
+        coordinate_space="logical_page",
+        result_rgb=rendered,
+        glyph_mask=glyph_mask,
+        glyph_bbox_page=(9, 9, 13, 11),
+        render_completed=True,
+        fit_status="ok",
+        before_sha256=mutation.after_sha256,
+        after_sha256=process_bands._owner_array_sha256(rendered),
+        glyph_mask_sha256=process_bands._owner_array_sha256(glyph_mask),
+        changed_outside_glyph_mask_pixels=0,
+        render_safe_polygon_page=((8, 8), (14, 8), (14, 12), (8, 12)),
+        render_safe_polygon_sha256=process_bands._owner_polygon_sha256(
+            ((8, 8), (14, 8), (14, 12), (8, 12))
+        ),
+        component_geometry_sha256=mutation.component_geometry_sha256,
+        owner_render_geometry_sha256=render_geometry.geometry_sha256,
+        owner_render_geometry=render_geometry,
+        render_quality_contract=OwnerRenderQuality(
+            schema_version=1,
+            status="ok",
+            font_size_final=14,
+            minimum_legible_font_px=12,
+            source_ink_height_px=None,
+            render_ink_height_px=2,
+            source_x_height_px=None,
+            render_x_height_px=1.4,
+            source_scale_ratio=None,
+            x_height_ratio=None,
+            rendered_line_core_heights_px=(2,),
+            safe_height_occupancy=0.5,
+            safe_area_occupancy=0.2,
+            wrapped_line_count=1,
+            containment_status="ok",
+            outside_safe_pixels=0,
+            page_width=original.shape[1],
+            page_height=original.shape[0],
+            reasons=(),
+        ),
+        style_raster_contract=style_contract,
+        execution_tile_id="tile_executor",
+        projection_role="executor",
+        glyph_core_mask=glyph_mask,
+        paint_mask=glyph_mask,
+        glyph_span_core_masks=(glyph_mask,),
+        glyph_span_runs=(run,),
+        glyph_core_mask_sha256=process_bands._owner_array_sha256(glyph_mask),
+        paint_mask_sha256=process_bands._owner_array_sha256(glyph_mask),
+        text_execution_authority_sha256=authority.authority_sha256,
+        text_execution_authority=authority,
+        delivery_contract=delivery,
+    )
+    commit = process_bands.apply_atomic_owner_execution(
+        original,
+        mutation,
+        glyph_patch,
+    )
+    assert commit.committed is True
+    band = Band(
+        y_top=0,
+        y_bottom=20,
+        original_slice=original.copy(),
+        rendered_slice=None,
+    )
+    translated_page = {
+        "page_id": "page_001",
+        "_owner_page_id": "page_001",
+        "_owner_tile_id": "tile_executor",
+        "_band_id": "tile_executor",
+        "_owner_coordinate_space": "logical_page",
+        "_owner_translation_contract": {
+            "expected_owner_ids": ["owner_a"],
+        },
+        "texts": [
+            {
+                "id": "owner_a",
+                "owner_id": "owner_a",
+                "page_id": "page_001",
+                "state": "rendered",
+                "route_action": "translate_inpaint_render",
+                "action_mask_ref": action_mask_ref,
+            }
+        ],
+    }
+    return band, commit, translated_page
+
+
+def test_owner_copyback_bypasses_source_restore_for_neighbor_glyph():
+    import numpy as np
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+
+    output = process_bands._run_copy_back_stage(
+        band,
+        rendered_slice=commit.result_rgb,
+        translated_page=translated_page,
+        owner_execution_commit=commit,
+    ).to_image()
+
+    np.testing.assert_array_equal(output, commit.result_rgb)
+    assert np.all(output[2:5, 22:26] == (15, 25, 35))
+
+
+def test_owner_copyback_rejects_forged_or_cross_page_commit():
+    from dataclasses import replace
+
+    import pytest
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+    forged_commits = (
+        replace(commit, page_id="page_999"),
+        replace(
+            commit,
+            owner_id="owner_forged",
+            mutation=None,
+            glyph_patch=None,
+        ),
+    )
+
+    for forged in forged_commits:
+        with pytest.raises(ValueError, match="owner copyback"):
+            process_bands._run_copy_back_stage(
+                band,
+                rendered_slice=forged.result_rgb,
+                translated_page=translated_page,
+                owner_execution_commit=forged,
+            )
+
+
+def test_operational_owner_copyback_requires_atomic_commit():
+    import pytest
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+
+    with pytest.raises(ValueError, match="atomic owner commit"):
+        process_bands._run_copy_back_stage(
+            band,
+            rendered_slice=commit.result_rgb,
+            translated_page=translated_page,
+        )
+
+
+def test_incomplete_owner_copyback_context_never_falls_back_to_legacy():
+    import copy
+
+    import pytest
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+    partial_contexts = (
+        {"texts": [{"owner_id": "owner_a"}]},
+        {"texts": [{"action_mask_ref": commit.mutation.action_mask_ref}]},
+        {
+            "texts": [],
+            "_owner_translation_contract": {"expected_owner_ids": ["owner_a"]},
+        },
+        {"texts": {"owner_id": "owner_a"}},
+        {
+            "texts": [],
+            "_owner_translation_contract": {"expected_owner_ids": "owner_a"},
+        },
+        {"texts": [], "_strip_owner_mutation": {}},
+    )
+
+    for partial in partial_contexts:
+        with pytest.raises(ValueError, match="atomic owner commit"):
+            process_bands._run_copy_back_stage(
+                band,
+                rendered_slice=copy.deepcopy(commit.result_rgb),
+                translated_page=partial,
+            )
+
+
+def test_owner_copyback_accepts_official_sfx_inpaint_route():
+    import copy
+    import numpy as np
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+    translated_page = copy.deepcopy(translated_page)
+    translated_page["texts"][0]["route_action"] = (
+        "translate_sfx_inpaint_render"
+    )
+
+    output = process_bands._run_copy_back_stage(
+        band,
+        rendered_slice=commit.result_rgb,
+        translated_page=translated_page,
+        owner_execution_commit=commit,
+    ).to_image()
+
+    np.testing.assert_array_equal(output, commit.result_rgb)
+
+
+def test_owner_copyback_rejects_incoherent_owner_record_set():
+    import copy
+
+    import pytest
+    from strip import process_bands
+
+    band, commit, translated_page = _owner_atomic_copyback_fixture()
+    partial_extra = copy.deepcopy(translated_page)
+    partial_extra["texts"].append({"owner_id": "owner_partial"})
+    unknown_extra = copy.deepcopy(translated_page)
+    unknown_extra["texts"].append(
+        {
+            "owner_id": "owner_unknown",
+            "action_mask_ref": "owner_masks/owner_unknown--invalid/pair/action_mask.png",
+        }
+    )
+    missing_expected_record = copy.deepcopy(translated_page)
+    missing_expected_record["_owner_translation_contract"]["expected_owner_ids"].append(
+        "owner_missing"
+    )
+
+    for incoherent in (partial_extra, unknown_extra, missing_expected_record):
+        with pytest.raises(ValueError, match="owner copyback"):
+            process_bands._run_copy_back_stage(
+                band,
+                rendered_slice=commit.result_rgb,
+                translated_page=incoherent,
+                owner_execution_commit=commit,
+            )
+
+
+def test_owner_rollback_rejects_noncanonical_or_overbroad_action_masks():
+    import numpy as np
+    from strip.process_bands import _apply_atomic_inpaint_render_rollback
+    from strip.types import Band
+
+    original = np.full((10, 12, 3), 210, dtype=np.uint8)
+    cleaned = original.copy()
+    cleaned[2:5, 3:7] = 25
+    band = Band(y_top=0, y_bottom=10, original_slice=original.copy())
+    invalid_masks = (
+        np.full(original.shape[:2], 255, dtype=np.float32),
+        np.full((*original.shape[:2], 1), 255, dtype=np.uint8),
+        np.full((*original.shape[:2], 3), 255, dtype=np.uint8),
+        np.full(original.shape[:2], 255, dtype=np.uint8),
+    )
+
+    for invalid_mask in invalid_masks:
+        page = {
+            "texts": [
+                {
+                    "id": "owner_a",
+                    "owner_id": "owner_a",
+                    "action_mask_ref": "owner_masks/owner_a--fa73d8400133/tile_executor/action_mask.png",
+                    "translated": "TEXTO",
+                    "render_completed": False,
+                    "fit_status": "failed",
+                    "_precomputed_inpaint_mask": invalid_mask,
+                }
+            ]
+        }
+
+        rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+            band,
+            cleaned,
+            cleaned.copy(),
+            page,
+        )
+
+        np.testing.assert_array_equal(rolled_cleaned, cleaned)
+        np.testing.assert_array_equal(rolled_rendered, cleaned)
+        metrics = page["texts"][0]["qa_metrics"]["atomic_inpaint_render_rollback"]
+        assert metrics["restored_pixels"] == 0
+        assert metrics["mask_authority"] == "invalid_owner_action_mask"
+
+
+def test_owner_render_completed_must_be_explicitly_true():
+    import numpy as np
+    from strip.process_bands import (
+        _apply_atomic_inpaint_render_rollback,
+        _owner_array_sha256,
+    )
+    from strip.types import Band
+
+    original = np.full((20, 30, 3), 205, dtype=np.uint8)
+    action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    action_mask[6:10, 8:15] = 255
+    cleaned = original.copy()
+    cleaned[action_mask > 0] = 15
+    band = Band(y_top=0, y_bottom=20, original_slice=original.copy())
+    action_mask_ref = (
+        "owner_masks/owner_a--fa73d8400133/tile_executor/action_mask.png"
+    )
+    page = {
+        "_owner_page_id": "page_001",
+        "_owner_tile_id": "tile_executor",
+        "_strip_owner_mutation": {
+            "owner_id": "owner_a",
+            "page_id": "page_001",
+            "coordinate_space": "logical_page",
+            "execution_tile_id": "tile_executor",
+            "action_mask_ref": action_mask_ref,
+            "action_mask_sha256": _owner_array_sha256(action_mask),
+            "mask_pixels": int(np.count_nonzero(action_mask)),
+        },
+        "texts": [
+            {
+                "id": "owner_a",
+                "owner_id": "owner_a",
+                "action_mask_ref": action_mask_ref,
+                "translated": "TEXTO",
+                "render_bbox": [9, 7, 14, 9],
+                "fit_status": "ok",
+                "_precomputed_inpaint_mask": action_mask,
+            }
+        ]
+    }
+
+    rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+        band,
+        cleaned,
+        cleaned.copy(),
+        page,
+    )
+
+    np.testing.assert_array_equal(
+        rolled_cleaned[action_mask > 0],
+        original[action_mask > 0],
+    )
+    np.testing.assert_array_equal(
+        rolled_rendered[action_mask > 0],
+        original[action_mask > 0],
+    )
+    assert page["texts"][0]["route_action"] == "review_required"
+
+
+def test_owner_rollback_mask_must_match_owner_mutation_provenance():
+    import numpy as np
+    from strip.process_bands import (
+        _apply_atomic_inpaint_render_rollback,
+        _owner_array_sha256,
+    )
+    from strip.types import Band
+
+    original = np.full((30, 50, 3), 205, dtype=np.uint8)
+    original[5:9, 36:43] = (20, 30, 40)
+    cleaned = original.copy()
+    owner_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    owner_mask[12:17, 8:18] = 255
+    cleaned[owner_mask > 0] = 15
+    wrong_neighbor_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    wrong_neighbor_mask[5:9, 36:43] = 255
+    action_mask_ref = (
+        "owner_masks/owner_a--fa73d8400133/tile_executor/action_mask.png"
+    )
+    page = {
+        "_owner_page_id": "page_001",
+        "_owner_tile_id": "tile_executor",
+        "_strip_owner_mutation": {
+            "owner_id": "owner_a",
+            "page_id": "page_001",
+            "coordinate_space": "logical_page",
+            "execution_tile_id": "tile_executor",
+            "action_mask_ref": action_mask_ref,
+            "action_mask_sha256": _owner_array_sha256(owner_mask),
+            "mask_pixels": int(np.count_nonzero(owner_mask)),
+        },
+        "texts": [
+            {
+                "owner_id": "owner_a",
+                "action_mask_ref": action_mask_ref,
+                "render_completed": False,
+                "fit_status": "failed",
+                "_precomputed_inpaint_mask": wrong_neighbor_mask,
+            }
+        ],
+    }
+    band = Band(y_top=0, y_bottom=30, original_slice=original.copy())
+
+    rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+        band,
+        cleaned,
+        cleaned.copy(),
+        page,
+    )
+
+    np.testing.assert_array_equal(rolled_cleaned, cleaned)
+    np.testing.assert_array_equal(rolled_rendered, cleaned)
+    metrics = page["texts"][0]["qa_metrics"]["atomic_inpaint_render_rollback"]
+    assert metrics["restored_pixels"] == 0
+    assert metrics["mask_authority"] == "owner_action_mask_provenance_mismatch"
+
+
+def test_owner_rollback_requires_exact_ok_fit_status():
+    import copy
+
+    import numpy as np
+    from strip.process_bands import (
+        _apply_atomic_inpaint_render_rollback,
+        _owner_array_sha256,
+    )
+    from strip.types import Band
+
+    original = np.full((20, 30, 3), 205, dtype=np.uint8)
+    action_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    action_mask[6:10, 8:15] = 255
+    cleaned = original.copy()
+    cleaned[action_mask > 0] = 15
+    action_mask_ref = (
+        "owner_masks/owner_a--fa73d8400133/tile_executor/action_mask.png"
+    )
+    base_page = {
+        "_owner_page_id": "page_001",
+        "_owner_tile_id": "tile_executor",
+        "_strip_owner_mutation": {
+            "owner_id": "owner_a",
+            "page_id": "page_001",
+            "coordinate_space": "logical_page",
+            "execution_tile_id": "tile_executor",
+            "action_mask_ref": action_mask_ref,
+            "action_mask_sha256": _owner_array_sha256(action_mask),
+            "mask_pixels": int(np.count_nonzero(action_mask)),
+        },
+        "texts": [
+            {
+                "owner_id": "owner_a",
+                "action_mask_ref": action_mask_ref,
+                "render_completed": True,
+                "render_bbox": [9, 7, 14, 9],
+                "_precomputed_inpaint_mask": action_mask,
+            }
+        ],
+    }
+    band = Band(y_top=0, y_bottom=20, original_slice=original.copy())
+
+    for fit_status in ("", "banana", "OK-ish", "safe", "OK", " ok ", "Ok"):
+        page = copy.deepcopy(base_page)
+        page["texts"][0]["fit_status"] = fit_status
+        rolled_cleaned, rolled_rendered = _apply_atomic_inpaint_render_rollback(
+            band,
+            cleaned,
+            cleaned.copy(),
+            page,
+        )
+        np.testing.assert_array_equal(
+            rolled_cleaned[action_mask > 0],
+            original[action_mask > 0],
+        )
+        np.testing.assert_array_equal(
+            rolled_rendered[action_mask > 0],
+            original[action_mask > 0],
+        )
+        assert page["texts"][0]["route_action"] == "review_required"
+
+
+def test_successful_render_keeps_cleaned_pixels_and_translation():
+    import numpy as np
+    from strip.process_bands import _apply_atomic_inpaint_render_rollback
+    from strip.types import Band
+
+    original = np.full((50, 90, 3), 210, dtype=np.uint8)
+    cleaned = original.copy()
+    cleaned[10:35, 20:75] = 80
+    rendered = cleaned.copy()
+    rendered[16:28, 30:65] = 15
+    band = Band(y_top=0, y_bottom=50, original_slice=original.copy())
+    page = {"texts": [{"id": "t1", "translated": "TEXTO", "render_completed": True, "render_bbox": [30, 16, 65, 28], "fit_status": "ok", "font_size_final": 16, "minimum_legible_font_px": 12, "bbox": [20, 10, 75, 35]}]}
+
+    kept_cleaned, kept_rendered = _apply_atomic_inpaint_render_rollback(band, cleaned, rendered, page)
+
+    assert np.array_equal(kept_cleaned, cleaned)
+    assert np.array_equal(kept_rendered, rendered)
+    assert page["texts"][0]["translated"] == "TEXTO"
+
+
+def test_unresolved_pure_visual_card_flags_are_propagated_before_typeset():
+    from strip.process_bands import _propagate_unresolved_visual_card_inpaint_flags
+
+    page = {
+        "_strip_inpaint_policy": "pure",
+        "_strip_used_real_inpaint": False,
+        "_strip_inpaint_decision_flags": [
+            "real_inpaint_skipped_unsafe_mask",
+            "weak_text_residual_after_inpaint",
+        ],
+        "texts": [
+            {
+                "id": "cardocr_003",
+                "layout_category": "item_card",
+                "qa_flags": ["visual_text_only_inpaint_contract"],
+            },
+            {"id": "speech_001", "layout_profile": "white_balloon", "qa_flags": []},
+        ],
+    }
+
+    _propagate_unresolved_visual_card_inpaint_flags(page)
+
+    card_flags = set(page["texts"][0]["qa_flags"])
+    assert "real_inpaint_skipped_unsafe_mask" in card_flags
+    assert "weak_text_residual_after_inpaint" in card_flags
+    assert page["texts"][1]["qa_flags"] == []
+
+
+def test_owner_style_profile_is_attached_without_mutating_semantic_owner():
+    import copy
+    import numpy as np
+
+    from ownership.model import TextOwner
+    from typesetter.owner_style import (
+        attach_owner_visual_profile,
+        build_owner_visual_profile,
+    )
+
+    source = np.full((30, 40, 3), 240, dtype=np.uint8)
+    source[8:18, 10:28] = 20
+    glyph = np.zeros(source.shape[:2], dtype=np.uint8)
+    glyph[8:18, 10:28] = 255
+    owner = TextOwner(
+        owner_id="owner_style",
+        page_id="page_001",
+        component_ids=["component_style"],
+        observation_ids=["observation_style"],
+        selected_observation_ids=["observation_style"],
+        semantic_role="dialogue_body",
+        source_payload="SOURCE BODY",
+        translated_payload="CORPO TRADUZIDO",
+        disposition="owned",
+        state="translated",
+        route_action="translate_inpaint_render",
+        execution_tile_id="tile_executor",
+    )
+    component = {
+        "component_id": "component_style",
+        "bbox_page": [8, 6, 30, 21],
+        "polygon_page": [[8, 6], [30, 6], [30, 21], [8, 21]],
+    }
+    observation = {
+        "observation_id": "observation_style",
+        "text": "SOURCE BODY",
+    }
+    before = copy.deepcopy(owner.__dict__)
+
+    profile = build_owner_visual_profile(
+        owner,
+        source,
+        components=[component],
+        observations=[observation],
+        glyph_mask=glyph,
+        candidate={"confidence": 0.96},
+    )
+    record = attach_owner_visual_profile(
+        {"owner_id": owner.owner_id}, profile
+    )
+
+    assert record["style_copy_status"] == profile["status"]
+    assert record["visual_profile_sha256"] == profile["visual_profile_sha256"]
+    assert profile["source_capture_phase"] == "pre_inpaint"
+    assert owner.__dict__ == before

@@ -4,14 +4,77 @@ import os
 import json
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 
+from typesetter.backend_contract import KOHARU_RUST_CAPABILITIES, TypesettingRenderRequest, TypesettingRenderResult
+
+
+KOHARU_RENDERER_CAPABILITIES = KOHARU_RUST_CAPABILITIES
+
 
 class RustRendererError(RuntimeError):
     pass
+
+
+class KoharuBackendUnavailable(RustRendererError):
+    pass
+
+
+@dataclass(frozen=True)
+class KoharuRenderResult:
+    render_bbox: list[int]
+    font_size_px: int
+    fit_status: str
+    backend: str
+    payload: dict[str, Any]
+
+
+def resolve_koharu_bridge_path() -> Path:
+    configured = os.environ.get("TRADUZAI_KOHARU_RENDERER_BIN", "").strip()
+    if not configured:
+        raise KoharuBackendUnavailable("TRADUZAI_KOHARU_RENDERER_BIN is not configured")
+    path = Path(configured)
+    if not path.exists():
+        raise KoharuBackendUnavailable(f"Koharu renderer bridge not found: {path}")
+    return path
+
+
+def render_with_koharu_backend(
+    request: TypesettingRenderRequest,
+    *,
+    bridge_path: Path | None = None,
+    command_prefix: list[str] | None = None,
+    timeout: int = 30,
+) -> KoharuRenderResult:
+    bridge = Path(bridge_path) if bridge_path is not None else resolve_koharu_bridge_path()
+    command = [*(command_prefix or []), str(bridge)]
+    try:
+        completed = subprocess.run(
+            command,
+            input=json.dumps(request.to_mapping(), ensure_ascii=False),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise KoharuBackendUnavailable(f"Koharu renderer bridge failed: {exc}") from exc
+    try:
+        payload = json.loads(completed.stdout.splitlines()[-1])
+        normalized = TypesettingRenderResult.from_mapping(payload).to_mapping()
+    except (IndexError, json.JSONDecodeError, ValueError) as exc:
+        raise KoharuBackendUnavailable("Koharu renderer returned an invalid response") from exc
+    return KoharuRenderResult(
+        render_bbox=list(normalized["render_bbox"]),
+        font_size_px=int(normalized.get("font_size_px") or 0),
+        fit_status=str(normalized.get("fit_status") or "review_required"),
+        backend=str(normalized.get("backend") or "koharu"),
+        payload=normalized,
+    )
 
 
 def rust_renderer_enabled() -> bool:

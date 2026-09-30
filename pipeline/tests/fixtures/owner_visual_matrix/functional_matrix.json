@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "inputs_path": "inputs.json",
+  "entries": [
+    {
+      "entry_id": "colored_cards_calibration",
+      "work_id": "regressed_genius_creates_mythic_items",
+      "chapter_id": "chapter_40",
+      "split": "calibration",
+      "config_path": "configs/colored_cards.json",
+      "config_sha256": "3394087f340d21eb4851ed55f7c0b8fbfa0357f7d5f97b8149747d50b067543b",
+      "input_key": "mythic_colored_cards",
+      "expected_input_sha256": "78242a961ff07fd1120b6da3156a015bc509a077b06fcc395b24d326071e06d3",
+      "work_dir": "colored_cards_calibration",
+      "categories": [
+        "colored_card",
+        "table_ranking",
+        "translucent_balloon",
+        "primary_ocr_omission",
+        "tight_truncation_vs_complete_numeric_body",
+        "proportional_layout_underfill",
+        "incomplete_final_observation"
+      ],
+      "category_pages": {
+        "colored_card": [1, 2],
+        "table_ranking": [1, 2],
+        "translucent_balloon": [1],
+        "primary_ocr_omission": [2],
+        "tight_truncation_vs_complete_numeric_body": [1],
+        "proportional_layout_underfill": [1, 2],
+        "incomplete_final_observation": [1, 2]
+      }
+    },
+    {
+      "entry_id": "cross_tile_owners_holdout",
+      "work_id": "one_second",
+      "chapter_id": "chapter_5",
+      "split": "holdout",
+      "config_path": "configs/cross_tile_owners.json",
+      "config_sha256": "54eb204e5650032f1ac3b9c5c56c410f6313c90abc63b5ea660229bd839a7f63",
+      "input_key": "one_second_cross_tile",
+      "expected_input_sha256": "bf8591406a1ed1639d3121178bb85c43383963098aa57b83e1d257e88225b40e",
+      "work_dir": "cross_tile_owners_holdout",
+      "categories": [
+        "white_balloon",
+        "burst",
+        "cross_tile_owner",
+        "cross_band_background_continuity",
+        "proportional_layout_underfill",
+        "incomplete_final_observation"
+      ],
+      "category_pages": {
+        "white_balloon": [1, 28],
+        "burst": [28, 55],
+        "cross_tile_owner": [28, 55],
+        "cross_band_background_continuity": [28],
+        "proportional_layout_underfill": [1, 55],
+        "incomplete_final_observation": [1, 28, 55]
+      }
+    },
+    {
+      "entry_id": "dark_panels_holdout",
+      "work_id": "grand_finale",
+      "chapter_id": "chapter_35",
+      "split": "holdout",
+      "config_path": "configs/dark_panels.json",
+      "config_sha256": "1563d7adb93c2fdddb4e24c6d8bc42ffeda068e26cbe629a11d508185aadf3e3",
+      "input_key": "grand_finale_dark_panels",
+      "expected_input_sha256": "fd8ce2fec0e3453f7fae994ac97245ce716bcac2d34ca2e5ce8d1fbf699338af",
+      "work_dir": "dark_panels_holdout",
+      "categories": [
+        "dark_panel",
+        "text_over_art",
+        "protected_art_contact",
+        "proportional_layout_underfill",
+        "incomplete_final_observation"
+      ],
+      "category_pages": {
+        "dark_panel": [9, 27, 31],
+        "text_over_art": [9, 27, 31],
+        "protected_art_contact": [27],
+        "proportional_layout_underfill": [9, 31],
+        "incomplete_final_observation": [9, 27, 31]
+      }
+    },
+    {
+      "entry_id": "mitch_items_ch39_regression",
+      "work_id": "mitch_items",
+      "chapter_id": "chapter_39",
+      "split": "calibration",
+      "config_path": "configs/mitch_items_ch39.json",
+      "config_sha256": "5d762663c50658b9affb55fcee347d510eefe5557563e0e1aaf05fab79e823c0",
+      "input_key": "mitch_items_ch39",
+      "expected_input_sha256": "a6788d2a8b1779505835dc0259053d9b9dad08b9d956941d6bf4c6d77a66c786",
+      "work_dir": "mitch_items_ch39_regression",
+      "categories": [
+        "white_balloon",
+        "translucent_balloon",
+        "mixed_source_overlay",
+        "cross_tile_owner"
+      ],
+      "category_pages": {
+        "white_balloon": [10, 11, 19, 21, 27, 28, 30, 34, 36, 39],
+        "translucent_balloon": [10, 19, 21],
+        "mixed_source_overlay": [30, 34, 36],
+        "cross_tile_owner": [27, 28, 39]
+      }
+    }
+  ]
+}

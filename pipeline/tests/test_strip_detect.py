@@ -48,6 +48,46 @@ class NmsBalloonsTests(unittest.TestCase):
         kept = _nms_balloons(balloons, iou_threshold=0.5)
         self.assertEqual(len(kept), 2)
 
+    def test_nms_keeps_primary_scalar_metadata_while_merging_provenance(self):
+        from strip.detect_balloons import _nms_balloons
+        from strip.types import Balloon, BBox
+
+        primary = Balloon(
+            strip_bbox=BBox(0, 0, 100, 100),
+            confidence=0.9,
+            metadata={
+                "detector_source": "primary",
+                "detector_sources": ["primary"],
+                "candidate_kind": "primary_text_region",
+                "rotation_deg": 10.0,
+                "rotation_source": "primary_rotation",
+                "is_dark": False,
+            },
+        )
+        secondary = Balloon(
+            strip_bbox=BBox(2, 2, 102, 102),
+            confidence=0.5,
+            metadata={
+                "detector_source": "secondary",
+                "detector_sources": ["secondary"],
+                "candidate_kind": "secondary_text_region",
+                "rotation_deg": -30.0,
+                "rotation_source": "secondary_rotation",
+                "is_dark": True,
+                "secondary_only": "preserved",
+            },
+        )
+
+        kept = _nms_balloons([secondary, primary], iou_threshold=0.5)
+
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0].metadata["candidate_kind"], "primary_text_region")
+        self.assertEqual(kept[0].metadata["rotation_deg"], 10.0)
+        self.assertEqual(kept[0].metadata["rotation_source"], "primary_rotation")
+        self.assertFalse(kept[0].metadata["is_dark"])
+        self.assertEqual(kept[0].metadata["secondary_only"], "preserved")
+        self.assertEqual(kept[0].metadata["detector_sources"], ["primary", "secondary"])
+
 
 class SplitIntoChunksTests(unittest.TestCase):
     def test_short_strip_returns_single_chunk(self):
@@ -600,3 +640,250 @@ class FalsePositiveFilterTests(unittest.TestCase):
 
         self.assertEqual(len(balloons), 1)
         self.assertEqual(balloons[0].strip_bbox.y1, 100)
+
+
+class PageGlobalRegionIdentityTests(unittest.TestCase):
+    """Detection emits stable region identity in page coordinates."""
+
+    @staticmethod
+    def _detect(blocks):
+        from unittest.mock import MagicMock, patch
+
+        import numpy as np
+
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+
+        detector = MagicMock()
+        detector.detect.return_value = list(blocks)
+        strip = VerticalStrip(
+            image=np.zeros((500, 400, 3), dtype=np.uint8),
+            width=400,
+            height=500,
+            source_page_breaks=[0, 500],
+            page_x_offsets=[25],
+        )
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_DETECT_FULL_PAGE": "1",
+                "TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_DARK_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_UI_LAYOUT_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE": "0",
+            },
+        ):
+            return detect_strip_balloons(strip, detector=detector)
+
+    @staticmethod
+    def _block(x1, y1, x2, y2):
+        block = type("Block", (), {})()
+        block.x1, block.y1, block.x2, block.y2 = x1, y1, x2, y2
+        block.confidence = 0.93
+        return block
+
+    def test_detection_attaches_page_space_region_identity(self):
+        balloons = self._detect([self._block(100, 80, 260, 150)])
+
+        self.assertEqual(len(balloons), 1)
+        metadata = balloons[0].metadata
+        self.assertEqual(metadata["page_id"], "page_001")
+        self.assertEqual(metadata["bbox_page"], [75, 80, 235, 150])
+        self.assertTrue(metadata["region_id"].startswith("region_p001_"))
+
+    def test_detection_preserves_detector_provenance_and_page_polygon(self):
+        block = self._block(100, 80, 260, 150)
+        block.detector = "comic_text_detector"
+        block.rotation_deg = -7.5
+        block.line_polygons = [
+            [[100, 80], [260, 80], [260, 150], [100, 150]],
+        ]
+
+        balloons = self._detect([block])
+
+        metadata = balloons[0].metadata
+        self.assertEqual(metadata["detector_source"], "comic_text_detector")
+        self.assertEqual(metadata["rotation_deg"], -7.5)
+        self.assertEqual(
+            metadata["polygon_page"],
+            [[75, 80], [235, 80], [235, 150], [75, 150]],
+        )
+
+    def test_region_ids_are_stable_under_detector_output_order(self):
+        blocks = [
+            self._block(100, 80, 260, 150),
+            self._block(70, 250, 220, 320),
+        ]
+
+        forward = {
+            tuple(item.metadata["bbox_page"]): item.metadata["region_id"]
+            for item in self._detect(blocks)
+        }
+        backward = {
+            tuple(item.metadata["bbox_page"]): item.metadata["region_id"]
+            for item in self._detect(list(reversed(blocks)))
+        }
+
+        self.assertEqual(forward, backward)
+
+    def test_equal_confidence_nms_is_stable_under_detector_output_order(self):
+        first = self._block(100, 80, 260, 140)
+        overlapping = self._block(102, 82, 262, 142)
+
+        forward = self._detect([first, overlapping])
+        backward = self._detect([overlapping, first])
+
+        self.assertEqual(
+            [(item.strip_bbox, item.metadata["region_id"]) for item in forward],
+            [(item.strip_bbox, item.metadata["region_id"]) for item in backward],
+        )
+
+    def test_page_offsets_and_component_ordinals_restart_per_page(self):
+        from unittest.mock import MagicMock, patch
+
+        import numpy as np
+
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+
+        detector = MagicMock()
+        detector.detect.side_effect = [
+            [self._block(100, 80, 260, 140)],
+            [self._block(120, 30, 270, 80)],
+        ]
+        strip = VerticalStrip(
+            image=np.zeros((500, 400, 3), dtype=np.uint8),
+            width=400,
+            height=500,
+            source_page_breaks=[0, 250, 500],
+            page_x_offsets=[25, 50],
+        )
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_DETECT_FULL_PAGE": "1",
+                "TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_DARK_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_UI_LAYOUT_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE": "0",
+            },
+        ):
+            balloons = detect_strip_balloons(strip, detector=detector)
+
+        self.assertEqual(
+            [(item.metadata["page_id"], item.metadata["bbox_page"]) for item in balloons],
+            [("page_001", [75, 80, 235, 140]), ("page_002", [70, 30, 220, 80])],
+        )
+        self.assertTrue(balloons[0].metadata["region_id"].startswith("region_p001_001_"))
+        self.assertTrue(balloons[1].metadata["region_id"].startswith("region_p002_001_"))
+
+    def test_second_page_polygon_is_offset_once_from_chunk_to_page_space(self):
+        from unittest.mock import MagicMock, patch
+
+        import numpy as np
+
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+
+        first = self._block(100, 80, 260, 140)
+        first.line_polygons = [[[100, 80], [260, 80], [260, 140], [100, 140]]]
+        second = self._block(120, 30, 270, 80)
+        second.detector = "rotated_region_detector"
+        second.line_polygons = [[[120, 30], [270, 30], [270, 80], [120, 80]]]
+        detector = MagicMock()
+        detector.detect.side_effect = [[first], [second]]
+        strip = VerticalStrip(
+            image=np.zeros((500, 400, 3), dtype=np.uint8),
+            width=400,
+            height=500,
+            source_page_breaks=[0, 250, 500],
+            page_x_offsets=[25, 50],
+            source_page_widths=[350, 300],
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_DETECT_FULL_PAGE": "1",
+                "TRADUZAI_STRIP_WHITE_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_DARK_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_UI_LAYOUT_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE": "0",
+            },
+        ):
+            balloons = detect_strip_balloons(strip, detector=detector)
+
+        second_metadata = balloons[1].metadata
+        self.assertEqual(second_metadata["page_id"], "page_002")
+        self.assertEqual(second_metadata["detector_source"], "rotated_region_detector")
+        self.assertEqual(
+            second_metadata["line_polygons_page"],
+            [[[70, 30], [220, 30], [220, 80], [70, 80]]],
+        )
+
+    def test_nms_preserves_provenance_from_overlapping_detectors(self):
+        first = self._block(100, 80, 260, 140)
+        first.detector = "primary_region_detector"
+        second = self._block(102, 82, 262, 142)
+        second.detector = "secondary_region_detector"
+
+        balloons = self._detect([first, second])
+
+        self.assertEqual(len(balloons), 1)
+        self.assertEqual(
+            balloons[0].metadata["detector_sources"],
+            ["primary_region_detector", "secondary_region_detector"],
+        )
+
+
+class PageGlobalSourceComponentCollectionTests(unittest.TestCase):
+    def test_source_component_strip_collection_uses_original_page_space_before_ocr(self):
+        from unittest.mock import patch
+
+        import numpy as np
+
+        from strip.run import _discover_source_components_for_strip
+        from strip.types import BBox, Balloon, VerticalStrip
+
+        strip = VerticalStrip(
+            image=np.zeros((200, 400, 3), dtype=np.uint8),
+            width=400,
+            height=200,
+            source_page_breaks=[0, 100, 200],
+            page_x_offsets=[20, 0],
+            source_page_widths=[359, 400],
+        )
+        balloons = [
+            Balloon(
+                BBox(70, 20, 230, 70),
+                confidence=0.9,
+                metadata={
+                    "page_id": "page_001",
+                    "bbox_page": [50, 20, 210, 70],
+                    "region_id": "region_p001_001_test",
+                },
+            ),
+            Balloon(
+                BBox(80, 130, 240, 180),
+                confidence=0.9,
+                metadata={
+                    "page_id": "page_002",
+                    "bbox_page": [80, 30, 240, 80],
+                    "region_id": "region_p002_001_test",
+                },
+            ),
+        ]
+
+        with patch("vision_stack.runtime.discover_page_source_components", return_value=[]) as discover:
+            result = _discover_source_components_for_strip(strip, balloons)
+
+        self.assertEqual(result, {"page_001": [], "page_002": []})
+        self.assertIs(getattr(strip, "source_components_by_page"), result)
+        self.assertEqual(discover.call_count, 2)
+        first_call = discover.call_args_list[0]
+        second_call = discover.call_args_list[1]
+        self.assertEqual(first_call.args[0].shape, (100, 359, 3))
+        self.assertEqual(second_call.args[0].shape, (100, 400, 3))
+        self.assertEqual(first_call.kwargs["page_id"], "page_001")
+        self.assertEqual(second_call.kwargs["page_id"], "page_002")
+        self.assertEqual(first_call.kwargs["detector_regions"][0]["bbox_page"], [50, 20, 210, 70])

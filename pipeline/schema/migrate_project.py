@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from ownership.project import require_owner_project_consistency
+
 from .project_schema_v12 import (
     SCHEMA_VERSION,
     build_empty_project_v12,
@@ -23,7 +25,9 @@ def _merge_missing(target: dict[str, Any], defaults: dict[str, Any]) -> dict[str
 
 def _as_bbox(value: Any) -> list[int]:
     if isinstance(value, list) and len(value) >= 4:
-        return [int(item) if isinstance(item, (int, float)) else 0 for item in value[:4]]
+        return [
+            int(item) if isinstance(item, (int, float)) else 0 for item in value[:4]
+        ]
     return [0, 0, 0, 0]
 
 
@@ -52,28 +56,45 @@ def _text_value(item: dict[str, Any], *keys: str) -> str:
     return ""
 
 
-def _region_from_text(text_item: dict[str, Any], page_num: int, region_index: int) -> dict[str, Any]:
+def _region_from_text(
+    text_item: dict[str, Any], page_num: int, region_index: int
+) -> dict[str, Any]:
     region = build_empty_region_v12(page=page_num, index=region_index)
     raw_ocr = _text_value(text_item, "original", "texto", "text", "raw_ocr")
     translated = _text_value(text_item, "translated", "traduzido", "translation")
-    confidence = text_item.get("ocr_confidence", text_item.get("confianca_ocr", text_item.get("confidence", 0.0)))
+    confidence = text_item.get(
+        "ocr_confidence",
+        text_item.get("confianca_ocr", text_item.get("confidence", 0.0)),
+    )
 
     region["region_id"] = str(text_item.get("id") or region["region_id"])
     if not region["region_id"].startswith("p"):
         region["region_id"] = f"p{page_num:03}_r{region_index:03}"
-    region["bbox"] = _as_bbox(text_item.get("bbox") or text_item.get("source_bbox") or text_item.get("layout_bbox"))
+    region["bbox"] = _as_bbox(
+        text_item.get("bbox")
+        or text_item.get("source_bbox")
+        or text_item.get("layout_bbox")
+    )
     region["reading_order"] = int(text_item.get("order", region_index - 1) or 0)
-    region["region_type"] = _region_type(text_item.get("tipo") or text_item.get("region_type"))
+    region["region_type"] = _region_type(
+        text_item.get("tipo") or text_item.get("region_type")
+    )
     region["raw_ocr"] = raw_ocr
     region["normalized_ocr"] = _text_value(text_item, "normalized_ocr") or raw_ocr
     region["ocr_confidence"] = float(confidence or 0.0)
     region["translation"]["text"] = translated
-    region["translation"]["used_glossary"] = deepcopy(text_item.get("glossary_hits", []))
+    region["translation"]["used_glossary"] = deepcopy(
+        text_item.get("glossary_hits", [])
+    )
     region["entities"] = deepcopy(text_item.get("entities", []))
     region["qa_flags"] = list(text_item.get("qa_flags", []))
     region["mask"]["bbox"] = deepcopy(text_item.get("balloon_bbox") or region["bbox"])
-    region["layout"]["font"] = str((text_item.get("style") or text_item.get("estilo") or {}).get("fonte", ""))
-    region["layout"]["font_size"] = int((text_item.get("style") or text_item.get("estilo") or {}).get("tamanho", 0) or 0)
+    region["layout"]["font"] = str(
+        (text_item.get("style") or text_item.get("estilo") or {}).get("fonte", "")
+    )
+    region["layout"]["font_size"] = int(
+        (text_item.get("style") or text_item.get("estilo") or {}).get("tamanho", 0) or 0
+    )
     return region
 
 
@@ -106,28 +127,41 @@ def _flags_from_regions(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return flags
 
 
-def migrate_project_to_v12(project: dict[str, Any], *, input_path: str = "", mode: str = "mock") -> dict[str, Any]:
+def migrate_project_to_v12(
+    project: dict[str, Any], *, input_path: str = "", mode: str = "mock"
+) -> dict[str, Any]:
     current = deepcopy(project)
     if current.get("schema_version") == SCHEMA_VERSION:
         defaults = build_empty_project_v12(
             input_path=current.get("source", {}).get("input_path", input_path),
-            page_count=current.get("source", {}).get("page_count", len(current.get("pages", []))),
+            page_count=current.get("source", {}).get(
+                "page_count", len(current.get("pages", []))
+            ),
             mode=current.get("run", {}).get("mode", mode),
         )
         migrated = _merge_missing(current, defaults)
-        migrated.setdefault("legacy", {}).setdefault("paginas", current.get("paginas", []))
+        migrated.setdefault("legacy", {}).setdefault(
+            "paginas", current.get("paginas", [])
+        )
+        require_owner_project_consistency(migrated, require_envelope=True)
         return with_recomputed_qa_summary(migrated)
 
     legacy_pages = current.get("paginas", [])
     if not isinstance(legacy_pages, list):
         legacy_pages = []
 
-    migrated = build_empty_project_v12(input_path=input_path, page_count=len(legacy_pages), mode=mode)
+    migrated = build_empty_project_v12(
+        input_path=input_path, page_count=len(legacy_pages), mode=mode
+    )
     migrated["legacy"]["paginas"] = deepcopy(legacy_pages)
     migrated["work_context"]["title"] = current.get("obra")
     migrated["work_context"]["selected"] = bool(current.get("obra"))
     migrated["work_context"]["context_loaded"] = bool(current.get("contexto"))
-    glossary = (current.get("contexto") or {}).get("glossario") if isinstance(current.get("contexto"), dict) else None
+    glossary = (
+        (current.get("contexto") or {}).get("glossario")
+        if isinstance(current.get("contexto"), dict)
+        else None
+    )
     if isinstance(glossary, dict):
         migrated["work_context"]["glossary_loaded"] = bool(glossary)
         migrated["work_context"]["glossary_entries_count"] = len(glossary)
@@ -151,4 +185,3 @@ def migrate_project_to_v12(project: dict[str, Any], *, input_path: str = "", mod
     migrated["pages"] = pages
     migrated["qa"]["flags"] = _flags_from_regions(pages)
     return with_recomputed_qa_summary(migrated)
-

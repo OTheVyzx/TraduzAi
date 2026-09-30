@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 import re
 from typing import Any
@@ -9,6 +10,9 @@ from typing import Any
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+from typesetter.font_matcher import render_source_text_mask
+from typesetter.glyph_rasterizer import rasterize_v2_glyph_layers
 
 
 FONT_PRESETS = {
@@ -69,7 +73,19 @@ def render_sfx_layer(page_rgb: np.ndarray | Image.Image, layer: dict[str, Any]) 
     glow_width = max(0, int(style.get("glow_width_px") or 0))
     rotation = float(style.get("rotation_deg") or 0.0)
     if _is_latin_sfx_text(text):
-        rendered = _render_cv2_latin_sfx(image, layer, text, bbox, fill, stroke, stroke_width, glow, glow_width, rotation)
+        rendered = _render_project_font_latin_sfx(
+            image,
+            layer,
+            text,
+            bbox,
+            style,
+            fill,
+            stroke,
+            stroke_width,
+            glow,
+            glow_width,
+            rotation,
+        )
         if rendered is not None:
             return rendered
     font = _load_font(_font_name_for_sfx(sfx), _fit_font_size(text, bbox, stroke_width), text=text)
@@ -132,11 +148,12 @@ def _is_latin_sfx_text(text: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9!?.,:'\" -]{1,24}", str(text or "").strip()))
 
 
-def _render_cv2_latin_sfx(
+def _render_project_font_latin_sfx(
     image: Image.Image,
     layer: dict[str, Any],
     text: str,
     bbox: list[int],
+    style: dict[str, Any],
     fill: str,
     stroke: str,
     stroke_width: int,
@@ -144,61 +161,124 @@ def _render_cv2_latin_sfx(
     glow_width: int,
     rotation: float,
 ) -> np.ndarray | None:
+    """Render Latin SFX with a selected project font and the shared V2 compositor."""
+
     x1, y1, x2, y2 = bbox
     width = max(1, x2 - x1)
     height = max(1, y2 - y1)
-    pad = max(16, stroke_width * 5 + glow_width * 2)
-    canvas_w = width + pad * 2
-    canvas_h = height + pad * 2
-    overlay = np.zeros((canvas_h, canvas_w, 4), dtype=np.uint8)
-    font_face = cv2.FONT_HERSHEY_TRIPLEX
-    raw_size, raw_baseline = cv2.getTextSize(text, font_face, 1.0, max(1, stroke_width + 1))
-    raw_w = max(1, raw_size[0])
-    raw_h = max(1, raw_size[1] + raw_baseline)
-    scale = max(0.25, min(width / float(raw_w) * 0.88, height / float(raw_h) * 0.88))
-    fill_rgba = _hex_to_rgba(fill, (0, 0, 0, 255))
-    stroke_rgba = _hex_to_rgba(stroke, fill_rgba)
-    glow_rgba = _hex_to_rgba(glow, stroke_rgba)
-    thickness = max(1, int(round(max(1.0, scale * 2.2))))
-    outline_thickness = max(thickness + 1, int(stroke_width) * 2 + thickness)
-    size, baseline = cv2.getTextSize(text, font_face, scale, thickness)
-    tx = int(round(pad + (width - size[0]) / 2.0))
-    ty = int(round(pad + (height + size[1]) / 2.0 - baseline / 2.0))
-    if glow and glow_width > 0:
-        glow_layer = np.zeros_like(overlay)
-        cv2.putText(glow_layer, text, (tx, ty), font_face, scale, glow_rgba, outline_thickness + int(glow_width), cv2.LINE_AA)
-        alpha = glow_layer[:, :, 3]
-        if np.any(alpha):
-            blurred = cv2.GaussianBlur(glow_layer, (0, 0), sigmaX=max(1.0, glow_width / 2.0))
-            overlay = _alpha_composite_np(overlay, blurred)
-    if stroke_width > 0 or stroke:
-        cv2.putText(overlay, text, (tx, ty), font_face, scale, stroke_rgba, outline_thickness, cv2.LINE_AA)
-    cv2.putText(overlay, text, (tx, ty), font_face, scale, fill_rgba, thickness, cv2.LINE_AA)
-    overlay_img = Image.fromarray(overlay, "RGBA")
-    if rotation:
-        overlay_img = overlay_img.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
-    px = int(round((x1 + x2 - overlay_img.width) / 2))
-    py = int(round((y1 + y2 - overlay_img.height) / 2))
-    base = image.convert("RGBA")
-    base.alpha_composite(overlay_img, (px, py))
-    alpha_bbox = overlay_img.getchannel("A").getbbox()
-    if not alpha_bbox:
+    sfx = layer.get("sfx") if isinstance(layer.get("sfx"), dict) else {}
+    font_name = str(style.get("font_name") or _font_name_for_sfx(sfx))
+    font_path = _project_font_path(font_name) or _project_font_path("ComicNeue-Bold.ttf")
+    if font_path is None:
         _append_flag(layer, "sfx_render_missing")
         return None
-    render_bbox = [
-        max(0, px + alpha_bbox[0]),
-        max(0, py + alpha_bbox[1]),
-        min(image.width, px + alpha_bbox[2]),
-        min(image.height, py + alpha_bbox[3]),
-    ]
+    normalized = render_source_text_mask(text, font_path, profile={})
+    normalized_bbox = cv2.boundingRect(normalized)
+    nx, ny, nw, nh = normalized_bbox
+    crop = normalized[ny : ny + nh, nx : nx + nw]
+    fit_scale = min(
+        max(1.0, width * 0.68) / max(1.0, float(nw)),
+        max(1.0, height * 0.62) / max(1.0, float(nh)),
+    )
+    resized = cv2.resize(
+        crop,
+        (max(1, int(round(nw * fit_scale))), max(1, int(round(nh * fit_scale)))),
+        interpolation=cv2.INTER_NEAREST,
+    )
+    core = np.zeros((image.height, image.width), dtype=np.uint8)
+    px = int(round((x1 + x2 - resized.shape[1]) / 2.0))
+    py = int(round((y1 + y2 - resized.shape[0]) / 2.0))
+    core[py : py + resized.shape[0], px : px + resized.shape[1]] = resized
+    safe = _sfx_safe_mask(layer, image.size, bbox)
+    raster_style: dict[str, Any] = {
+        "fill": fill,
+        "rotation_deg": rotation,
+        "width_scale": float(style.get("scale_x") or 1.0),
+        "scale_y": float(style.get("scale_y") or 1.0),
+        "tracking_xh": float(style.get("tracking_xh") or 0.0),
+        "slant_tangent": float(style.get("slant_tangent") or 0.0),
+    }
+    if stroke or stroke_width > 0:
+        raster_style["stroke"] = {"color": stroke or fill, "width_px": stroke_width}
+    if glow and glow_width > 0:
+        raster_style["glow"] = {"color": glow, "width_px": glow_width}
+    if isinstance(style.get("shadow"), dict):
+        raster_style["shadow"] = style["shadow"]
+    if isinstance(style.get("gradient"), (list, tuple)):
+        raster_style["gradient"] = style["gradient"]
+    result = rasterize_v2_glyph_layers(
+        core,
+        safe,
+        raster_style,
+        source_x_height_px=max(8.0, resized.shape[0] * 0.72),
+    )
+    if result.status == "review_required" or not np.any(result.rgba[:, :, 3]):
+        _append_flag(layer, "sfx_render_outside_source_region")
+        return None
+    base = np.asarray(image.convert("RGB"), dtype=np.uint8).copy()
+    alpha = result.rgba[:, :, 3:4].astype(np.float32) / 255.0
+    base = np.clip(
+        result.rgba[:, :, :3].astype(np.float32) * alpha
+        + base.astype(np.float32) * (1.0 - alpha),
+        0,
+        255,
+    ).astype(np.uint8)
+    alpha_bbox = cv2.boundingRect(np.where(result.rgba[:, :, 3] > 0, 255, 0).astype(np.uint8))
+    rx, ry, rw, rh = alpha_bbox
+    render_bbox = [rx, ry, rx + rw, ry + rh]
     layer["render_bbox"] = render_bbox
     layer["fit_status"] = "ok"
     layer["render_policy"] = "sfx_style"
+    layer["sfx_font_backend"] = "project_font_textpath"
+    layer["render_font_name"] = font_path.name
+    layer["style_v2_raster_contract"] = {
+        "status": result.status,
+        "backend": "project_font_textpath",
+        "applied_attributes": {
+            **copy.deepcopy(result.applied_attributes),
+            "font_name": font_path.name,
+        },
+        "abstained_attributes": copy.deepcopy(result.abstained_attributes),
+        "glyph_core_envelope": list(result.glyph_core_envelope or ()),
+        "effect_envelope": list(result.effect_envelope or ()),
+        "metrics": copy.deepcopy(result.metrics),
+    }
     layer["translated"] = text
     layer["traduzido"] = text
-    if not _bbox_contains(_expand_bbox(bbox, image.width, image.height, 18), render_bbox):
-        _append_flag(layer, "sfx_render_outside_source_region")
-    return np.asarray(base.convert("RGB"))
+    for attribute in result.abstained_attributes:
+        _append_flag(layer, f"sfx_style_{attribute}_abstained")
+    return base
+
+
+def _project_font_path(font_name: str) -> Path | None:
+    for root in FONT_DIRS:
+        candidate = root / str(font_name)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _sfx_safe_mask(
+    layer: dict[str, Any],
+    image_size: tuple[int, int],
+    bbox: list[int],
+) -> np.ndarray:
+    width, height = image_size
+    safe = np.zeros((height, width), dtype=np.uint8)
+    polygon = layer.get("render_safe_polygon_page")
+    if isinstance(polygon, (list, tuple)) and len(polygon) >= 3:
+        try:
+            points = np.asarray(
+                [[int(round(float(point[0]))), int(round(float(point[1])))] for point in polygon],
+                dtype=np.int32,
+            )
+            cv2.fillPoly(safe, [points], 255)
+            return safe
+        except (TypeError, ValueError, IndexError):
+            pass
+    x1, y1, x2, y2 = bbox
+    safe[y1:y2, x1:x2] = 255
+    return safe
 
 
 def _hex_to_rgba(value: str, fallback: tuple[int, int, int, int]) -> tuple[int, int, int, int]:

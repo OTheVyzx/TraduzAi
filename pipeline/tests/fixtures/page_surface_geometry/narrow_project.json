@@ -1,0 +1,56 @@
+{
+  "owner_graph_status": "verified",
+  "paginas": [
+    {
+      "numero": 2,
+      "page_id": "page_002",
+      "logical_width": 690,
+      "logical_height": 1600,
+      "frame_width": 800,
+      "frame_height": 1600,
+      "page_surface_geometry": {
+        "schema_version": 1,
+        "logical_space": "logical_page",
+        "artifact_space": "framed_page",
+        "logical_width": 690,
+        "logical_height": 1600,
+        "frame_width": 800,
+        "frame_height": 1600,
+        "content_origin_xy": [55, 0],
+        "content_bbox_frame": [55, 0, 745, 1600],
+        "geometry_sha256": "01470c4ac0e8cdba9c42083328669a87db962564f102de0d8fe056785743a9ef"
+      },
+      "page_surface_geometry_sha256": "01470c4ac0e8cdba9c42083328669a87db962564f102de0d8fe056785743a9ef",
+      "authenticated_source_crops": [
+        {
+          "owner_id": "owner_p002_d9afb32ef935",
+          "page_surface_geometry_sha256": "01470c4ac0e8cdba9c42083328669a87db962564f102de0d8fe056785743a9ef",
+          "source_crop": {
+            "bbox_page": [109, 985, 318, 1104],
+            "width": 209,
+            "height": 119,
+            "sha256": "e4c60408223dfef9a4f0236b41b07c603b983420e9ca5a3715a030ccb1532c31",
+            "coordinate_space": "logical_page"
+          }
+        }
+      ]
+    }
+  ],
+  "page_owner_graphs": [
+    {
+      "page_id": "page_002",
+      "components": [
+        {
+          "component_id": "region_p002_003_8cd5da326a",
+          "bbox_page": [109, 985, 318, 1104]
+        }
+      ],
+      "owners": [
+        {
+          "owner_id": "owner_p002_d9afb32ef935",
+          "component_ids": ["region_p002_003_8cd5da326a"]
+        }
+      ]
+    }
+  ]
+}

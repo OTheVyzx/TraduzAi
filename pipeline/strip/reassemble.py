@@ -140,6 +140,8 @@ def assemble_output_pages(
 
 def paste_bands_into_strip(strip: VerticalStrip, bands: list) -> None:
     """Cola cada `band.rendered_slice` no strip nas coordenadas (y_top:y_bottom)."""
+    # Legacy adapter only. Owner-mode precedence is resolved before framing by
+    # compositor.owner_compositor.compose_page.
     for band in bands:
         if band.rendered_slice is None:
             continue

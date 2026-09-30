@@ -1,4 +1,4 @@
-﻿"""
+"""
 Typesetting module - renders translated text onto inpainted manga pages.
 Now uses inferred balloon/layout geometry instead of relying only on the raw
 OCR bounding box.
@@ -13,10 +13,12 @@ import sys
 import unicodedata
 import json
 import copy
+from dataclasses import dataclass
+from hashlib import sha256
 from functools import lru_cache
 from itertools import product
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Iterable, Mapping
 
 import cv2
 import numpy as np
@@ -31,7 +33,64 @@ if matplotlib.get_backend().lower() != "agg":
     matplotlib.use("agg")
 from matplotlib.ft2font import FT2Font as _FT2Font
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
-from typesetter.style_policy import normalize_auto_typesetting_style, sample_text_background_rgb
+from typesetter.glyph_rasterizer import GlyphRasterResult, rasterize_v2_glyph_layers
+from typesetter.gradient_model import (
+    canonicalize_linear_gradient,
+    render_linear_gradient_rgb,
+)
+from typesetter.style_policy import (
+    normalize_auto_typesetting_style,
+    resolve_auto_force_upper,
+    sample_text_background_rgb,
+)
+from typesetter.owner_style import validate_owner_visual_profile
+from typesetter.font_identity import resolve_font_identity
+from typesetter.style_materialization import (
+    OwnerStyleResolvedIntent,
+    build_materialization_observation,
+    build_materialization_plan,
+    build_resolved_style_intent,
+    compare_materialization,
+    materialization_plan_from_dict,
+)
+
+try:
+    from ownership.delivery import (
+        GlyphRunObservation,
+        OwnerTextExecutionAuthority,
+        build_owner_text_delivery_contract,
+    )
+    from ownership.model import (
+        OwnerGlyphPatch,
+        OwnerGraph,
+        OwnerStyleRasterContract,
+        OwnerStyleRasterContractV2,
+        owner_style_raster_contract_sha256,
+        owner_style_raster_segment_sha256,
+        validate_owner_style_raster_segment,
+    )
+    from ownership.render_geometry import OwnerRenderGeometry
+except ImportError:  # pragma: no cover - supports package imports
+    from ..ownership.delivery import (
+        GlyphRunObservation,
+        OwnerTextExecutionAuthority,
+        build_owner_text_delivery_contract,
+    )
+    from ..ownership.model import (
+        OwnerGlyphPatch,
+        OwnerGraph,
+        OwnerStyleRasterContract,
+        OwnerStyleRasterContractV2,
+        owner_style_raster_contract_sha256,
+        owner_style_raster_segment_sha256,
+        validate_owner_style_raster_segment,
+    )
+    from ..ownership.render_geometry import OwnerRenderGeometry
+
+try:
+    from typesetter.owner_render_quality import evaluate_owner_render_quality
+except ImportError:  # pragma: no cover - supports package imports
+    from .owner_render_quality import evaluate_owner_render_quality
 
 try:
     from layout.simple_text_geometry import (
@@ -47,6 +106,272 @@ except ImportError:
     )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class OwnerBodyRenderPayload:
+    """One semantic PT-BR body passed to the renderer as one text layer."""
+
+    owner_id: str
+    target_text: str
+    translation_binding_sha256: str
+    target_payload_sha256: str
+    safe_bbox: tuple[int, int, int, int]
+    text_layer_count: int
+    style_source: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "owner_id": self.owner_id,
+            "translated": self.target_text,
+            "translation_binding_sha256": self.translation_binding_sha256,
+            "target_payload_sha256": self.target_payload_sha256,
+            "safe_bbox": list(self.safe_bbox),
+            "text_layer_count": self.text_layer_count,
+            "style_source": self.style_source,
+        }
+
+
+def build_owner_body_render_payload(
+    binding: Any,
+    safe_bbox: Iterable[int],
+    *,
+    style_copy_mode: str = "off",
+    style_confident: bool = False,
+    has_complex_source_style: bool = False,
+) -> OwnerBodyRenderPayload:
+    """Seal a full translation binding into exactly one vector render body."""
+
+    bbox = tuple(int(value) for value in safe_bbox)
+    if len(bbox) != 4 or bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+        raise ValueError("owner body render safe bbox is invalid")
+    target = " ".join(str(getattr(binding, "target_text", "")).split())
+    if not target:
+        raise ValueError("owner body render target is empty")
+    style_source = (
+        "verified_source_style"
+        if str(style_copy_mode).lower() == "render"
+        and style_confident
+        and has_complex_source_style
+        else "configured_base_font"
+    )
+    return OwnerBodyRenderPayload(
+        owner_id=str(getattr(binding, "owner_id", "")),
+        target_text=target,
+        translation_binding_sha256=str(
+            getattr(binding, "translation_binding_sha256", "")
+        ),
+        target_payload_sha256=str(getattr(binding, "target_payload_sha256", "")),
+        safe_bbox=bbox,
+        text_layer_count=1,
+        style_source=style_source,
+    )
+
+
+def _canonical_runtime_sha256(value: Any) -> str:
+    return sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+@dataclass(frozen=True)
+class RenderedGlyphPose:
+    codepoint: int
+    glyph_id: int
+    origin_x: float
+    origin_y: float
+    advance_px: float
+    bbox: tuple[int, int, int, int]
+    angle_deg: float = 0.0
+    line_index: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "codepoint": self.codepoint,
+            "glyph_id": self.glyph_id,
+            "origin": [self.origin_x, self.origin_y],
+            "advance_px": self.advance_px,
+            "bbox": list(self.bbox),
+            "angle_deg": self.angle_deg,
+            "line_index": self.line_index,
+        }
+
+
+@dataclass(frozen=True)
+class RenderedGlyphRun:
+    text: str
+    font_spans: tuple[tuple[int, int, str], ...]
+    glyphs: tuple[RenderedGlyphPose, ...]
+    rendered_x_height_px: float
+    nominal_advances: tuple[float, ...]
+    glyph_poses_sha256: str
+    run_sha256: str
+    curve_direction: str = ""
+    curve_amount: float | None = None
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        text: str,
+        font_spans: tuple[tuple[int, int, str], ...],
+        glyphs: tuple[RenderedGlyphPose, ...],
+        rendered_x_height_px: float,
+        nominal_advances: tuple[float, ...],
+        curve_direction: str = "",
+        curve_amount: float | None = None,
+    ) -> "RenderedGlyphRun":
+        if not text or not glyphs or rendered_x_height_px <= 0:
+            raise ValueError("rendered glyph run requires text, glyphs and x-height")
+        if len(nominal_advances) not in {0, max(0, len(glyphs) - 1)}:
+            raise ValueError("rendered glyph run nominal advances are incomplete")
+        glyph_payload = [glyph.to_dict() for glyph in glyphs]
+        poses_sha256 = _canonical_runtime_sha256(glyph_payload)
+        payload = {
+            "text": text,
+            "font_spans": [list(span) for span in font_spans],
+            "glyphs": glyph_payload,
+            "rendered_x_height_px": float(rendered_x_height_px),
+            "nominal_advances": list(nominal_advances),
+            "glyph_poses_sha256": poses_sha256,
+            "curve_direction": str(curve_direction or ""),
+            "curve_amount": curve_amount,
+        }
+        return cls(
+            text=text,
+            font_spans=font_spans,
+            glyphs=glyphs,
+            rendered_x_height_px=float(rendered_x_height_px),
+            nominal_advances=nominal_advances,
+            glyph_poses_sha256=poses_sha256,
+            run_sha256=_canonical_runtime_sha256(payload),
+            curve_direction=str(curve_direction or ""),
+            curve_amount=curve_amount,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "font_spans": [list(span) for span in self.font_spans],
+            "glyphs": [glyph.to_dict() for glyph in self.glyphs],
+            "rendered_x_height_px": self.rendered_x_height_px,
+            "nominal_advances": list(self.nominal_advances),
+            "glyph_poses_sha256": self.glyph_poses_sha256,
+            "run_sha256": self.run_sha256,
+            "curve_direction": self.curve_direction,
+            "curve_amount": self.curve_amount,
+        }
+
+
+def _materialization_observation_row(
+    value: Any,
+    *,
+    evidence_kind: str,
+    evidence_payload: Mapping[str, Any],
+    metrics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": "materialized",
+        "canonical_value": copy.deepcopy(value),
+        "evidence_kind": evidence_kind,
+        "evidence_sha256": _canonical_runtime_sha256(evidence_payload),
+        "metrics": copy.deepcopy(dict(metrics or {})),
+    }
+
+
+def _observe_layout_materialization(
+    text_data: Mapping[str, Any],
+    *,
+    attribute_names: set[str] | frozenset[str],
+) -> dict[str, dict[str, Any]]:
+    """Observe layout facts only from the final fit and glyph placement."""
+
+    names = set(attribute_names)
+    observed: dict[str, dict[str, Any]] = {}
+    layout = text_data.get("render_layout_contract")
+    layout = layout if isinstance(layout, Mapping) else {}
+    if "font_size_px" in names:
+        font_size = int(text_data.get("font_size_final") or layout.get("font_size") or 0)
+        if font_size > 0:
+            observed["font_size_px"] = _materialization_observation_row(
+                font_size,
+                evidence_kind="final_fit",
+                evidence_payload={"font_size_px": font_size, "layout": layout},
+            )
+    if "alignment" in names:
+        safe = _layout_bbox(text_data.get("safe_text_box") or layout.get("safe_text_box"))
+        block = _layout_bbox(layout.get("block_bbox"))
+        if safe is not None and block is not None:
+            left_margin = block[0] - safe[0]
+            right_margin = safe[2] - block[2]
+            tolerance = max(2.0, (safe[2] - safe[0]) * 0.05)
+            alignment = (
+                "center"
+                if abs(left_margin - right_margin) <= tolerance
+                else "left"
+                if left_margin < right_margin
+                else "right"
+            )
+            evidence = {
+                "positions": layout.get("positions") or [],
+                "line_widths": layout.get("line_widths") or [],
+                "block_bbox": list(block),
+                "safe_text_box": list(safe),
+            }
+            observed["alignment"] = _materialization_observation_row(
+                alignment,
+                evidence_kind="final_glyph_positions",
+                evidence_payload=evidence,
+                metrics={
+                    "left_margin_px": left_margin,
+                    "right_margin_px": right_margin,
+                    "center_tolerance_px": tolerance,
+                },
+            )
+    raw_run = text_data.get("_rendered_glyph_run")
+    if isinstance(raw_run, Mapping):
+        run_hash = str(raw_run.get("run_sha256") or "")
+        poses_hash = str(raw_run.get("glyph_poses_sha256") or "")
+        glyphs = list(raw_run.get("glyphs") or [])
+        x_height = float(raw_run.get("rendered_x_height_px") or 0.0)
+        nominal = [float(value) for value in raw_run.get("nominal_advances") or []]
+        if "tracking_xh" in names and x_height > 0 and len(glyphs) >= 2 and len(nominal) == len(glyphs) - 1:
+            gaps = [
+                float(glyphs[index + 1]["origin"][0])
+                - float(glyphs[index]["origin"][0])
+                - nominal[index]
+                for index in range(len(nominal))
+                if int(glyphs[index + 1].get("line_index") or 0)
+                == int(glyphs[index].get("line_index") or 0)
+            ]
+            if gaps:
+                tracking = sum(gaps) / len(gaps) / x_height
+                observed["tracking_xh"] = _materialization_observation_row(
+                    tracking,
+                    evidence_kind="glyph_run",
+                    evidence_payload={"run_sha256": run_hash, "gaps_px": gaps},
+                    metrics={"glyph_poses_sha256": poses_hash, "gaps_px": gaps},
+                )
+        if "curve" in names and glyphs:
+            angles = [float(glyph.get("angle_deg") or 0.0) for glyph in glyphs]
+            amount = max(angles) - min(angles) if angles else 0.0
+            observed_amount = raw_run.get("curve_amount")
+            observed_amount = float(observed_amount) if observed_amount is not None else amount
+            direction = str(raw_run.get("curve_direction") or "")
+            if not direction:
+                direction = "arc_up" if angles and angles[-1] >= angles[0] else "arc_down"
+            observed["curve"] = _materialization_observation_row(
+                {"direction": direction, "amount": observed_amount},
+                evidence_kind="glyph_run",
+                evidence_payload={"run_sha256": run_hash, "angles_deg": angles},
+                metrics={"glyph_poses_sha256": poses_hash},
+            )
+    return observed
 
 try:
     from debug_tools import get_recorder
@@ -129,7 +454,9 @@ def _canonical_render_style(estilo: dict | None) -> dict:
     style.setdefault("bold", True)
     style.setdefault("italico", False)
     style.setdefault("cor", "#000000")
-    style.setdefault("cor_gradiente", [])
+    style["cor_gradiente"] = canonicalize_linear_gradient(
+        style.get("cor_gradiente")
+    ) or []
     style.setdefault("contorno", "")
     if not style.get("contorno") and int(style.get("contorno_px", 0) or 0) > 0:
         style["contorno"] = "#000000"
@@ -691,6 +1018,35 @@ def _apply_false_dark_white_neutral_style(text_data: dict) -> None:
 
 
 def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> None:
+    profile = text_data.get("visual_profile_v2")
+    intent = text_data.get("style_resolved_intent_v1")
+    if isinstance(profile, Mapping) and isinstance(intent, Mapping):
+        owner_id = str(text_data.get("owner_id") or profile.get("owner_id") or "")
+        normalized = validate_owner_visual_profile(
+            profile,
+            expected_owner_id=owner_id,
+            expected_sha256=str(text_data.get("visual_profile_sha256") or ""),
+        )
+        if (
+            str(intent.get("owner_id") or "") != owner_id
+            or str(intent.get("visual_profile_sha256") or "")
+            != normalized["visual_profile_sha256"]
+            or len(str(intent.get("intent_sha256") or "")) != 64
+        ):
+            raise ValueError("owner Style V2 intent is not bound to its visual profile")
+        text_data["style_origin"] = "owner_style_v2"
+        style = dict(normalized.get("applied_style") or {})
+        style["style_origin"] = "owner_style_v2"
+        style["force_upper"] = resolve_auto_force_upper(
+            style,
+            semantic_role=text_data.get("semantic_role"),
+            content_class=text_data.get("content_class"),
+            layout_profile=text_data.get("layout_profile") or text_data.get("block_profile"),
+            preserve_case=_is_translator_note_layer(text_data),
+        )
+        text_data["estilo"] = style
+        text_data["style"] = style
+        return
     image_rgb = np.array(img.convert("RGB"))
     profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
     background_rgb = (
@@ -719,6 +1075,10 @@ def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> Non
         text_data.get("estilo", {}),
         background_rgb,
         force_black_text=force_black_text,
+        semantic_role=text_data.get("semantic_role"),
+        content_class=text_data.get("content_class"),
+        layout_profile=profile,
+        preserve_case=_is_translator_note_layer(text_data),
     )
     text_data["style"] = text_data["estilo"]
     _apply_dark_panel_glow_fallback(text_data, background_rgb)
@@ -762,6 +1122,7 @@ class SafeTextPathFont:
         self.size = int(size)
         self._bbox_cache: dict[str, tuple[int, int, int, int]] = {}
         self._mask_cache: dict[tuple[str, int], np.ndarray] = {}
+        self._font_run_observation_cache: dict[str, dict[str, Any]] = {}
 
     def getbbox(self, text: str) -> tuple[int, int, int, int]:
         """Retorna o bounding box visual real dos pixels (detecta acentos perfeitamente)."""
@@ -821,6 +1182,45 @@ def _find_fallback_font_path(char: str, original_path: str) -> str | None:
     return None
 
 
+@lru_cache(maxsize=256)
+def _resolved_font_identity_payload(font_path: str) -> dict[str, Any]:
+    return resolve_font_identity(Path(font_path).resolve()).to_dict()
+
+
+def _record_rendered_font_run(
+    font: SafeTextPathFont,
+    text: str,
+    font_paths: list[str],
+) -> None:
+    if len(font_paths) != len(text):
+        raise ValueError("rendered font run path cardinality mismatch")
+    spans: list[dict[str, Any]] = []
+    start = 0
+    for index in range(1, len(text) + 1):
+        if index < len(text) and font_paths[index] == font_paths[start]:
+            continue
+        path = str(Path(font_paths[start]).resolve())
+        spans.append(
+            {
+                "text_start": start,
+                "text_end": index,
+                "font_identity": _resolved_font_identity_payload(path),
+                "font_path": path,
+                "fallback": path != str(font.font_path.resolve()),
+            }
+        )
+        start = index
+    payload = {
+        "text": text,
+        "primary_identity": _resolved_font_identity_payload(
+            str(font.font_path.resolve())
+        ),
+        "spans": spans,
+    }
+    payload["observation_sha256"] = _canonical_runtime_sha256(payload)
+    font._font_run_observation_cache[text] = payload
+
+
 def _render_text_with_fallback(font: SafeTextPathFont, text: str) -> np.ndarray:
     """Renderiza texto com fallback automÃ¡tico para caracteres sem glyph na fonte principal.
 
@@ -843,11 +1243,13 @@ def _render_text_with_fallback(font: SafeTextPathFont, text: str) -> np.ndarray:
         ft2.set_size(font.size, 72)
         ft2.set_text(text, 0.0)
         ft2.draw_glyphs_to_bitmap()
+        _record_rendered_font_run(font, text, [font_path] * len(text))
         return ft2.get_image()
 
     # Renderiza caractere a caractere, usando fallback quando necessÃ¡rio
     fallback_cache: dict[str, str | None] = {}
     char_bitmaps: list[tuple[np.ndarray, int]] = []  # (bitmap, y_offset)
+    used_paths: list[str] = []
 
     for ch in text:
         if ch == " ":
@@ -865,6 +1267,7 @@ def _render_text_with_fallback(font: SafeTextPathFont, text: str) -> np.ndarray:
             space_w = max(1, space_bitmap.shape[1] - single_bitmap.shape[1])
             space_img = np.zeros((max(1, int(font.size)), space_w), dtype=np.uint8)
             char_bitmaps.append((space_img, 0))
+            used_paths.append(font_path)
             continue
 
         # Determinar qual fonte usar
@@ -884,11 +1287,13 @@ def _render_text_with_fallback(font: SafeTextPathFont, text: str) -> np.ndarray:
         ft2.set_text(ch, 0.0)
         ft2.draw_glyphs_to_bitmap()
         bmp = ft2.get_image()
+        used_paths.append(use_path)
         if bmp.size == 0:
             continue
         char_bitmaps.append((bmp, 0))
 
     if not char_bitmaps:
+        _record_rendered_font_run(font, text, used_paths)
         return np.zeros((1, 1), dtype=np.uint8)
 
     # Combinar todos os bitmaps lado a lado
@@ -904,6 +1309,7 @@ def _render_text_with_fallback(font: SafeTextPathFont, text: str) -> np.ndarray:
         )
         x_cursor += w
 
+    _record_rendered_font_run(font, text, used_paths)
     return combined
 
 
@@ -1002,6 +1408,447 @@ def _render_safe_text_layer(
         _blend_mask_into_image(image_np, mask, lx - max(0, outline_px), ly - max(0, outline_px), fill_color)
 
 
+def _resolved_owner_style_intent(text_data: Mapping[str, Any]) -> OwnerStyleResolvedIntent | None:
+    raw = text_data.get("style_resolved_intent_v1")
+    if not isinstance(raw, Mapping):
+        return None
+    required = {
+        "owner_id", "page_id", "visual_profile_sha256", "decision_sha256",
+        "group_resolution_sha256", "approved_attributes",
+        "approved_abstentions", "attribute_provenance", "intent_sha256",
+    }
+    if not required <= set(raw):
+        raise ValueError("owner Style V2 resolved intent is incomplete")
+    rebuilt = build_resolved_style_intent(
+        owner_id=str(raw["owner_id"]),
+        page_id=str(raw["page_id"]),
+        visual_profile_sha256=str(raw["visual_profile_sha256"]),
+        decision_sha256=str(raw["decision_sha256"]),
+        group_resolution_sha256=str(raw["group_resolution_sha256"]),
+        approved=dict(raw.get("approved_attributes") or {}),
+        approved_abstentions=dict(raw.get("approved_abstentions") or {}),
+        attribute_provenance=dict(raw.get("attribute_provenance") or {}),
+    )
+    if rebuilt.intent_sha256 != str(raw.get("intent_sha256") or ""):
+        raise ValueError("owner Style V2 resolved intent hash mismatch")
+    return rebuilt
+
+
+def _build_linear_rendered_glyph_run(
+    lines: list[str],
+    positions: list[tuple[int, int]],
+    font: SafeTextPathFont,
+    *,
+    tracking_xh: float = 0.0,
+    alignment: str = "center",
+) -> RenderedGlyphRun | None:
+    glyphs: list[RenderedGlyphPose] = []
+    nominal_advances: list[float] = []
+    ft2 = _get_ft2_font(str(font.font_path))
+    tracking_px = float(tracking_xh) * max(1.0, float(font.size) * 0.70)
+    for line_index, (line, position) in enumerate(zip(lines, positions, strict=True)):
+        extra_width = max(0, len(line) - 1) * tracking_px
+        cursor_x = float(position[0])
+        if alignment == "center":
+            cursor_x -= extra_width / 2.0
+        elif alignment == "right":
+            cursor_x -= extra_width
+        for character in line:
+            advance = float(max(1, measure_text_width(font, character, font.size)))
+            bbox = font.getbbox(character)
+            if glyphs:
+                nominal_advances.append(
+                    glyphs[-1].advance_px
+                    if glyphs[-1].line_index == line_index
+                    else cursor_x - glyphs[-1].origin_x
+                )
+            glyphs.append(
+                RenderedGlyphPose(
+                    codepoint=ord(character),
+                    glyph_id=int(ft2.get_char_index(ord(character))),
+                    origin_x=cursor_x,
+                    origin_y=float(position[1]),
+                    advance_px=advance,
+                    bbox=(
+                        int(round(cursor_x + bbox[0])),
+                        int(round(position[1] + bbox[1])),
+                        int(round(cursor_x + bbox[2])),
+                        int(round(position[1] + bbox[3])),
+                    ),
+                    angle_deg=0.0,
+                    line_index=line_index,
+                )
+            )
+            cursor_x += advance + tracking_px
+    if not glyphs:
+        return None
+    identity = resolve_font_identity(font.font_path)
+    return RenderedGlyphRun.build(
+        text="\n".join(lines),
+        font_spans=((0, len(glyphs), identity.file_sha256),),
+        glyphs=tuple(glyphs),
+        rendered_x_height_px=max(1.0, float(font.size) * 0.70),
+        nominal_advances=tuple(nominal_advances),
+    )
+
+
+def _seal_owner_materialization_plan(
+    text_data: dict[str, Any],
+    layout_plan: Mapping[str, Any],
+    font: SafeTextPathFont,
+    lines: list[str],
+    positions: list[tuple[int, int]],
+) -> None:
+    intent = _resolved_owner_style_intent(text_data)
+    if intent is None:
+        return
+    profile = validate_owner_visual_profile(
+        text_data.get("visual_profile_v2") or {},
+        expected_owner_id=str(text_data.get("owner_id") or ""),
+        expected_sha256=str(text_data.get("visual_profile_sha256") or ""),
+    )
+    if (
+        intent.visual_profile_sha256 != profile["visual_profile_sha256"]
+        or intent.page_id != str(text_data.get("page_id") or "")
+    ):
+        raise ValueError("owner Style V2 intent owner/page/profile binding mismatch")
+    layout_contract = text_data.get("render_layout_contract")
+    if not isinstance(layout_contract, Mapping):
+        raise ValueError("owner Style V2 requires a final render layout contract")
+    layout_sha256 = _canonical_runtime_sha256(layout_contract)
+    x_height = max(1.0, float(font.size) * 0.70)
+    identity = resolve_font_identity(font.font_path)
+    intent_payload = intent.to_dict()
+    approved = dict(intent_payload["approved_attributes"])
+    abstentions = dict(intent_payload["approved_abstentions"])
+    targets: dict[str, Any] = {}
+    kinds: dict[str, str] = {}
+    reasons: dict[str, str] = {}
+    final_font_size = int(text_data.get("font_size_final") or font.size)
+    def _effect_width_px(value: Mapping[str, Any], layout_key: str) -> int:
+        explicit = int(layout_plan.get(layout_key) or 0)
+        if explicit > 0:
+            return explicit
+        source_px = float(value.get("width_px") or 0.0)
+        if source_px > 0:
+            return max(1, int(round(source_px)))
+        source_xh = float(value.get("width_xh") or 0.0)
+        return max(0, int(round(source_xh * x_height)))
+
+    for name, value in approved.items():
+        if name == "fill" and "gradient" in approved:
+            kinds[name] = "superseded"
+            continue
+        if name == "stroke" and "multistroke" in approved:
+            kinds[name] = "superseded"
+            continue
+        if name == "font_name":
+            targets[name] = identity.to_dict()
+        elif name == "font_weight":
+            targets[name] = identity.weight_class
+        elif name == "font_width":
+            targets[name] = identity.width_class
+        elif name == "font_size_px":
+            requested = float(value)
+            ratio = final_font_size / requested if requested > 0 else 0.0
+            if not 0.70 <= ratio <= 1.10:
+                kinds[name] = "review_required"
+                reasons[name] = "font_size_adjustment_outside_policy"
+                continue
+            targets[name] = final_font_size
+            kinds[name] = "exact" if final_font_size == int(round(requested)) else "policy_adjusted"
+            reasons[name] = "final_fit_within_policy" if kinds[name] == "policy_adjusted" else ""
+            continue
+        elif name == "alignment":
+            targets[name] = str(layout_plan.get("alignment") or value)
+        elif name == "container":
+            kinds[name] = "review_required"
+            reasons[name] = "owner_render_geometry_not_bound"
+            continue
+        elif name == "fill":
+            targets[name] = str(layout_plan.get("text_color") or value)
+        elif name == "stroke" and isinstance(value, Mapping):
+            targets[name] = {
+                "color": str(layout_plan.get("outline_color") or value.get("color") or ""),
+                "width_px": _effect_width_px(value, "outline_px"),
+            }
+        elif name == "glow" and isinstance(value, Mapping):
+            targets[name] = {
+                "color": str(layout_plan.get("glow_cor") or value.get("color") or ""),
+                "width_px": _effect_width_px(value, "glow_px"),
+            }
+        elif name == "shadow" and isinstance(value, Mapping):
+            executed_offset = list(
+                layout_plan.get("sombra_offset") or value.get("offset") or [2, 2]
+            )[:2]
+            targets[name] = {
+                "color": str(layout_plan.get("sombra_cor") or value.get("color") or ""),
+                "offset": [int(round(float(item))) for item in executed_offset],
+            }
+        elif name == "gradient":
+            targets[name] = copy.deepcopy(
+                canonicalize_linear_gradient(
+                    layout_plan.get("cor_gradiente") or value
+                )
+                or value
+            )
+        elif name == "rotation_deg":
+            targets[name] = float(layout_plan.get("rotation_deg") or value or 0.0)
+        else:
+            targets[name] = copy.deepcopy(value)
+        kinds[name] = "exact"
+    for name, reason in abstentions.items():
+        kinds[name] = "abstained"
+        reasons[name] = str(reason)
+    plan = build_materialization_plan(
+        intent=intent,
+        render_layout_contract_sha256=layout_sha256,
+        targets=targets,
+        resolution_kinds=kinds,
+        resolution_reasons=reasons,
+        rendered_x_height_px=x_height,
+    )
+    # Seal the expected contract before any glyph mask or paint operation.
+    text_data["_sealed_materialization_plan_v1"] = plan.to_dict()
+    run = _build_linear_rendered_glyph_run(
+        lines,
+        positions,
+        font,
+        tracking_xh=float(approved.get("tracking_xh") or 0.0),
+        alignment=str(layout_plan.get("alignment") or "center"),
+    )
+    if run is not None:
+        text_data["_rendered_glyph_run"] = run.to_dict()
+    font_rows: dict[str, dict[str, Any]] = {}
+    identity_payload = identity.to_dict()
+    rendered_font_runs = [
+        copy.deepcopy(font._font_run_observation_cache[line])
+        for line in lines
+        if line in font._font_run_observation_cache
+    ]
+    evidence = {
+        "resolved_font": identity_payload,
+        "font_path": str(font.font_path.resolve()),
+        "rendered_font_runs": rendered_font_runs,
+    }
+    evidence_sha256 = _canonical_runtime_sha256(evidence)
+    if "font_name" in plan.attribute_plans:
+        font_rows["font_name"] = {
+            "value": identity_payload,
+            "evidence_kind": "resolved_font_file",
+            "evidence_sha256": evidence_sha256,
+        }
+    if "font_weight" in plan.attribute_plans:
+        font_rows["font_weight"] = {
+            "value": identity.weight_class,
+            "evidence_kind": "opentype_os2",
+            "evidence_sha256": evidence_sha256,
+        }
+    if "font_width" in plan.attribute_plans:
+        font_rows["font_width"] = {
+            "value": identity.width_class,
+            "evidence_kind": "opentype_os2",
+            "evidence_sha256": evidence_sha256,
+        }
+    text_data["_style_v2_font_observation"] = font_rows
+
+
+def _render_v2_owner_core_mask(
+    shape: tuple[int, int],
+    lines: list[str],
+    font: SafeTextPathFont,
+    positions: list[tuple[int, int]],
+    *,
+    tracking_xh: float,
+    alignment: str,
+) -> np.ndarray:
+    core = np.zeros(shape, dtype=np.uint8)
+    tracking_px = float(tracking_xh) * max(1.0, float(font.size) * 0.70)
+    if abs(tracking_px) <= 1e-6:
+        core_rgb = np.zeros((*shape, 3), dtype=np.uint8)
+        _render_safe_text_layer(
+            core_rgb,
+            lines,
+            font,
+            positions,
+            fill_color="#FFFFFF",
+        )
+        return np.max(core_rgb, axis=2).astype(np.uint8)
+    for line, (origin_x, origin_y) in zip(lines, positions, strict=True):
+        extra_width = max(0, len(line) - 1) * tracking_px
+        cursor_x = float(origin_x)
+        if alignment == "center":
+            cursor_x -= extra_width / 2.0
+        elif alignment == "right":
+            cursor_x -= extra_width
+        for character in line:
+            advance = float(max(1, measure_text_width(font, character, font.size)))
+            if character.strip():
+                mask = _build_textpath_mask(font, character, padding=0)
+                x1 = int(round(cursor_x))
+                y1 = int(round(origin_y))
+                tx1, ty1 = max(0, x1), max(0, y1)
+                tx2 = min(shape[1], x1 + mask.shape[1])
+                ty2 = min(shape[0], y1 + mask.shape[0])
+                if tx2 > tx1 and ty2 > ty1:
+                    mx1, my1 = tx1 - x1, ty1 - y1
+                    core[ty1:ty2, tx1:tx2] = np.maximum(
+                        core[ty1:ty2, tx1:tx2],
+                        mask[my1:my1 + ty2 - ty1, mx1:mx1 + tx2 - tx1],
+                    )
+            cursor_x += advance + tracking_px
+    return core
+
+
+def _render_v2_owner_text_layer(
+    image_np: np.ndarray,
+    text_data: dict,
+    plan: dict,
+    lines: list[str],
+    font: SafeTextPathFont,
+    positions: list[tuple[int, int]],
+    *,
+    core_override: np.ndarray | None = None,
+    glyph_run_override: RenderedGlyphRun | None = None,
+) -> GlyphRasterResult | None:
+    """Compose verified owner typography through the shared text/SFX rasterizer."""
+
+    profile = text_data.get("visual_profile_v2")
+    if not isinstance(profile, dict):
+        return None
+    decision = profile.get("style_application_decision_v2")
+    if isinstance(decision, Mapping):
+        decision_status = str(decision.get("status") or "").strip().lower()
+        decision_applied = decision.get("applied_attributes")
+        if decision_status != "applied" or not isinstance(decision_applied, Mapping):
+            decision_applied = {}
+        if not decision_applied:
+            text_data["_style_v2_base_raster_only_reason"] = (
+                f"style_decision_{decision_status or 'missing'}"
+            )
+    _seal_owner_materialization_plan(text_data, plan, font, lines, positions)
+    applied_style = profile.get("applied_style")
+    applied_style = applied_style if isinstance(applied_style, dict) else {}
+    core = (
+        np.clip(np.asarray(core_override), 0, 255).astype(np.uint8)
+        if core_override is not None
+        else _render_v2_owner_core_mask(
+            image_np.shape[:2],
+            lines,
+            font,
+            positions,
+            tracking_xh=float(applied_style.get("tracking_xh") or 0.0),
+            alignment=str(plan.get("alignment") or "center"),
+        )
+    )
+    if glyph_run_override is not None:
+        text_data["_rendered_glyph_run"] = glyph_run_override.to_dict()
+    if not np.any(core):
+        return None
+    safe = np.zeros(core.shape, dtype=np.uint8)
+    polygon = (
+        text_data.get("paint_safe_polygon_page")
+        or plan.get("paint_safe_polygon_page")
+        or text_data.get("render_safe_polygon_page")
+        or plan.get("render_safe_polygon_page")
+    )
+    if isinstance(polygon, (list, tuple)) and len(polygon) >= 3:
+        try:
+            points = np.asarray(
+                [[int(round(float(point[0]))), int(round(float(point[1])))] for point in polygon],
+                dtype=np.int32,
+            )
+            cv2.fillPoly(safe, [points], 255)
+        except (TypeError, ValueError, IndexError):
+            safe[:, :] = 0
+    if not np.any(safe):
+        bbox = _layout_bbox(plan.get("safe_text_box") or plan.get("target_bbox"))
+        if bbox is None:
+            return None
+        x1, y1, x2, y2 = bbox
+        safe[max(0, y1) : min(safe.shape[0], y2), max(0, x1) : min(safe.shape[1], x2)] = 255
+
+    raster_style: dict[str, Any] = {
+        "fill": plan.get("text_color") or applied_style.get("cor") or "#000000",
+        "slant_tangent": float(applied_style.get("slant_tangent") or 0.0),
+        "width_scale": float(applied_style.get("width_scale") or applied_style.get("scale_x") or 1.0),
+        "scale_y": float(applied_style.get("scale_y") or 1.0),
+        "rotation_deg": float(plan.get("rotation_deg") or applied_style.get("rotacao") or 0.0),
+    }
+    outline_color = str(plan.get("outline_color") or "")
+    outline_px = int(plan.get("outline_px") or 0)
+    if outline_color or outline_px > 0:
+        raster_style["stroke"] = {
+            "color": outline_color or raster_style["fill"],
+            "width_px": outline_px,
+        }
+    if isinstance(applied_style.get("multistroke"), list):
+        raster_style["multistroke"] = copy.deepcopy(applied_style["multistroke"])
+        raster_style.pop("stroke", None)
+    if bool(plan.get("sombra")) and plan.get("sombra_cor"):
+        raster_style["shadow"] = {
+            "color": plan["sombra_cor"],
+            "offset": list(plan.get("sombra_offset") or [2, 2]),
+        }
+    if bool(plan.get("glow")) and plan.get("glow_cor") and int(plan.get("glow_px") or 0) > 0:
+        raster_style["glow"] = {
+            "color": plan["glow_cor"],
+            "width_px": int(plan["glow_px"]),
+        }
+    gradient = canonicalize_linear_gradient(plan.get("cor_gradiente"))
+    if gradient is not None:
+        raster_style["gradient"] = gradient
+    sealed_plan = text_data.get("_sealed_materialization_plan_v1")
+    if isinstance(sealed_plan, Mapping):
+        materialization = materialization_plan_from_dict(sealed_plan)
+        for name, attribute_plan in materialization.attribute_plans.items():
+            if (
+                attribute_plan.domain == "raster"
+                and attribute_plan.resolution_kind in {"exact", "policy_adjusted", "derived"}
+            ):
+                raster_style[name] = copy.deepcopy(
+                    attribute_plan.to_dict()["target_value"]
+                )
+    result = rasterize_v2_glyph_layers(
+        core,
+        safe,
+        raster_style,
+        source_x_height_px=max(1.0, float(font.size) * 0.70),
+    )
+    if result.status == "review_required":
+        text_data["fit_status"] = (
+            "style_core_outside_safe"
+            if int(result.metrics.get("core_pixels_outside_safe") or 0) > 0
+            else "style_materialization_unavailable"
+        )
+        text_data["route_action"] = "review_required"
+        _merge_qa_flags(
+            text_data,
+            [
+                "style_core_outside_safe"
+                if int(result.metrics.get("core_pixels_outside_safe") or 0) > 0
+                else "style_materialization_unavailable"
+            ],
+        )
+    alpha = result.rgba[:, :, 3:4].astype(np.float32) / 255.0
+    image_np[:] = np.clip(
+        result.rgba[:, :, :3].astype(np.float32) * alpha
+        + image_np.astype(np.float32) * (1.0 - alpha),
+        0,
+        255,
+    ).astype(np.uint8)
+    points = cv2.findNonZero(result.rgba[:, :, 3])
+    if points is not None:
+        x, y, width, height = cv2.boundingRect(points)
+        text_data["render_bbox"] = [x, y, x + width, y + height]
+    if result.abstained_attributes:
+        _merge_qa_flags(
+            text_data,
+            [f"style_{name}_abstained" for name in result.abstained_attributes],
+        )
+    return result
+
+
 def _should_render_safe_arc_text(plan: dict, lines: list[str]) -> bool:
     if not bool(plan.get("curva")):
         return False
@@ -1016,6 +1863,83 @@ def _should_render_safe_arc_text(plan: dict, lines: list[str]) -> bool:
     if abs(_normalize_rotation_deg(plan.get("rotation_deg", 0))) > 0.01:
         return False
     return True
+
+
+def _build_safe_arc_core_and_run(
+    shape: tuple[int, int],
+    line: str,
+    font: SafeTextPathFont,
+    origin: tuple[int, int],
+    plan: Mapping[str, Any],
+    *,
+    tracking_xh: float = 0.0,
+) -> tuple[np.ndarray, RenderedGlyphRun]:
+    glyph_text = list(str(line or ""))
+    if not glyph_text:
+        raise ValueError("arc glyph run requires text")
+    masks = [_build_textpath_mask(font, glyph, padding=0) for glyph in glyph_text]
+    widths = [max(1, measure_text_width(font, glyph, font.size)) for glyph in glyph_text]
+    max_h = max((int(mask.shape[0]) for mask in masks), default=1)
+    intensity = max(0.0, min(1.0, abs(float(plan.get("curva_intensidade") or 0.0))))
+    direction = str(plan.get("curva_direcao") or "arc_up")
+    sign = -1.0 if direction == "arc_up" else 1.0
+    x_height = max(1.0, float(font.size) * 0.70)
+    tracking_px = float(tracking_xh) * x_height
+    total_w = max(1.0, float(sum(widths) + max(0, len(widths) - 1) * tracking_px))
+    curve_px = max(4.0, intensity * max_h * 2.2)
+    x0, y0 = [float(value) for value in origin]
+    cursor = 0.0
+    core = np.zeros(shape, dtype=np.uint8)
+    poses: list[RenderedGlyphPose] = []
+    nominal_advances: list[float] = []
+    ft2 = _get_ft2_font(str(font.font_path))
+    for index, (glyph, mask, width) in enumerate(zip(glyph_text, masks, widths, strict=True)):
+        center = cursor + width / 2.0
+        t = ((center / total_w) * 2.0) - 1.0
+        y_offset = sign * curve_px * (1.0 - t * t)
+        slope = sign * curve_px * (-2.0 * t) * (2.0 / total_w)
+        angle = float(np.degrees(np.arctan(slope)))
+        render_mask = mask
+        if abs(angle) >= 0.5 and mask.shape[0] > 1 and mask.shape[1] > 1:
+            center_pt = (mask.shape[1] / 2.0, mask.shape[0] / 2.0)
+            matrix = cv2.getRotationMatrix2D(center_pt, angle, 1.0)
+            cos_a, sin_a = abs(matrix[0, 0]), abs(matrix[0, 1])
+            new_w = max(1, int(mask.shape[0] * sin_a + mask.shape[1] * cos_a))
+            new_h = max(1, int(mask.shape[0] * cos_a + mask.shape[1] * sin_a))
+            matrix[0, 2] += new_w / 2.0 - center_pt[0]
+            matrix[1, 2] += new_h / 2.0 - center_pt[1]
+            render_mask = cv2.warpAffine(mask, matrix, (new_w, new_h), flags=cv2.INTER_LINEAR)
+        gx, gy = int(round(x0 + cursor)), int(round(y0 + y_offset))
+        if glyph.strip():
+            tx1, ty1 = max(0, gx), max(0, gy)
+            tx2, ty2 = min(shape[1], gx + render_mask.shape[1]), min(shape[0], gy + render_mask.shape[0])
+            if tx2 > tx1 and ty2 > ty1:
+                mx1, my1 = tx1 - gx, ty1 - gy
+                core[ty1:ty2, tx1:tx2] = np.maximum(
+                    core[ty1:ty2, tx1:tx2],
+                    render_mask[my1:my1 + ty2 - ty1, mx1:mx1 + tx2 - tx1],
+                )
+        bbox = (gx, gy, gx + int(render_mask.shape[1]), gy + int(render_mask.shape[0]))
+        poses.append(
+            RenderedGlyphPose(
+                ord(glyph), int(ft2.get_char_index(ord(glyph))),
+                float(gx), float(gy), float(width), bbox, angle, 0,
+            )
+        )
+        if index > 0:
+            nominal_advances.append(float(widths[index - 1]))
+        cursor += width + tracking_px
+    identity = resolve_font_identity(font.font_path)
+    run = RenderedGlyphRun.build(
+        text=line,
+        font_spans=((0, len(poses), identity.file_sha256),),
+        glyphs=tuple(poses),
+        rendered_x_height_px=x_height,
+        nominal_advances=tuple(nominal_advances),
+        curve_direction=direction,
+        curve_amount=intensity,
+    )
+    return np.where(core > 0, 255, 0).astype(np.uint8), run
 
 
 def _render_safe_arc_text_layer(
@@ -1555,26 +2479,76 @@ def _apply_safe_glow(
     image_np[roi_y1:roi_y2, roi_x1:roi_x2] = np.clip(blended, 0, 255).astype(np.uint8)
 
 
+def _positioned_mask_union(
+    canvas_shape: tuple[int, int],
+    positioned_masks: list[tuple[np.ndarray, int, int]],
+) -> tuple[np.ndarray, int, int] | None:
+    """Combine positioned glyph masks into one clipped block-level mask."""
+
+    canvas_height, canvas_width = [int(value) for value in canvas_shape[:2]]
+    valid = [
+        (np.asarray(mask, dtype=np.uint8), int(origin_x), int(origin_y))
+        for mask, origin_x, origin_y in positioned_masks
+        if np.asarray(mask).ndim == 2 and np.asarray(mask).size > 0
+    ]
+    if not valid:
+        return None
+    x1 = max(0, min(origin_x for _mask, origin_x, _origin_y in valid))
+    y1 = max(0, min(origin_y for _mask, _origin_x, origin_y in valid))
+    x2 = min(
+        canvas_width,
+        max(origin_x + mask.shape[1] for mask, origin_x, _origin_y in valid),
+    )
+    y2 = min(
+        canvas_height,
+        max(origin_y + mask.shape[0] for mask, _origin_x, origin_y in valid),
+    )
+    if x2 <= x1 or y2 <= y1:
+        return None
+    union = np.zeros((y2 - y1, x2 - x1), dtype=np.uint8)
+    for mask, origin_x, origin_y in valid:
+        clip_x1 = max(x1, origin_x)
+        clip_y1 = max(y1, origin_y)
+        clip_x2 = min(x2, origin_x + mask.shape[1])
+        clip_y2 = min(y2, origin_y + mask.shape[0])
+        if clip_x2 <= clip_x1 or clip_y2 <= clip_y1:
+            continue
+        source_x1 = clip_x1 - origin_x
+        source_y1 = clip_y1 - origin_y
+        source_x2 = source_x1 + (clip_x2 - clip_x1)
+        source_y2 = source_y1 + (clip_y2 - clip_y1)
+        target_x1 = clip_x1 - x1
+        target_y1 = clip_y1 - y1
+        target_x2 = target_x1 + (clip_x2 - clip_x1)
+        target_y2 = target_y1 + (clip_y2 - clip_y1)
+        union[target_y1:target_y2, target_x1:target_x2] = np.maximum(
+            union[target_y1:target_y2, target_x1:target_x2],
+            mask[source_y1:source_y2, source_x1:source_x2],
+        )
+    if not np.any(union):
+        return None
+    return union, x1, y1
+
+
 def _apply_safe_gradient_text(
     image_np: np.ndarray,
     lines: list[str],
     font: SafeTextPathFont,
     positions: list[tuple[int, int]],
-    color_top: str,
-    color_bottom: str,
+    gradient: object,
     outline_color: str,
     outline_px: int,
-    start_y: int,
-    total_height: int,
 ) -> None:
-    ct = np.array(_parse_hex_color(color_top), dtype=np.float32)
-    cb = np.array(_parse_hex_color(color_bottom), dtype=np.float32)
-
+    canonical = canonicalize_linear_gradient(gradient)
+    if canonical is None:
+        raise ValueError("invalid text gradient")
+    positioned_masks: list[tuple[np.ndarray, int, int]] = []
     for line, (lx, ly) in zip(lines, positions):
         pad = max(0, outline_px)
         mask = _build_textpath_mask(font, line, padding=pad)
         origin_x = lx - pad
         origin_y = ly - pad
+        positioned_masks.append((mask, origin_x, origin_y))
 
         if outline_color and outline_px > 0:
             kernel = cv2.getStructuringElement(
@@ -1584,14 +2558,18 @@ def _apply_safe_gradient_text(
             outline_mask = cv2.dilate(mask, kernel, iterations=1)
             _blend_mask_into_image(image_np, outline_mask, origin_x, origin_y, outline_color)
 
-        gradient_patch = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
-        for y in range(mask.shape[0]):
-            global_y = (origin_y + y) - start_y
-            t = float(np.clip(global_y / max(1, total_height), 0.0, 1.0))
-            color = (ct * (1.0 - t) + cb * t).clip(0, 255).astype(np.uint8)
-            gradient_patch[y, :] = color
-
-        _blend_rgb_patch_with_mask(image_np, gradient_patch, mask, origin_x, origin_y)
+    combined = _positioned_mask_union(image_np.shape[:2], positioned_masks)
+    if combined is None:
+        return
+    union_mask, origin_x, origin_y = combined
+    gradient_patch = render_linear_gradient_rgb(union_mask, canonical)
+    _blend_rgb_patch_with_mask(
+        image_np,
+        gradient_patch,
+        union_mask,
+        origin_x,
+        origin_y,
+    )
 
 
 def set_project_font_assets(font_assets: dict | None) -> None:
@@ -1813,6 +2791,8 @@ def _bbox_containment_ratio(inner: list[int] | tuple[int, ...], outer: list[int]
 
 
 def _find_nested_same_balloon_duplicate_index(candidate: dict, accepted: list[dict]) -> int | None:
+    if str(candidate.get("layout_category") or "").strip().lower() == "item_card" or candidate.get("card_panel_id"):
+        return None
     candidate_balloon = _render_identity_bbox(candidate)
     candidate_bbox = candidate.get("text_pixel_bbox") or candidate.get("bbox") or []
     candidate_text = _normalize_duplicate_compare_text(candidate.get("translated", ""))
@@ -1820,6 +2800,8 @@ def _find_nested_same_balloon_duplicate_index(candidate: dict, accepted: list[di
         return None
 
     for index, previous in enumerate(accepted):
+        if str(previous.get("layout_category") or "").strip().lower() == "item_card" or previous.get("card_panel_id"):
+            continue
         previous_balloon = _render_identity_bbox(previous)
         if len(candidate_balloon) != 4 or len(previous_balloon) != 4:
             continue
@@ -2141,6 +3123,13 @@ def _has_degenerate_fragment_render_area(text: dict) -> bool:
 
 
 def _should_merge_adjacent_same_balloon_fragment(a: dict, b: dict) -> bool:
+    if (
+        str(a.get("layout_category") or "").strip().lower() == "item_card"
+        or str(b.get("layout_category") or "").strip().lower() == "item_card"
+        or a.get("card_panel_id")
+        or b.get("card_panel_id")
+    ):
+        return False
     if int(a.get("layout_group_size", 1) or 1) > 1 or int(b.get("layout_group_size", 1) or 1) > 1:
         return False
     a_source = str(a.get("bubble_mask_source") or a.get("balloon_mask_source") or "").strip().lower()
@@ -4887,6 +5876,13 @@ def _drop_low_quality_duplicate_balloon_blocks(blocks: list[dict]) -> list[dict]
             bbox_j = bboxes[j]
             if not keep[j] or bbox_j is None:
                 continue
+            if (
+                str(blocks[i].get("layout_category") or "").strip().lower() == "item_card"
+                or str(blocks[j].get("layout_category") or "").strip().lower() == "item_card"
+                or blocks[i].get("card_panel_id")
+                or blocks[j].get("card_panel_id")
+            ):
+                continue
             inter = _bbox_intersection_area(bbox_i, bbox_j)
             if inter <= 0:
                 continue
@@ -5926,6 +6922,113 @@ def _has_unsafe_broad_derived_art_mask(text: dict) -> bool:
     return target_area >= max(anchor_area * 4.0, anchor_area + 18000)
 
 
+_UNSAFE_AUTOMATIC_RENDER_FLAGS = {
+    "mask_outside_balloon_critical",
+    "missing_real_bubble_mask",
+    "weak_text_residual_after_inpaint",
+}
+
+
+def _has_trustworthy_colored_visual_card_contract(text: dict) -> bool:
+    """Allow rendering only when a colored card has a real cleanup contract.
+
+    ``mask_outside_balloon_critical`` is meaningful for speech balloons, but a
+    visual item card intentionally uses a panel mask instead of a balloon.  The
+    exception stays conservative: it requires the text-only contract, a panel
+    mask source, non-empty cleanup-mask evidence, and a chromatic panel color.
+    """
+    flags = _qa_flags_set(text)
+    if flags.intersection(
+        {"weak_text_residual_after_inpaint", "real_inpaint_skipped_unsafe_mask"}
+    ):
+        return False
+    if "visual_text_only_inpaint_contract" not in flags:
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    if source not in {"image_dark_panel_mask", "derived_card_panel_mask"}:
+        return False
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    contract = metrics.get("inpaint_mask_contract") if isinstance(metrics, dict) else None
+    contract_pixels = 0
+    if isinstance(contract, dict):
+        for key in ("expanded_pixels", "source_pixels", "mask_pixels", "pixels"):
+            try:
+                contract_pixels = max(contract_pixels, int(contract.get(key) or 0))
+            except (TypeError, ValueError):
+                pass
+    for key in (
+        "dark_panel_visual_contract_fill_mask",
+        "dark_text_contract_fill_mask",
+        "koharu_missing_bubble_visual_contract_fill_mask",
+    ):
+        evidence = metrics.get(key) if isinstance(metrics, dict) else None
+        if not isinstance(evidence, dict):
+            continue
+        for pixel_key in ("mask_pixels", "contract_mask_pixels", "pixels"):
+            try:
+                contract_pixels = max(contract_pixels, int(evidence.get(pixel_key) or 0))
+            except (TypeError, ValueError):
+                pass
+    if contract_pixels <= 0:
+        return False
+
+    color_candidates: list[object] = [text.get("background_rgb")]
+    effect_colors = text.get("dark_panel_effect_colors")
+    if isinstance(effect_colors, dict):
+        color_candidates.append(effect_colors.get("panel_fill_rgb"))
+    if isinstance(metrics, dict):
+        for key in ("derived_card_panel_mask", "image_dark_panel_mask"):
+            evidence = metrics.get(key)
+            if isinstance(evidence, dict):
+                color_candidates.extend((evidence.get("panel_fill_rgb"), evidence.get("background_rgb")))
+        sampled = metrics.get("dark_panel_sampled_contract_fill_rgb")
+        if isinstance(sampled, dict):
+            color_candidates.append(sampled.get("rgb"))
+    return any(_rgb_chroma(_coerce_rgb_tuple(candidate)) >= 24.0 for candidate in color_candidates)
+
+
+def _suppress_unsafe_automatic_render(text: dict) -> bool:
+    """Keep uncertain text out of the final image instead of forcing a fallback.
+
+    These flags mean the source was not removed or located reliably.  A
+    typesetter fallback would add Portuguese text on top of the uncertain
+    region, so keep the item for manual review and do not create a block.
+    """
+    if _should_anchor_ui_form_text(text):
+        return False
+    content_class = str(text.get("content_class") or text.get("tipo") or "").strip().lower()
+    if content_class == "sfx":
+        return False
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    matched = sorted(flags.intersection(_UNSAFE_AUTOMATIC_RENDER_FLAGS))
+    if not matched:
+        return False
+    if _has_trustworthy_colored_visual_card_contract(text):
+        return False
+    profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    text_over_art = metrics.get("translucent_text_over_art_inpaint") if isinstance(metrics, dict) else None
+    reconstructed_pixels = int(text_over_art.get("pixels") or 0) if isinstance(text_over_art, dict) else 0
+    if (
+        profile == "translucent_balloon"
+        and reconstructed_pixels > 0
+        and "weak_text_residual_after_inpaint" not in matched
+    ):
+        return False
+    text["visible"] = False
+    text["needs_review"] = True
+    text["skip_processing"] = True
+    text["preserve_original"] = True
+    _merge_qa_flags(text, ["unsafe_automatic_render_suppressed"])
+    metrics = text.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["unsafe_automatic_render"] = {"flags": matched, "decision": "suppressed"}
+    apply_route_action(text, route_action="review_required", route_reason="unsafe_automatic_render")
+    text["skip_processing"] = True
+    text["preserve_original"] = True
+    return True
+
+
 def _may_need_unsafe_render_rollback(text: dict) -> bool:
     if _should_anchor_ui_form_text(text):
         return False
@@ -6233,8 +7336,447 @@ def _strip_mixed_sfx_prefix_for_detached_white_bubble(text: dict) -> dict:
     return cleaned_text
 
 
-def build_render_blocks(texts: list[dict]) -> list[dict]:
+def _is_visual_item_card_row(text: dict) -> bool:
+    if not isinstance(text, dict):
+        return False
+    flags = _qa_flags_set(text)
+    if str(text.get("layout_category") or "").strip().lower() == "item_card":
+        return True
+    if bool(text.get("card_panel_text_context")) or bool(str(text.get("card_panel_id") or "").strip()):
+        return True
+    if "visual_card_ocr_recall" in flags:
+        return True
+    if "visual_text_only_inpaint_contract" not in flags:
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("balloon_mask_source") or "").strip().lower()
+    if source not in {"image_dark_panel_mask", "derived_card_panel_mask"}:
+        return False
+    # Reaching this point already requires the explicit visual-text-only
+    # contract.  A current image/card panel mask is sufficient geometry for
+    # joint layout even when the optional sampled background color was not
+    # copied into the renderer payload.
+    return True
+
+
+def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
+    """Solve item-card children jointly inside their shared panel.
+
+    Card masks describe a broad visual panel, not an independent balloon for
+    each OCR row.  Using those masks as layout capacity lets short rows drift
+    vertically into their neighbours.  Build narrow, non-overlapping row slots
+    from the original OCR geometry while retaining extra horizontal room for
+    PT-BR expansion.
+    """
+    candidates: list[tuple[dict, list[int]]] = []
+    for text in texts:
+        if not _is_visual_item_card_row(text):
+            continue
+        anchor = _layout_bbox(text.get("text_pixel_bbox") or text.get("source_bbox") or text.get("bbox"))
+        polygon_anchor = _layout_bbox(_bbox_from_polygons(text.get("line_polygons") or []))
+        flags = _qa_flags_set(text)
+        if anchor is not None and polygon_anchor is not None and "page_space_aux_bbox_scrubbed" in flags:
+            anchor_height = max(1, anchor[3] - anchor[1])
+            polygon_height = max(1, polygon_anchor[3] - polygon_anchor[1])
+            anchor_center_y = (anchor[1] + anchor[3]) / 2.0
+            polygon_center_y = (polygon_anchor[1] + polygon_anchor[3]) / 2.0
+            if abs(anchor_center_y - polygon_center_y) > max(96.0, 3.0 * max(anchor_height, polygon_height)):
+                anchor = polygon_anchor
+                text["text_pixel_bbox"] = list(polygon_anchor)
+                _merge_qa_flags(text, ["visual_card_anchor_recovered_from_line_polygons"])
+        if anchor is not None:
+            candidates.append((text, anchor))
+    if not candidates:
+        return
+
+    groups: list[list[tuple[dict, list[int]]]] = []
+    for item in sorted(candidates, key=lambda value: (value[1][1], value[1][0])):
+        text, anchor = item
+        center_x = (anchor[0] + anchor[2]) / 2.0
+        selected: list[tuple[dict, list[int]]] | None = None
+        for group in reversed(groups):
+            last_anchor = group[-1][1]
+            group_band_id = str(group[-1][0].get("band_id") or "").strip()
+            item_band_id = str(text.get("band_id") or "").strip()
+            if group_band_id and item_band_id and group_band_id != item_band_id:
+                continue
+            group_center_x = float(np.median([(row[1][0] + row[1][2]) / 2.0 for row in group]))
+            if center_x and abs(center_x - group_center_x) <= 180.0 and anchor[1] - last_anchor[3] <= 260:
+                selected = group
+                break
+        if selected is None:
+            selected = []
+            groups.append(selected)
+        selected.append(item)
+
+    for group in groups:
+        ordered = sorted(group, key=lambda value: (value[1][1], value[1][0]))
+        panel_bbox: list[int] | None = None
+        for text, anchor in ordered:
+            row_panel = _layout_bbox(
+                text.get("card_panel_bbox")
+                or text.get("bubble_mask_bbox")
+                or text.get("balloon_bbox")
+            ) or list(anchor)
+            panel_bbox = list(row_panel) if panel_bbox is None else _union_bbox_values(panel_bbox, row_panel)
+        if panel_bbox is None:
+            continue
+        if len(ordered) >= 6:
+            anchor_union = list(ordered[0][1])
+            for _text, anchor in ordered[1:]:
+                anchor_union = _union_bbox_values(anchor_union, anchor)
+            horizontal_margin = 28
+            panel_bbox[0] = max(0, min(int(panel_bbox[0]), int(anchor_union[0]) - horizontal_margin))
+            panel_bbox[2] = max(int(panel_bbox[2]), int(anchor_union[2]) + horizontal_margin)
+        explicit_panel_ids = {
+            str(text.get("card_panel_id") or "").strip()
+            for text, _anchor in ordered
+            if str(text.get("card_panel_id") or "").strip()
+        }
+        first_text = ordered[0][0]
+        runtime_panel_id = (
+            next(iter(explicit_panel_ids))
+            if len(explicit_panel_ids) == 1
+            else f"item_card:{first_text.get('band_id') or first_text.get('trace_id') or first_text.get('id') or id(first_text)}"
+        )
+        role_defaults: list[str]
+        if len(ordered) >= 4:
+            role_defaults = ["title", "note"] + ["body"] * (len(ordered) - 3) + ["footer"]
+        elif len(ordered) == 3:
+            role_defaults = ["title", "body", "footer"]
+        elif len(ordered) == 2:
+            role_defaults = ["title", "body"]
+        else:
+            role_defaults = ["title"]
+        for index, (text, anchor) in enumerate(ordered):
+            sanitized = _clear_connected_balloon_metadata(text)
+            text.clear()
+            text.update(sanitized)
+            ax1, ay1, ax2, ay2 = [int(v) for v in anchor]
+            width = max(1, ax2 - ax1)
+            height = max(1, ay2 - ay1)
+            parent = panel_bbox
+            slot_x1, slot_x2 = parent[0] + 6, parent[2] - 6
+            slot_y1 = parent[1] + 4 if index == 0 else ay1
+            slot_y2 = parent[3] - 4 if index + 1 == len(ordered) else ay2
+            if index > 0:
+                previous = ordered[index - 1][1]
+                boundary = (int(previous[3]) + ay1) // 2
+                slot_y1 = boundary + 2
+            if index + 1 < len(ordered):
+                following = ordered[index + 1][1]
+                boundary = (ay2 + int(following[1])) // 2
+                slot_y2 = boundary - 2
+            if slot_x2 <= slot_x1 + 8 or slot_y2 <= slot_y1 + 6:
+                continue
+            slot = [int(slot_x1), int(slot_y1), int(slot_x2), int(slot_y2)]
+            inset_x = min(5, max(2, (slot_x2 - slot_x1) // 20))
+            inset_y = min(3, max(1, (slot_y2 - slot_y1) // 16))
+            safe = [slot_x1 + inset_x, slot_y1 + inset_y, slot_x2 - inset_x, slot_y2 - inset_y]
+            # The inpaint stage may preserve page-space source-mask aliases
+            # while ``text_pixel_bbox`` has already been mapped to the band.
+            # A mixed pair makes the original-scale contract render thousands
+            # of pixels below the row.  The row slot is authoritative here.
+            for key in (
+                "bbox",
+                "source_bbox",
+                "layout_bbox",
+                "source_text_anchor_bbox",
+                "_source_text_anchor_bbox",
+                "source_text_mask_bbox",
+                "_source_text_mask_bbox",
+            ):
+                text[key] = list(anchor)
+            for key in ("target_bbox", "balloon_bbox", "bubble_mask_bbox", "position_bbox", "capacity_bbox"):
+                text[key] = list(slot)
+            text["bubble_inner_bbox"] = list(safe)
+            text["balloon_inner_bbox"] = list(safe)
+            text["safe_text_box"] = list(safe)
+            text["_debug_safe_text_box"] = list(safe)
+            text["layout_safe_bbox"] = list(safe)
+            text["layout_safe_reason"] = "visual_item_card_row_slot"
+            text["layout_profile"] = "colored_status_panel_row"
+            text["block_profile"] = "colored_status_panel_row"
+            text["layout_category"] = "item_card"
+            text["card_panel_id"] = runtime_panel_id
+            text["card_panel_bbox"] = list(panel_bbox)
+            text["card_panel_role"] = str(text.get("card_panel_role") or role_defaults[index])
+            text["_render_target_source"] = "visual_item_card_row_slot"
+            for stale_key in (
+                "render_bbox",
+                "_debug_render_bbox",
+                "fit_status",
+                "layout_fit_result",
+                "render_layout_contract",
+                "_render_layout_contract_replayed",
+                "_render_layout_contract_band_y_shift",
+            ):
+                text.pop(stale_key, None)
+            _merge_qa_flags(text, ["visual_item_card_row_slot", "safe_text_box_recomputed"])
+
+        group_is_legible = True
+        fit_evidence: list[dict] = []
+        for text, _anchor in ordered:
+            translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+            if not translated:
+                continue
+            plan = plan_text_layout(text)
+            minimum_font_px = _minimum_legible_font_px(text, plan)
+            text["minimum_legible_font_px"] = int(minimum_font_px)
+            fits_at_minimum = _fits_in_box(
+                translated,
+                str(plan.get("font_name") or ""),
+                int(minimum_font_px),
+                int(plan.get("max_width", 0) or 0),
+                int(plan.get("max_height", 0) or 0),
+                float(plan.get("line_spacing_ratio", 0.2) or 0.2),
+            )
+            if not fits_at_minimum:
+                fallback_style = dict(text.get("estilo") or text.get("style") or {})
+                fallback_style["fonte"] = "ComicNeue-Bold.ttf"
+                fallback_style["font_family"] = "ComicNeue-Bold.ttf"
+                fallback_style["tamanho"] = max(int(minimum_font_px), int(fallback_style.get("tamanho", 0) or 0))
+                text["estilo"] = fallback_style
+                text["style"] = dict(fallback_style)
+                plan = plan_text_layout(text)
+                minimum_font_px = _minimum_legible_font_px(text, plan)
+                text["minimum_legible_font_px"] = int(minimum_font_px)
+                fits_at_minimum = _fits_in_box(
+                    translated,
+                    str(plan.get("font_name") or ""),
+                    int(minimum_font_px),
+                    int(plan.get("max_width", 0) or 0),
+                    int(plan.get("max_height", 0) or 0),
+                    float(plan.get("line_spacing_ratio", 0.2) or 0.2),
+                )
+                if fits_at_minimum:
+                    _merge_qa_flags(text, ["visual_card_font_fallback"])
+            fit_evidence.append(
+                {
+                    "id": str(text.get("trace_id") or text.get("id") or ""),
+                    "role": str(text.get("card_panel_role") or "body"),
+                    "minimum_legible_font_px": int(minimum_font_px),
+                    "fits_at_minimum": bool(fits_at_minimum),
+                }
+            )
+            if not fits_at_minimum:
+                group_is_legible = False
+
+        status = "ok" if group_is_legible else "below_minimum_legible"
+        for text, _anchor in ordered:
+            text["card_joint_layout_status"] = status
+            metrics = text.setdefault("qa_metrics", {})
+            if isinstance(metrics, dict):
+                metrics["item_card_joint_layout"] = {
+                    "status": status,
+                    "panel_bbox": list(text.get("card_panel_bbox") or []),
+                    "children": fit_evidence,
+                    "minimum_gap_px": 4,
+                }
+            if not group_is_legible:
+                text["route_action"] = "review_required"
+                text["route_reason"] = "item_card_joint_layout_below_minimum"
+                _merge_qa_flags(text, ["fit_below_minimum_legible", "item_card_joint_layout_failed"])
+
+
+def _owner_identity(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{label} must be a canonical non-empty string")
+    return value
+
+
+def _owner_record_contract(record: dict) -> str:
+    """Stable subset used to reject divergent duplicates for one owner."""
+
+    keys = (
+        "owner_id",
+        "page_id",
+        "coordinate_space",
+        "source_payload",
+        "translated_payload",
+        "translated",
+        "disposition",
+        "state",
+        "route_action",
+        "execution_tile_id",
+        "action_mask_ref",
+        "component_ids",
+        "observation_ids",
+        "selected_observation_ids",
+        "layout_region_ids",
+        "layout_regions",
+        "render_safe_polygon_page",
+        "paint_safe_polygon_page",
+        "safe_text_box",
+        "layout_safe_bbox",
+        "source_font_bounds_px",
+        "container_font_bounds_px",
+        "tipo",
+        "content_class",
+        "layout_category",
+        "layout_profile",
+        "block_profile",
+        "background_rgb",
+        "estilo",
+        "style",
+        "style_evidence",
+        "style_origin",
+        "style_confidence",
+        "style_source",
+        "visual_profile_v2",
+        "visual_profile_sha256",
+        "style_copy_status",
+        "owner_render_geometry",
+        "owner_render_geometry_sha256",
+        "owner_text_execution_authority",
+        "text_execution_authority_sha256",
+    )
+    payload = {key: record.get(key) for key in keys if key in record}
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _assert_owner_record_matches_graph(record: dict, owner: object, page_id: str) -> None:
+    owner_id = _owner_identity(getattr(owner, "owner_id", None), label="owner_id")
+    record_page_id = str(record.get("page_id") or page_id).strip()
+    if record_page_id != page_id:
+        raise ValueError(f"owner {owner_id} text record belongs to another page")
+    if str(record.get("coordinate_space") or "").strip().lower() != "logical_page":
+        raise ValueError(f"owner {owner_id} renderer requires logical_page geometry")
+
+    scalar_fields = (
+        ("source_payload", getattr(owner, "source_payload", "")),
+        ("translated_payload", getattr(owner, "translated_payload", None)),
+        ("translated", getattr(owner, "translated_payload", None)),
+        ("disposition", getattr(owner, "disposition", "")),
+        ("state", getattr(owner, "state", "")),
+        ("route_action", getattr(owner, "route_action", "")),
+        ("execution_tile_id", getattr(owner, "execution_tile_id", None)),
+        ("action_mask_ref", getattr(owner, "action_mask_ref", None)),
+    )
+    for key, expected in scalar_fields:
+        if key in record and record.get(key) != expected:
+            raise ValueError(f"owner {owner_id} text record diverges at {key}")
+    list_fields = (
+        "component_ids",
+        "observation_ids",
+        "selected_observation_ids",
+    )
+    for key in list_fields:
+        if key in record and list(record.get(key) or []) != list(getattr(owner, key, []) or []):
+            raise ValueError(f"owner {owner_id} text record diverges at {key}")
+
+
+def _owner_visual_profile(record: dict) -> dict:
+    """Read only the immutable V2 sidecar; never reinterpret raw OCR style."""
+
+    owner_id = _owner_identity(record.get("owner_id"), label="text owner_id")
+    raw_profile = record.get("visual_profile_v2")
+    if not isinstance(raw_profile, dict):
+        raise ValueError(f"owner {owner_id} is missing visual_profile_v2")
+    normalized = validate_owner_visual_profile(
+        raw_profile,
+        expected_owner_id=owner_id,
+        expected_sha256=str(record.get("visual_profile_sha256") or ""),
+    )
+    if str(record.get("style_copy_status") or "") != normalized["status"]:
+        raise ValueError(f"owner {owner_id} visual profile status mismatch")
+    return copy.deepcopy(normalized["applied_style"])
+
+
+def _build_owner_render_blocks(texts: list[dict], owner_graph: object) -> list[dict]:
+    if not isinstance(owner_graph, OwnerGraph):
+        raise TypeError("verified owner renderer requires an OwnerGraph instance")
+    owner_graph.require_valid()
+    page_id = _owner_identity(owner_graph.page_id, label="owner graph page_id")
+    owners = list(owner_graph.owners)
+    owner_ids = [
+        _owner_identity(getattr(owner, "owner_id", None), label="owner_id")
+        for owner in owners
+    ]
+    if len(set(owner_ids)) != len(owner_ids):
+        raise ValueError("owner graph contains duplicate owner_id values")
+    owner_by_id = dict(zip(owner_ids, owners, strict=True))
+
+    records_by_owner: dict[str, list[dict]] = {owner_id: [] for owner_id in owner_ids}
+    for raw_record in texts:
+        if not isinstance(raw_record, dict):
+            raise ValueError("owner renderer text records must be mappings")
+        owner_id = _owner_identity(raw_record.get("owner_id"), label="text owner_id")
+        if owner_id not in owner_by_id:
+            raise ValueError(f"owner renderer references unknown owner_id: {owner_id}")
+        record = copy.deepcopy(raw_record)
+        _assert_owner_record_matches_graph(record, owner_by_id[owner_id], page_id)
+        _owner_visual_profile(record)
+        records_by_owner[owner_id].append(record)
+
+    blocks: list[dict] = []
+    for owner_id, owner in zip(owner_ids, owners, strict=True):
+        records = records_by_owner[owner_id]
+        if not records:
+            raise ValueError(f"owner renderer is missing text record for {owner_id}")
+        contracts = {_owner_record_contract(record) for record in records}
+        if len(contracts) != 1:
+            raise ValueError(f"owner renderer received divergent duplicates for {owner_id}")
+
+        translated_payload = getattr(owner, "translated_payload", None)
+        if not isinstance(translated_payload, str) or not translated_payload.strip():
+            raise ValueError(f"owner {owner_id} has no complete translated payload")
+        block = records[0]
+        block.update(
+            {
+                "id": owner_id,
+                "owner_id": owner_id,
+                "page_id": page_id,
+                "coordinate_space": "logical_page",
+                "text": str(getattr(owner, "source_payload", "") or ""),
+                "original": str(getattr(owner, "source_payload", "") or ""),
+                "source_payload": str(getattr(owner, "source_payload", "") or ""),
+                "translated_payload": translated_payload,
+                "translated": translated_payload,
+                "disposition": str(getattr(owner, "disposition", "") or ""),
+                "state": str(getattr(owner, "state", "") or ""),
+                "route_action": str(getattr(owner, "route_action", "") or ""),
+                "execution_tile_id": getattr(owner, "execution_tile_id", None),
+                "action_mask_ref": getattr(owner, "action_mask_ref", None),
+                "component_ids": list(getattr(owner, "component_ids", []) or []),
+                "observation_ids": list(getattr(owner, "observation_ids", []) or []),
+                "selected_observation_ids": list(
+                    getattr(owner, "selected_observation_ids", []) or []
+                ),
+                "semantic_role": str(getattr(owner, "semantic_role", "") or ""),
+                "_owner_mode": True,
+                "_owner_render_mode": True,
+                "_owner_duplicate_count": len(records),
+            }
+        )
+        visual_profile = _owner_visual_profile(block)
+        block["visual_profile"] = copy.deepcopy(visual_profile)
+        block["estilo"] = copy.deepcopy(visual_profile)
+        block["style"] = copy.deepcopy(visual_profile)
+        blocks.append(block)
+    return blocks
+
+
+def build_render_blocks(
+    texts: list[dict],
+    *,
+    owner_graph: object | None = None,
+) -> list[dict]:
+    if owner_graph is not None:
+        return _build_owner_render_blocks(texts, owner_graph)
+    if any(
+        isinstance(text, dict)
+        and (text.get("_owner_mode") or text.get("_owner_render_mode"))
+        for text in texts
+    ):
+        raise ValueError("owner render records require an explicit OwnerGraph")
     simple_layout_only = os.getenv("TRADUZAI_SIMPLE_LAYOUT_ONLY", "0").strip().lower() in {"1", "true", "yes", "on"}
+    _apply_visual_item_card_row_slots(texts)
     for text in texts:
         if isinstance(text, dict) and _should_skip_dark_connected_combined_fragment(text, texts):
             text["visible"] = False
@@ -6295,6 +7837,8 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
             text["visible"] = False
             text["needs_review"] = True
             apply_route_action(text, route_action="review_required", route_reason="false_short_art_ocr")
+            continue
+        if _suppress_unsafe_automatic_render(text):
             continue
         if _looks_like_loose_scene_text_without_bubble(text):
             _merge_qa_flags(text, ["non_balloon_scene_text_review"])
@@ -6614,7 +8158,12 @@ def build_render_blocks(texts: list[dict]) -> list[dict]:
             combined["balloon_subregions"] = []
         blocks.append(combined)
 
-    return _dedupe_render_blocks(blocks)
+    final_blocks = _dedupe_render_blocks(blocks)
+    # Merge/dedupe passes above may rebuild dictionaries from OCR children.
+    # Reapply the joint card contract to the actual objects that will be
+    # rendered and recorded so panel ownership cannot disappear at copyback.
+    _apply_visual_item_card_row_slots(final_blocks)
+    return final_blocks
 
 
 def merge_group_style(group: list[dict]) -> dict:
@@ -7097,7 +8646,11 @@ def _should_follow_original_ocr_size(text_data: dict) -> bool:
     flags = _qa_flags_set(text_data)
     if (
         source in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}
-        or style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"}
+        or (
+            style_origin == "auto_dark_panel_glow"
+            and source == "derived_white_crop_rejected"
+            and "auto_dark_panel_glow_fallback" in flags
+        )
         or flags
         & {
             "dark_bubble_ellipse_bbox_mask",
@@ -8400,7 +9953,23 @@ def _should_reject_tiny_bubble_inner_safe_area(
     target_bbox: list[int],
     safe_bbox: list[int],
 ) -> bool:
-    tx1, ty1, tx2, ty2 = [int(v) for v in target_bbox]
+    reference_bbox = list(target_bbox)
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    balloon_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+    if source in {"image_white_bubble_mask", "image_contour_bubble_mask", "image_rect_bubble_mask"} and balloon_bbox is not None:
+        target_area = _bbox_area_px(target_bbox)
+        balloon_area = _bbox_area_px(balloon_bbox)
+        safe_overlap = _bbox_intersection_area(safe_bbox, balloon_bbox)
+        safe_area = _bbox_area_px(safe_bbox)
+        if (
+            target_area >= int(balloon_area * 1.45)
+            and safe_overlap >= int(safe_area * 0.85)
+        ):
+            # A broad segmentation mask can include the whole surrounding
+            # region.  In that case the detected balloon body is the correct
+            # reference for judging whether its inner area is usable.
+            reference_bbox = list(balloon_bbox)
+    tx1, ty1, tx2, ty2 = [int(v) for v in reference_bbox]
     sx1, sy1, sx2, sy2 = [int(v) for v in safe_bbox]
     target_w = max(1, tx2 - tx1)
     target_h = max(1, ty2 - ty1)
@@ -11320,6 +12889,21 @@ def _select_real_bubble_render_target_bbox(text_data: dict, target_bbox: list[in
         text_data["_render_target_source"] = "real_bubble_mask_bbox_distinct"
         _merge_qa_flags(text_data, ["safe_text_box_recomputed"])
         return [int(v) for v in bubble_bbox]
+    balloon_bbox = _layout_bbox(text_data.get("balloon_bbox"))
+    source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+    anchor_bbox = _resolve_english_anchor_bbox(text_data)
+    if (
+        source in {"image_white_bubble_mask", "image_contour_bubble_mask", "image_rect_bubble_mask"}
+        and balloon_bbox is not None
+        and anchor_bbox is not None
+        and _bbox_area_px(balloon_bbox) >= int(_bbox_area_px(bubble_bbox) * 3.5)
+        and _bbox_intersection_area(bubble_inner_bbox, balloon_bbox) >= int(_bbox_area_px(bubble_inner_bbox) * 0.85)
+        and _bbox_intersection_area(anchor_bbox, balloon_bbox) >= int(_bbox_area_px(anchor_bbox) * 0.85)
+    ):
+        text_data["_render_target_source"] = "real_balloon_bbox_overmerged_contour_guard"
+        text_data["_overmerged_contour_mask_bbox"] = list(bubble_bbox)
+        _merge_qa_flags(text_data, ["safe_text_box_recomputed", "ocr_geometry_overmerged"])
+        return [int(v) for v in balloon_bbox]
     if _ocr_geometry_looks_overmerged_for_bubble(text_data, target_bbox, bubble_bbox):
         text_data["_render_target_source"] = "real_bubble_mask_bbox_overmerged_guard"
         text_data["_overmerged_ocr_original_target_bbox"] = list(target_bbox)
@@ -11395,6 +12979,8 @@ def _select_dark_panel_visual_mask_render_target_bbox(
     text_data: dict,
     target_bbox: list[int],
 ) -> list[int] | None:
+    if "visual_item_card_row_slot" in _qa_flags_set(text_data):
+        return list(target_bbox)
     source = str(text_data.get("bubble_mask_source") or "").strip().lower()
     if source not in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"}:
         return None
@@ -11812,6 +13398,8 @@ def _dark_bubble_compact_ellipse_bbox(text_data: dict, mask_bbox: list[int]) -> 
 
 
 def _clear_stale_dark_panel_visual_render_geometry(text_data: dict) -> None:
+    if "visual_item_card_row_slot" in _qa_flags_set(text_data):
+        return
     source = str(text_data.get("bubble_mask_source") or "").strip().lower()
     dark_visual_white_context = _is_dark_visual_white_mask_context(text_data, source)
     if source not in {"image_dark_panel_mask", "image_dark_bubble_mask", "derived_card_panel_mask"} and not dark_visual_white_context:
@@ -11980,7 +13568,161 @@ def _select_overbroad_white_balloon_text_evidence_target(text_data: dict, target
     return derived
 
 
+def _canonical_owner_render_polygon(value: object) -> tuple[tuple[int, int], ...]:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        raise ValueError("owner render safe polygon must contain at least three points")
+    points: list[tuple[int, int]] = []
+    for raw_point in value:
+        if not isinstance(raw_point, (list, tuple)) or len(raw_point) != 2:
+            raise ValueError("owner render safe polygon contains an invalid point")
+        if not all(
+            isinstance(coordinate, int) and not isinstance(coordinate, bool)
+            for coordinate in raw_point
+        ):
+            raise ValueError("owner render safe polygon coordinates must be canonical integers")
+        x, y = raw_point
+        if x < 0 or y < 0:
+            raise ValueError("owner render safe polygon contains a negative coordinate")
+        points.append((x, y))
+    if float(abs(cv2.contourArea(np.asarray(points, dtype=np.int32)))) <= 0.0:
+        raise ValueError("owner render safe polygon has no area")
+    return tuple(points)
+
+
+def _owner_font_interval(value: object, *, label: str) -> tuple[int, int] | None:
+    if value in (None, []):
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"{label} must be [minimum_px, maximum_px]")
+    if not all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+        raise ValueError(f"{label} must contain canonical positive integers")
+    lower, upper = value
+    if lower <= 0 or upper < lower:
+        raise ValueError(f"{label} must be an ordered positive interval")
+    return lower, upper
+
+
+def _plan_owner_text_layout(text_data: dict) -> dict:
+    polygon = _canonical_owner_render_polygon(
+        text_data.get("render_safe_polygon_page")
+    )
+    x_values = [point[0] for point in polygon]
+    y_values = [point[1] for point in polygon]
+    safe_bbox = [min(x_values), min(y_values), max(x_values), max(y_values)]
+    if safe_bbox[2] <= safe_bbox[0] or safe_bbox[3] <= safe_bbox[1]:
+        raise ValueError("owner render safe polygon has an invalid bounding box")
+
+    source_bounds = _owner_font_interval(
+        text_data.get("source_font_bounds_px"),
+        label="source_font_bounds_px",
+    )
+    container_bounds = _owner_font_interval(
+        text_data.get("container_font_bounds_px"),
+        label="container_font_bounds_px",
+    )
+    supplied_bounds = [bounds for bounds in (source_bounds, container_bounds) if bounds]
+    if supplied_bounds:
+        lower = max(bounds[0] for bounds in supplied_bounds)
+        upper = min(bounds[1] for bounds in supplied_bounds)
+        if upper < lower:
+            raise ValueError("owner source and container font bounds do not intersect")
+        target_size = int(upper)
+    else:
+        page_width, _page_height = _page_dimensions_for_layout(text_data, safe_bbox)
+        lower = max(_MIN_FONT_SIZE, int(math.ceil(max(0, page_width) * 0.012)))
+        container_height = max(1, int(safe_bbox[3]) - int(safe_bbox[1]))
+        container_width = max(1, int(safe_bbox[2]) - int(safe_bbox[0]))
+        # The style's historical 24 px value is only a seed, never a ceiling.
+        # The actual ceiling is derived from verified page/container geometry.
+        upper = min(96, max(lower, container_height - 4, min(container_width, 96)))
+        target_size = int(upper)
+
+    estilo = _canonical_render_style(
+        text_data.get("visual_profile") or text_data.get("estilo") or {}
+    )
+    width = max(4, int(safe_bbox[2]) - int(safe_bbox[0]))
+    height = max(4, int(safe_bbox[3]) - int(safe_bbox[1]))
+    padding_y = min(6, max(0, height // 20))
+    inset_x = min(6, max(0, width // 30))
+    max_width = max(4, width - (inset_x * 2))
+    max_height = max(4, height - (padding_y * 2))
+    outline_px = int(estilo.get("contorno_px", 0) or 0) if estilo.get("contorno") else 0
+    layout_profile = str(text_data.get("layout_profile") or "white_balloon")
+    return {
+        "target_bbox": list(safe_bbox),
+        "position_bbox": list(safe_bbox),
+        "capacity_bbox": list(safe_bbox),
+        "layout_safe_bbox": list(safe_bbox),
+        "layout_safe_reason": "verified_owner_safe_polygon",
+        "safe_text_box": list(safe_bbox),
+        "render_safe_polygon_page": [list(point) for point in polygon],
+        "font_size_bounds_px": [int(lower), int(upper)],
+        "layout_shape": _infer_layout_shape_from_bbox(safe_bbox, "texto"),
+        "balloon_geo": "rect",
+        "layout_profile": layout_profile,
+        "width_ratio": 1.0,
+        "max_width": max_width,
+        "max_height": max_height,
+        "padding_y": padding_y,
+        "vertical_anchor": "center",
+        "alignment": "center",
+        "font_name": estilo.get("fonte", CANONICAL_FONT_FILE),
+        "target_size": target_size,
+        "text_color": estilo.get("cor", "#000000"),
+        "background_rgb": list(_coerce_rgb_tuple(text_data.get("background_rgb")) or []),
+        "cor_gradiente": estilo.get("cor_gradiente", []),
+        "outline_color": estilo.get("contorno", ""),
+        "outline_px": outline_px,
+        "glow": bool(estilo.get("glow", False)),
+        "glow_cor": estilo.get("glow_cor", ""),
+        "glow_px": int(estilo.get("glow_px", 0) or 0),
+        "sombra": bool(estilo.get("sombra", False)),
+        "sombra_cor": estilo.get("sombra_cor", ""),
+        "sombra_offset": estilo.get("sombra_offset", [0, 0]),
+        "curva": bool(estilo.get("curva", False)),
+        "curva_direcao": str(estilo.get("curva_direcao", "") or ""),
+        "curva_intensidade": float(estilo.get("curva_intensidade", 0.0) or 0.0),
+        "rotation_deg": 0.0,
+        "rotation_source": "verified_owner_layout",
+        "line_spacing_ratio": 0.20,
+        "vertical_bias_px": 0,
+        "horizontal_bias_px": 0,
+        "_target_source": "verified_owner_safe_polygon",
+        "_style_origin": text_data.get("style_origin") or "",
+        "_validated_source_target_bbox": [],
+        "_anchor_capacity_locked": False,
+        "_simple_anchor_capacity_expanded": False,
+        "_simple_anchor_capacity_reason": "",
+        "_font_search_cap": int(upper),
+        "_font_search_floor": int(lower),
+        "_font_search_emergency_floor": int(lower),
+        "_follow_original_ocr_size": False,
+        "_prefer_original_font_size": False,
+        "_source_font_size_px": 0,
+        "_follow_english_anchor_position": False,
+        "_position_on_capacity_bbox": True,
+        "_center_on_balloon_bbox": True,
+        "_anchor_center_only_layout": False,
+        "_owner_render_mode": True,
+        "source_ink_heights_px": list(text_data.get("source_ink_heights_px") or []),
+        "source_x_heights_px": list(text_data.get("source_x_heights_px") or []),
+        "source_scale_evidence_confidence": float(
+            text_data.get("source_scale_evidence_confidence", 0.0) or 0.0
+        ),
+        "trusted_container": True,
+    }
+
+
 def plan_text_layout(text_data: dict) -> dict:
+    if (
+        text_data.get("_owner_mode")
+        or text_data.get("_owner_render_mode")
+        or (
+            text_data.get("owner_id")
+            and text_data.get("render_safe_polygon_page")
+        )
+    ):
+        return _plan_owner_text_layout(text_data)
     _propagate_dark_connected_text_anchor_to_type(text_data)
     _sanitize_overbroad_text_geometry_for_layout(text_data)
     _propagate_dark_connected_text_anchor_to_type(text_data)
@@ -12764,6 +14506,13 @@ def plan_text_layout(text_data: dict) -> dict:
         width_ratio = max(width_ratio, 0.92)
         padding_y = min(padding_y, max(2, int(round(padding_ref_height * 0.035))))
         line_spacing = min(line_spacing, 0.06)
+    if "visual_item_card_row_slot" in _qa_flags_set(text_data):
+        # The slot boundaries already provide the vertical safety margin.  A
+        # second generic padding pass can leave only ~20 px of usable height,
+        # forcing short rows to 5-6 px and long rows to a single tiny line.
+        width_ratio = max(width_ratio, 0.96)
+        padding_y = 0
+        line_spacing = min(line_spacing, 0.04)
     # Special rules to match test expectations
     if layout_shape == "tall" and not anchor_bbox and group_size == 1:
         # Narrow ellipses should use more relative width
@@ -12936,14 +14685,24 @@ def plan_text_layout(text_data: dict) -> dict:
             )
         )
         if 1 <= compact_len <= 34:
-            panel_cap = max(
-                _MIN_FONT_SIZE,
-                min(
-                    int(round(capacity_width * 0.145)),
-                    int(round(capacity_height * 0.20)),
-                    int(round(max(1, target_size) * 0.88)),
-                ),
-            )
+            if "visual_item_card_row_slot" in dark_visual_flags:
+                panel_cap = max(
+                    _MIN_FONT_SIZE,
+                    min(
+                        int(round(capacity_width * 0.145)),
+                        int(round(capacity_height * 0.72)),
+                        int(max(1, target_size)),
+                    ),
+                )
+            else:
+                panel_cap = max(
+                    _MIN_FONT_SIZE,
+                    min(
+                        int(round(capacity_width * 0.145)),
+                        int(round(capacity_height * 0.20)),
+                        int(round(max(1, target_size) * 0.88)),
+                    ),
+                )
             if target_size > panel_cap:
                 target_size = panel_cap
                 _merge_qa_flags(text_data, ["dark_card_panel_font_capped_for_margin"])
@@ -13974,6 +15733,47 @@ def _persist_fit_attempts(text_data: dict, plan: dict, text: str, resolved: dict
             text_data["qa_flags"] = flags
 
     text_data["fit_attempts"] = attempts[-4:]
+    text_data["minimum_legible_font_px"] = int(min_font_px)
+    text_data["font_size_final"] = int(final_attempt["font_px"])
+
+
+def _finalize_render_completion_contract(text_data: dict) -> None:
+    """Record whether translated ink was rendered at a safe, legible size."""
+    render_bbox = _layout_bbox(text_data.get("render_bbox"))
+    try:
+        final_font_px = int(text_data.get("font_size_final", 0) or 0)
+    except (TypeError, ValueError):
+        final_font_px = 0
+    try:
+        minimum_font_px = int(text_data.get("minimum_legible_font_px", 0) or 0)
+    except (TypeError, ValueError):
+        minimum_font_px = 0
+    text_data["render_completed"] = bool(
+        str(text_data.get("fit_status") or "").strip().lower() == "ok"
+        and render_bbox is not None
+        and final_font_px > 0
+        and minimum_font_px > 0
+        and final_font_px >= minimum_font_px
+    )
+    if (
+        text_data["render_completed"]
+        and str(text_data.get("layout_category") or "").strip().lower() == "item_card"
+        and str(text_data.get("card_panel_id") or "").strip()
+        and str(text_data.get("card_joint_layout_status") or "").strip().lower() == "below_minimum_legible"
+    ):
+        text_data["card_joint_layout_status"] = "ok"
+        flags = [
+            str(flag)
+            for flag in text_data.get("qa_flags") or []
+            if str(flag) not in {"fit_below_minimum_legible", "item_card_joint_layout_failed"}
+        ]
+        text_data["qa_flags"] = flags
+        if str(text_data.get("route_reason") or "") == "item_card_joint_layout_below_minimum":
+            text_data.pop("route_action", None)
+            text_data.pop("route_reason", None)
+        metrics = text_data.get("qa_metrics")
+        if isinstance(metrics, dict) and isinstance(metrics.get("item_card_joint_layout"), dict):
+            metrics["item_card_joint_layout"]["status"] = "ok"
 
 
 def _render_plan_debug_enabled() -> bool:
@@ -14177,6 +15977,12 @@ def _should_enforce_original_text_scale_contract(text_data: dict) -> bool:
         or route_action in {"skip", "preserve_original"}
     ):
         return False
+    # Item-card rows already use source-anchored, non-overlapping slots.  The
+    # generic source-area scorer can prefer a tiny one-line rendering for long
+    # PT-BR text, or keep a tall rendering that crosses into the next row.
+    # Let the row slot be the hard size/position contract instead.
+    if "visual_item_card_row_slot" in _qa_flags_set(text_data):
+        return False
     # Enforcement is deliberately broader than _should_use_original_text_scale_contract:
     # planning/split heuristics stay conservative, but render size and center
     # must follow the real original text mask whenever that mask exists.
@@ -14184,29 +15990,98 @@ def _should_enforce_original_text_scale_contract(text_data: dict) -> bool:
 
 
 def _typeset_inpaint_contract_bbox_for_scale(text_data: dict) -> tuple[list[int], str] | None:
-    flags = _qa_flags_set(text_data)
-    metrics = text_data.get("qa_metrics") if isinstance(text_data.get("qa_metrics"), dict) else {}
+    """Return the per-text inpaint contract bbox when it is safe for typeset scale.
+
+    Dark connected bubbles often carry a broad visual/text bbox for lobe
+    partitioning. The inpaint contract bbox is the closest evidence of the
+    original glyph mask actually erased, so it must win the size/center
+    contract when it is not an overbroad fallback.
+    """
+
+    metrics = text_data.get("qa_metrics")
     if not isinstance(metrics, dict):
         return None
-    has_contract_route = bool(
+
+    candidates: list[tuple[str, list[int] | None]] = []
+    fill_mask = metrics.get("dark_text_contract_fill_mask")
+    if isinstance(fill_mask, dict):
+        candidates.append(("qa_metrics.dark_text_contract_fill_mask.bbox", _layout_bbox(fill_mask.get("bbox"))))
+    fill_uses = metrics.get("dark_text_contract_fill_uses_inpaint_contract_mask")
+    if isinstance(fill_uses, dict):
+        candidates.append(
+            (
+                "qa_metrics.dark_text_contract_fill_uses_inpaint_contract_mask.contract_bbox",
+                _layout_bbox(fill_uses.get("contract_bbox")),
+            )
+        )
+    inpaint_contract = metrics.get("inpaint_mask_contract")
+    if isinstance(inpaint_contract, dict):
+        candidates.append(("qa_metrics.inpaint_mask_contract.contract_bbox", _layout_bbox(inpaint_contract.get("contract_bbox"))))
+
+    flags = _qa_flags_set(text_data)
+    dark_contract_context = bool(
         flags
         & {
-            "visual_text_only_inpaint_contract",
             "text_contract_direct_fill",
+            "visual_text_only_inpaint_contract",
             "source_text_mask_bbox_from_inpaint_component",
             "dark_connected_component_safe_partition",
+            "dark_connected_lobes_repaired_from_visual_mask",
         }
-        or isinstance(metrics.get("text_contract_direct_fill"), dict)
     )
-    if not has_contract_route:
+    if not dark_contract_context:
+        source = str(text_data.get("bubble_mask_source") or text_data.get("balloon_mask_source") or "").strip().lower()
+        dark_contract_context = source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}
+    if not dark_contract_context:
         return None
-    fill_mask = metrics.get("dark_text_contract_fill_mask")
-    if not isinstance(fill_mask, dict):
-        return None
-    bbox = _layout_bbox(fill_mask.get("bbox"))
-    if bbox is None or _bbox_area_px(bbox) < 16:
-        return None
-    return bbox, "qa_metrics.dark_text_contract_fill_mask.bbox"
+
+    refs = [
+        bbox
+        for bbox in (
+            _layout_bbox(text_data.get("source_text_mask_bbox")),
+            _layout_bbox(text_data.get("_source_text_mask_bbox")),
+            _layout_bbox(text_data.get("text_pixel_bbox")),
+            _layout_bbox(text_data.get("ocr_text_bbox")),
+            _layout_bbox(_bbox_from_polygons(text_data.get("line_polygons") or [])),
+        )
+        if bbox is not None
+    ]
+    ref_union = _bbox_union_many_for_layout(refs) if refs else None
+    target_ref = _layout_bbox(
+        text_data.get("target_bbox")
+        or text_data.get("balloon_bbox")
+        or text_data.get("bubble_mask_bbox")
+        or text_data.get("bbox")
+    )
+
+    for source_name, bbox in candidates:
+        if bbox is None or _bbox_area_px(bbox) < 16:
+            continue
+        rejection_reason = ""
+        if [int(v) for v in bbox] == [0, 0, 32, 32]:
+            rejection_reason = "placeholder_bbox"
+        elif target_ref is not None and _bbox_intersection_area(bbox, target_ref) <= 0:
+            rejection_reason = "outside_target"
+        elif ref_union is not None:
+            overlap = _bbox_intersection_area(bbox, ref_union)
+            if overlap <= 0:
+                rejection_reason = "outside_text_reference"
+            else:
+                bbox_area = max(1, _bbox_area_px(bbox))
+                ref_area = max(1, _bbox_area_px(ref_union))
+                if bbox_area > int(ref_area * 2.35) and overlap / float(bbox_area) < 0.55:
+                    rejection_reason = "overbroad_vs_text_reference"
+        if rejection_reason:
+            text_data["typeset_contract_rejection_reason"] = rejection_reason
+            text_data["typeset_contract_rejected_bbox"] = list(bbox)
+            text_data["typeset_contract_rejected_source"] = source_name
+            continue
+        text_data["typeset_inpaint_contract_bbox_used"] = list(bbox)
+        text_data["typeset_contract_source"] = source_name
+        text_data["typeset_contract_space"] = "page"
+        return list(bbox), source_name
+
+    return None
 
 
 def _dark_connected_local_anchor_should_override_scale_contract(
@@ -14276,6 +16151,23 @@ def _record_typeset_inpaint_contract_fit(text_data: dict, source_bbox: list[int]
 
 def _original_text_mask_bbox_for_scale(text_data: dict) -> list[int] | None:
     _propagate_dark_connected_text_anchor_to_type(text_data)
+    contract_candidate = _typeset_inpaint_contract_bbox_for_scale(text_data)
+    local_anchor = _layout_bbox(
+        text_data.get("source_text_anchor_bbox")
+        or text_data.get("_source_text_anchor_bbox")
+        or text_data.get("_connected_source_bbox")
+    )
+    if contract_candidate is not None and not _dark_connected_local_anchor_should_override_scale_contract(
+        text_data, local_anchor, contract_candidate[0]
+    ):
+        bbox, source_name = contract_candidate
+        metrics = text_data.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["typeset_inpaint_contract_bbox_used"] = {
+                "bbox": [int(v) for v in bbox],
+                "source": source_name,
+            }
+        return bbox
     candidates: list[tuple[str, list[int]]] = []
     def _valid_scale_bbox(bbox: list[int] | None) -> bool:
         if bbox is None or _bbox_area_px(bbox) < 16:
@@ -14640,6 +16532,23 @@ def _original_text_scale_contract_metrics(candidate: dict, source_bbox: list[int
         "height_ratio": block_h / float(source_h),
         "area_ratio": block_area / float(source_area),
     }
+
+
+def _record_typeset_contract_fit(text_data: dict, candidate: dict, source_bbox: list[int], *, reason: str) -> None:
+    metrics = text_data.setdefault("qa_metrics", {})
+    contract_metrics = _original_text_scale_contract_metrics(candidate, source_bbox)
+    if isinstance(metrics, dict):
+        metrics["typeset_contract_fit"] = {
+            "source_bbox": [int(v) for v in source_bbox],
+            "block_bbox": [int(round(v)) for v in candidate.get("block_bbox", [])],
+            "font_size": int(candidate.get("font_size", 0) or 0),
+            "line_count": len(candidate.get("lines") or []),
+            "line_widths": [int(v) for v in candidate.get("line_widths") or []],
+            "contract_metrics": contract_metrics,
+        }
+        metrics["typeset_contract_reflow_or_shrink_reason"] = reason
+    text_data["typeset_contract_fit"] = contract_metrics
+    text_data["typeset_contract_reflow_or_shrink_reason"] = reason
 
 
 def _original_text_scale_candidate_violations(candidate: dict, source_bbox: list[int]) -> list[str]:
@@ -15038,9 +16947,13 @@ def _uses_dark_visual_layout_contract(text_data: dict, plan: dict | None = None)
         or ""
     ).strip().lower()
     target_source = str(text_data.get("_render_target_source") or plan.get("_target_source") or "").strip().lower()
+    style_origin = str(
+        text_data.get("style_origin") or plan.get("style_origin") or ""
+    ).strip().lower()
     return bool(
         source in {"image_dark_bubble_mask", "image_dark_panel_mask", "derived_card_panel_mask"}
         or profile in {"dark_bubble", "dark_panel"}
+        or style_origin in {"auto_dark_panel_glow", "grouped_dark_panel_visual_style", "inferred_visual_card"}
         or target_source in {
             "dark_bubble_visible_bbox_from_overbroad_target",
             "dark_panel_visual_mask_bbox",
@@ -15159,7 +17072,13 @@ def _expand_dark_visual_underfit_layout_capacity(text_data: dict, plan: dict) ->
     pad_y = max(0, int(plan.get("padding_y", 0) or 0))
     plan["safe_text_box"] = [nsx1, nsy1, nsx2, nsy2]
     plan["layout_safe_bbox"] = [nsx1, nsy1, nsx2, nsy2]
-    plan["layout_safe_reason"] = reason
+    existing_reason = str(text_data.get("layout_safe_reason") or "")
+    published_reason = (
+        existing_reason
+        if existing_reason in {"visual_rect_dark_panel", "visual_rect_inner"}
+        else reason
+    )
+    plan["layout_safe_reason"] = published_reason
     plan["position_bbox"] = [nsx1, nsy1, nsx2, nsy2]
     plan["capacity_bbox"] = [nsx1, nsy1, nsx2, nsy2]
     if reason == "dark_visual_bbox_fallback_safe_promoted":
@@ -15171,7 +17090,7 @@ def _expand_dark_visual_underfit_layout_capacity(text_data: dict, plan: dict) ->
     text_data["safe_text_box"] = list(plan["safe_text_box"])
     text_data["_debug_safe_text_box"] = list(plan["safe_text_box"])
     text_data["layout_safe_bbox"] = list(plan["safe_text_box"])
-    text_data["layout_safe_reason"] = reason
+    text_data["layout_safe_reason"] = published_reason
     _merge_qa_flags(text_data, ["dark_visual_underfit_capacity_expanded", "safe_text_box_recomputed"])
 
 
@@ -15381,7 +17300,11 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     _apply_dark_visual_safe_width_limit(text_data, plan)
     text = text_data.get("translated", "")
     _apply_dark_connected_lobe_metric_safe_box(text_data, plan)
-    original_scale_bbox = _original_text_mask_bbox_for_scale(text_data) if _should_enforce_original_text_scale_contract(text_data) else None
+    original_scale_bbox = (
+        _original_text_mask_bbox_for_scale(text_data)
+        if not plan.get("_owner_render_mode") and _should_enforce_original_text_scale_contract(text_data)
+        else None
+    )
     if (
         original_scale_bbox is not None
         and _is_translator_note_layer(text_data)
@@ -15474,6 +17397,26 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     use_capacity_position = bool(plan.get("_simple_anchor_capacity_expanded") or plan.get("_position_on_capacity_bbox"))
     effective_position_bbox = plan.get("capacity_bbox") if use_capacity_position else plan.get("position_bbox", plan["target_bbox"])
     safe_text_box = plan.get("safe_text_box")
+    # The original glyph mask is useful scale evidence, but a white speech
+    # balloon's measured inner body is the hard visual boundary.  Keeping the
+    # OCR-scale candidate when it does not fit that body creates the exact
+    # `render_outside_balloon` failure this contract is meant to prevent.
+    mask_source = str(text_data.get("bubble_mask_source") or "").strip().lower()
+    is_trusted_white_bubble = _is_white_layout_profile(text_data) or mask_source in {
+        "image_white_bubble_mask",
+        "image_contour_bubble_mask",
+        "image_rect_bubble_mask",
+    }
+    constrain_original_scale_to_safe_box = bool(
+        original_scale_bbox is not None
+        and (is_trusted_white_bubble or "visual_item_card_row_slot" in _qa_flags_set(text_data))
+        and _layout_bbox(safe_text_box) is not None
+        and not (
+            bool(text_data.get("_cross_page_band_rehomed_geometry"))
+            and str(plan.get("layout_safe_reason") or "").strip().lower()
+            == "edge_clipped_rehomed_visible_anchor_safe_area"
+        )
+    )
     if (
         not use_capacity_position
         and isinstance(safe_text_box, (list, tuple))
@@ -15521,7 +17464,16 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         _persist_fit_attempts(text_data, plan, text, contract_candidate, int(contract_candidate.get("font_size", 0) or 0))
         return contract_candidate
 
-    category_min, category_max = _category_font_bounds(text_data)
+    if plan.get("_owner_render_mode"):
+        owner_bounds = _owner_font_interval(
+            plan.get("font_size_bounds_px"),
+            label="font_size_bounds_px",
+        )
+        if owner_bounds is None:
+            raise ValueError("owner render plan is missing font_size_bounds_px")
+        category_min, category_max = owner_bounds
+    else:
+        category_min, category_max = _category_font_bounds(text_data)
     height_limit = position_height if use_capacity_position else box_height
     if original_scale_bbox is not None:
         font_size = min(category_max, 96)
@@ -15594,7 +17546,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             attempt_size,
             plan["line_spacing_ratio"],
         )
-        if original_scale_bbox is not None and len(wrapped) > 1:
+        if original_scale_bbox is not None and len(wrapped) > 1 and not constrain_original_scale_to_safe_box:
             min_line_height_ratio = 1.12 if inpaint_contract_source else 1.28
             line_height = max(line_height, int(round(attempt_size * min_line_height_ratio)))
         
@@ -15606,7 +17558,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         # que candidatos vÃ¡lidos pelo binary-search sejam descartados aqui e
         # caiam no fallback de category_min.
         if (
-            original_scale_bbox is None
+            (original_scale_bbox is None or constrain_original_scale_to_safe_box)
             and (block_width > plan["max_width"] or total_text_height > plan["max_height"] + height_tolerance)
         ):
             if trace_candidates:
@@ -15630,7 +17582,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 )
             continue
 
-        if original_scale_bbox is not None:
+        if original_scale_bbox is not None and not constrain_original_scale_to_safe_box:
             anchor_cx, anchor_cy = _bbox_center(original_scale_bbox)
             center_x = int(round(anchor_cx))
             start_y = int(round(anchor_cy - (total_text_height / 2.0)))
@@ -15642,7 +17594,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             )
             center_x = px1 + (position_width // 2)
 
-        if original_scale_bbox is None and plan["vertical_anchor"] != "top":
+        if (original_scale_bbox is None or constrain_original_scale_to_safe_box) and plan["vertical_anchor"] != "top":
             min_start_y = py1 + int(plan["padding_y"])
             max_start_y = py2 - int(plan["padding_y"]) - total_text_height
             if max_start_y >= min_start_y:
@@ -15927,6 +17879,11 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                     ]
         if trace_candidates:
             _mark_selected_render_candidate(text_data, best_candidate)
+        if original_scale_bbox is not None:
+            reason = "original_text_scale_selected"
+            if best_candidate.get("original_text_scale_underflow_violations"):
+                reason = "original_text_scale_selected_with_soft_underflow"
+            _record_typeset_contract_fit(text_data, best_candidate, original_scale_bbox, reason=reason)
         local_fit_metric = text_data.get("qa_metrics", {}).get("dark_connected_lobe_local_fit_repaired")
         if isinstance(local_fit_metric, dict) and local_fit_metric.get("decision") == "applied":
             local_fit_metric["new_render_bbox"] = [int(round(v)) for v in best_candidate.get("block_bbox", [])]
@@ -15990,11 +17947,11 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     fallback_font = get_font(plan["font_name"], fallback_size)
     fallback_lines = wrap_text(text, fallback_font, plan["max_width"])
     fallback_line_height = get_line_height(fallback_font, fallback_size, plan["line_spacing_ratio"])
-    if original_scale_bbox is not None and len(fallback_lines) > 1:
+    if original_scale_bbox is not None and len(fallback_lines) > 1 and not constrain_original_scale_to_safe_box:
         min_line_height_ratio = 1.12 if inpaint_contract_source else 1.28
         fallback_line_height = max(fallback_line_height, int(round(fallback_size * min_line_height_ratio)))
     fallback_total_height = fallback_line_height * len(fallback_lines)
-    if original_scale_bbox is not None:
+    if original_scale_bbox is not None and not constrain_original_scale_to_safe_box:
         anchor_cx, anchor_cy = _bbox_center(original_scale_bbox)
         center_x = int(round(anchor_cx))
         start_y = int(round(anchor_cy - (fallback_total_height / 2.0)))
@@ -16005,7 +17962,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             else py1 + max(plan["padding_y"], (position_height - fallback_total_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
         )
         center_x = px1 + (position_width // 2)
-    if original_scale_bbox is None and plan["vertical_anchor"] != "top":
+    if (original_scale_bbox is None or constrain_original_scale_to_safe_box) and plan["vertical_anchor"] != "top":
         min_start_y = py1 + int(plan["padding_y"])
         max_start_y = py2 - int(plan["padding_y"]) - fallback_total_height
         if max_start_y >= min_start_y:
@@ -16053,17 +18010,23 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             test_font = get_font(plan["font_name"], size)
             test_lines = wrap_text(text, test_font, plan["max_width"])
             test_line_height = get_line_height(test_font, size, plan["line_spacing_ratio"])
-            if len(test_lines) > 1:
+            if len(test_lines) > 1 and not constrain_original_scale_to_safe_box:
                 min_line_height_ratio = 1.12 if inpaint_contract_source else 1.28
                 test_line_height = max(test_line_height, int(round(size * min_line_height_ratio)))
             test_total_height = test_line_height * len(test_lines)
             test_widths = [measure_text_width(test_font, line, size) for line in test_lines]
-            test_start_y = (
-                py1 + plan["padding_y"]
-                if plan["vertical_anchor"] == "top"
-                else py1 + max(plan["padding_y"], (position_height - test_total_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
-            )
-            if plan["vertical_anchor"] != "top":
+            if original_scale_bbox is not None and not constrain_original_scale_to_safe_box:
+                anchor_cx, anchor_cy = _bbox_center(original_scale_bbox)
+                center_x = int(round(anchor_cx))
+                test_start_y = int(round(anchor_cy - (test_total_height / 2.0)))
+            else:
+                center_x = px1 + (position_width // 2)
+                test_start_y = (
+                    py1 + plan["padding_y"]
+                    if plan["vertical_anchor"] == "top"
+                    else py1 + max(plan["padding_y"], (position_height - test_total_height) // 2) + int(plan.get("vertical_bias_px", 0) or 0)
+                )
+            if (original_scale_bbox is None or constrain_original_scale_to_safe_box) and plan["vertical_anchor"] != "top":
                 min_start_y = py1 + int(plan["padding_y"])
                 max_start_y = py2 - int(plan["padding_y"]) - test_total_height
                 if max_start_y >= min_start_y:
@@ -16110,6 +18073,8 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
                 break
     elif original_scale_bbox is not None and fallback_violations:
         _merge_qa_flags(text_data, ["original_text_scale_fallback_underflow_not_shrunk"])
+    if original_scale_bbox is not None:
+        _record_typeset_contract_fit(text_data, fallback, original_scale_bbox, reason="original_text_scale_fallback")
     if trace_candidates:
         _append_render_debug_item(
             text_data,
@@ -16141,6 +18106,39 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             )
     _persist_fit_attempts(text_data, plan, text, fallback, font_size)
     return fallback
+
+
+def _resolve_item_card_legible_fallback(
+    text_data: dict,
+    plan: dict,
+    resolved: dict,
+) -> tuple[dict, dict]:
+    """Retry an actually under-minimum card row with a compact legible font."""
+    minimum_font_px = _minimum_legible_font_px(text_data, plan)
+    if (
+        str(text_data.get("layout_category") or "").strip().lower() != "item_card"
+        or not str(text_data.get("card_panel_id") or "").strip()
+        or int(resolved.get("font_size", 0) or 0) >= int(minimum_font_px)
+    ):
+        return plan, resolved
+    fallback_plan = dict(plan)
+    fallback_plan["font_name"] = "ComicNeue-Bold.ttf"
+    fallback_plan["target_size"] = max(int(minimum_font_px), int(plan.get("target_size", 0) or 0))
+    fallback_plan["_font_search_floor"] = int(minimum_font_px)
+    fallback_plan["_prefer_original_font_size"] = False
+    fallback_plan["_follow_original_ocr_size"] = False
+    fallback_plan["_source_font_size_px"] = 0
+    fallback = _resolve_text_layout(text_data, fallback_plan)
+    if int(fallback.get("font_size", 0) or 0) < int(minimum_font_px):
+        return plan, resolved
+    style = dict(text_data.get("estilo") or text_data.get("style") or {})
+    style["fonte"] = "ComicNeue-Bold.ttf"
+    style["font_family"] = "ComicNeue-Bold.ttf"
+    style["tamanho"] = int(fallback.get("font_size", minimum_font_px) or minimum_font_px)
+    text_data["estilo"] = style
+    text_data["style"] = dict(style)
+    _merge_qa_flags(text_data, ["visual_card_font_fallback"])
+    return fallback_plan, fallback
 
 
 def _apply_corpus_layout_hints(
@@ -16522,12 +18520,15 @@ def ensure_legible_plan(img: Image.Image, plan: dict) -> dict:
             adjusted["outline_color"] = ""
             adjusted["outline_px"] = 0
 
-    gradient = adjusted.get("cor_gradiente", []) or []
-    if len(gradient) >= 2:
-        top_gap = _contrast_gap(gradient[0], bg_hex)
-        bottom_gap = _contrast_gap(gradient[1], bg_hex)
-        if min(top_gap, bottom_gap) < 70:
+    gradient = canonicalize_linear_gradient(adjusted.get("cor_gradiente"))
+    if gradient is not None:
+        endpoint_gaps = [
+            _contrast_gap(color, bg_hex) for color in gradient["colors"]
+        ]
+        if min(endpoint_gaps) < 70:
             adjusted["cor_gradiente"] = []
+        else:
+            adjusted["cor_gradiente"] = gradient
 
     return adjusted
 
@@ -17211,7 +19212,8 @@ def _rotation_sentinel_rgb(plan: dict) -> tuple[int, int, int]:
             used_colors.add(tuple(int(v) for v in _parse_hex_color(str(value))[:3]))
         except Exception:
             continue
-    for value in plan.get("cor_gradiente") or []:
+    gradient = canonicalize_linear_gradient(plan.get("cor_gradiente"))
+    for value in gradient["colors"] if gradient is not None else []:
         try:
             used_colors.add(tuple(int(v) for v in _parse_hex_color(str(value))[:3]))
         except Exception:
@@ -17296,7 +19298,48 @@ def _try_render_single_text_block_with_rust(
 
     if not rust_backend.rust_renderer_enabled():
         return False
-    if resolved.get("original_text_scale_preferred") or resolved.get("original_text_scale_metrics"):
+    profile = text_data.get("visual_profile_v2")
+    if not isinstance(profile, dict):
+        profile = {
+            "applied_style": {
+                "font_name": plan.get("font_name"),
+                "fill": plan.get("text_color"),
+                "stroke": (
+                    {"color": plan.get("outline_color"), "width_px": plan.get("outline_px")}
+                    if plan.get("outline_color") or plan.get("outline_px")
+                    else None
+                ),
+                "shadow": (
+                    {"color": plan.get("sombra_cor"), "offset": plan.get("sombra_offset")}
+                    if plan.get("sombra")
+                    else None
+                ),
+                "glow": (
+                    {"color": plan.get("glow_cor"), "width_px": plan.get("glow_px")}
+                    if plan.get("glow")
+                    else None
+                ),
+                "gradient": plan.get("cor_gradiente") or None,
+                "rotation_deg": plan.get("rotation_deg") or 0,
+            }
+        }
+    selection = backend_contract.select_backend_for_style(
+        "koharu_rust",
+        profile,
+        enforce_observation=isinstance(text_data.get("style_resolved_intent_v1"), Mapping),
+    )
+    selection_debug = dict(text_data.get("_render_debug") or {})
+    selection_debug["renderer_backend_requested"] = "koharu_rust"
+    selection_debug["renderer_backend_selected"] = selection.selected_backend
+    selection_debug["renderer_backend_selection_reason"] = selection.reason
+    selection_debug["renderer_backend_unsupported_capabilities"] = list(selection.unsupported_capabilities)
+    text_data["_render_debug"] = selection_debug
+    if selection.status == "review_required":
+        text_data["route_action"] = "review_required"
+        _merge_qa_flags(text_data, ["renderer_backend_capability_review_required"])
+        return True
+    if selection.selected_backend != "koharu_rust":
+        _merge_qa_flags(text_data, ["renderer_backend_capability_fallback_python"])
         return False
 
     try:
@@ -17389,17 +19432,25 @@ def _try_render_single_text_block_with_rust(
 
 def _render_single_text_block(
     img: Image.Image, text_data: dict, plan: dict, pre_render_np=None,
-) -> None:
+) -> GlyphRasterResult | None:
     rotation_deg = _normalize_rotation_deg(plan.get("rotation_deg", 0))
     if rotation_deg == 0:
-        _render_single_text_block_unrotated(img, text_data, plan, pre_render_np=pre_render_np)
-        return
+        return _render_single_text_block_unrotated(
+            img,
+            text_data,
+            plan,
+            pre_render_np=pre_render_np,
+        )
 
     sentinel = _coerce_rgb_tuple(plan.get("background_rgb")) or _rotation_sentinel_rgb(plan)
     scratch = Image.new("RGB", img.size, sentinel)
     unrotated_plan = _plan_for_unrotated_sideways_render(plan, img.size)
     scratch_text_data = dict(text_data)
-    _render_single_text_block_unrotated(scratch, scratch_text_data, unrotated_plan)
+    raster_result = _render_single_text_block_unrotated(
+        scratch,
+        scratch_text_data,
+        unrotated_plan,
+    )
 
     scratch_np = np.array(scratch)
     alpha_mask = np.any(scratch_np != np.array(sentinel, dtype=np.uint8), axis=2).astype(np.uint8) * 255
@@ -17457,11 +19508,12 @@ def _render_single_text_block(
         render_debug["final_safe_text_box"] = plan.get("safe_text_box")
     text_data["_render_debug"] = render_debug
     _run_render_qa(text_data, plan)
+    return raster_result
 
 
 def _render_single_text_block_unrotated(
     img: Image.Image, text_data: dict, plan: dict, pre_render_np=None,
-) -> None:
+) -> GlyphRasterResult | None:
     """Core rendering logic for a single text block (no subregion recursion)."""
     text = text_data.get("translated", "")
     if not text:
@@ -17527,6 +19579,7 @@ def _render_single_text_block_unrotated(
         text_data["_debug_safe_text_box"] = plan["safe_text_box"]
 
     resolved = _resolve_text_layout(text_data, plan)
+    plan, resolved = _resolve_item_card_legible_fallback(text_data, plan, resolved)
     text_data["_render_debug"] = {
         "target_bbox": plan.get("target_bbox"),
         "position_bbox": plan.get("position_bbox"),
@@ -17629,22 +19682,53 @@ def _render_single_text_block_unrotated(
             positions,
             clamp_bounds,
         )
+        source_center_bounds = plan.get("safe_text_box") or plan["target_bbox"]
+        if text_data.get("_render_target_source") == "real_balloon_bbox_overmerged_contour_guard":
+            # The safe box came from a contour that only covered the source
+            # glyph cluster.  The selected target is the real balloon, so it
+            # is the appropriate boundary for the original-center contract.
+            source_center_bounds = plan["target_bbox"]
         positions = _align_uied_positions_to_source_center(
             best_font,
             best_lines,
             positions,
             text_data,
-            clamp_bounds,
+            (source_center_bounds if text_data.get("_render_target_source") == "real_balloon_bbox_overmerged_contour_guard" else clamp_bounds),
         )
         positions = _clamp_safe_text_positions_to_bbox(
             best_font,
             best_lines,
             positions,
-            clamp_bounds,
+            (source_center_bounds if text_data.get("_render_target_source") == "real_balloon_bbox_overmerged_contour_guard" else clamp_bounds),
         )
         _persist_render_layout_contract(text_data, plan, resolved, positions)
 
         if _should_render_safe_arc_text(plan, best_lines):
+            if isinstance(text_data.get("visual_profile_v2"), dict):
+                applied_style = text_data["visual_profile_v2"].get("applied_style")
+                applied_style = applied_style if isinstance(applied_style, dict) else {}
+                core, glyph_run = _build_safe_arc_core_and_run(
+                    image_np.shape[:2],
+                    best_lines[0],
+                    best_font,
+                    positions[0],
+                    plan,
+                    tracking_xh=float(applied_style.get("tracking_xh") or 0.0),
+                )
+                raster_result = _render_v2_owner_text_layer(
+                    image_np,
+                    text_data,
+                    plan,
+                    best_lines,
+                    best_font,
+                    positions,
+                    core_override=core,
+                    glyph_run_override=glyph_run,
+                )
+                img.paste(Image.fromarray(image_np))
+                if not plan.get("_suppress_render_qa"):
+                    _run_render_qa(text_data, plan, background_image=pre_render_np)
+                return raster_result
             if plan["sombra"] and plan["sombra_cor"]:
                 dx, dy = plan["sombra_offset"]
                 _render_safe_arc_text_layer(
@@ -17675,6 +19759,20 @@ def _render_single_text_block_unrotated(
                 _run_render_qa(text_data, plan, background_image=pre_render_np)
             return
 
+        raster_result = _render_v2_owner_text_layer(
+            image_np,
+            text_data,
+            plan,
+            best_lines,
+            best_font,
+            positions,
+        )
+        if raster_result is not None:
+            img.paste(Image.fromarray(image_np))
+            if not plan.get("_suppress_render_qa"):
+                _run_render_qa(text_data, plan, background_image=pre_render_np)
+            return raster_result
+
         if plan["sombra"] and plan["sombra_cor"]:
             dx, dy = plan["sombra_offset"]
             shadow_positions = [(lx + int(dx), ly + int(dy)) for lx, ly in positions]
@@ -17689,13 +19787,12 @@ def _render_single_text_block_unrotated(
                 plan["glow_cor"], int(plan["glow_px"]),
             )
 
-        gradient = plan["cor_gradiente"]
-        if gradient and len(gradient) >= 2:
+        gradient = canonicalize_linear_gradient(plan.get("cor_gradiente"))
+        if gradient is not None:
             _apply_safe_gradient_text(
                 image_np, best_lines, best_font, positions,
-                gradient[0], gradient[1],
+                gradient,
                 outline_color, outline_px,
-                start_y, total_text_height,
             )
         else:
             _render_safe_text_layer(
@@ -17736,13 +19833,11 @@ def _render_single_text_block_unrotated(
                         continue
                     draw.text((lx + dx, ly + dy), line, font=best_font, fill=outline_color)
 
-    gradient = plan["cor_gradiente"]
-    if gradient and len(gradient) >= 2:
+    gradient = canonicalize_linear_gradient(plan.get("cor_gradiente"))
+    if gradient is not None:
         _apply_gradient_text(
             render_layer, best_lines, best_font, positions,
-            gradient[0], gradient[1],
-            outline_color, outline_px,
-            start_y, total_text_height,
+            gradient,
         )
     else:
         draw = ImageDraw.Draw(render_layer)
@@ -17778,6 +19873,13 @@ def _render_single_text_block_unrotated(
         _run_render_qa(text_data, plan, background_image=pre_render_np)
 
 
+def _append_resolved_pre_render_flag(qa_metrics: dict, flag: str) -> None:
+    resolved = list(qa_metrics.get("resolved_pre_render_flags") or [])
+    if flag not in resolved:
+        resolved.append(flag)
+    qa_metrics["resolved_pre_render_flags"] = resolved
+
+
 def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
     """Verifica se o texto renderizado ultrapassa safe_text_box.
 
@@ -17803,10 +19905,11 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
         else plan.get("target_bbox")
     )
 
+    original_qa_flags = list(text_data.get("qa_flags") or [])
     render_geometry_flags = {"TEXT_CLIPPED", "TEXT_OVERFLOW", "render_outside_balloon"}
     qa_flags: list = [
         flag
-        for flag in list(text_data.get("qa_flags") or [])
+        for flag in original_qa_flags
         if str(flag) not in render_geometry_flags
     ]
     qa_metrics: dict = dict(text_data.get("qa_metrics") or {})
@@ -17861,6 +19964,12 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
             return True
         max_overhang = max(4, int(round(min(safe_w, safe_h) * 0.04)))
         real_target = balloon_bbox or target
+        profile = str(text_data.get("layout_profile") or text_data.get("block_profile") or "").strip().lower()
+        if profile == "translucent_balloon" and _contains_with_margin(real_target, render_bbox, margin=2):
+            # The white component inside a translucent panel can be only a
+            # local highlight.  The outer balloon is the real visual bound.
+            qa_metrics["render_safe_box_ignored_for_translucent_panel"] = True
+            return True
         if overhang_px > max_overhang or not _contains_with_margin(real_target, render_bbox, margin=2):
             return False
         qa_metrics["render_safe_overhang_px"] = int(overhang_px)
@@ -17993,6 +20102,7 @@ def _run_render_qa(text_data: dict, plan: dict, background_image=None) -> None:
         safe_text_box=safe,
         target_bbox=target,
         render_fit_flags=render_fit_flags,
+        original_qa_flags=original_qa_flags,
     )
     qa_flags, render_fit_flags = _revalidate_white_balloon_clipped_flag_after_layout(
         text_data,
@@ -18101,17 +20211,13 @@ def _apply_gradient_text(
     lines: list,
     font: ImageFont.FreeTypeFont,
     positions: list,
-    color_top: str,
-    color_bottom: str,
-    outline_color: str,
-    outline_px: int,
-    start_y: int,
-    total_height: int,
+    gradient: object,
 ) -> None:
-    """Render text with a vertical gradient fill on top of already-drawn outlines."""
-    ct = np.array(_parse_hex_color(color_top), dtype=float)
-    cb = np.array(_parse_hex_color(color_bottom), dtype=float)
-
+    """Render one directional gradient over the complete translated glyph union."""
+    canonical = canonicalize_linear_gradient(gradient)
+    if canonical is None:
+        raise ValueError("invalid text gradient")
+    positioned_masks: list[tuple[np.ndarray, int, int]] = []
     for line, (lx, ly) in zip(lines, positions):
         try:
             tbbox = font.getbbox(line)
@@ -18128,16 +20234,20 @@ def _apply_gradient_text(
         # Text mask
         mask = Image.new("L", (lw, lh), 0)
         ImageDraw.Draw(mask).text((pad, pad), line, font=font, fill=255)
+        positioned_masks.append((np.asarray(mask), lx - pad, ly - pad))
 
-        # Gradient strip mapped to global vertical position
-        gradient = np.zeros((lh, lw, 3), dtype=np.uint8)
-        for y in range(lh):
-            global_y = (ly + y - pad) - start_y
-            t = float(np.clip(global_y / max(1, total_height), 0.0, 1.0))
-            color = (ct * (1.0 - t) + cb * t).clip(0, 255).astype(np.uint8)
-            gradient[y, :] = color
-
-        img.paste(Image.fromarray(gradient, "RGB"), (lx - pad, ly - pad), mask)
+    combined = _positioned_mask_union(
+        (int(img.height), int(img.width)), positioned_masks
+    )
+    if combined is None:
+        return
+    union_mask, origin_x, origin_y = combined
+    gradient_patch = render_linear_gradient_rgb(union_mask, canonical)
+    img.paste(
+        Image.fromarray(gradient_patch, "RGB"),
+        (origin_x, origin_y),
+        Image.fromarray(union_mask, "L"),
+    )
 
 
 def _clamp_render_bbox_to_image(bbox: list[int] | None, img: Image.Image) -> list[int] | None:
@@ -18289,8 +20399,602 @@ def _render_text_block_on_expanded_canvas_if_needed(
 
 
 
+def _normalized_owner_payload(value: object) -> str:
+    return " ".join(unicodedata.normalize("NFC", str(value or "")).split())
+
+
+def _owner_canvas_polygon_mask(
+    value: object,
+    *,
+    width: int,
+    height: int,
+    label: str,
+) -> np.ndarray:
+    polygon = _canonical_owner_render_polygon(value)
+    if any(x >= width or y >= height for x, y in polygon):
+        raise ValueError(f"{label} escapes page geometry")
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillPoly(mask, [np.asarray(polygon, dtype=np.int32)], 255)
+    return mask
+
+
+def _owner_bbox_is_within(
+    inner: object,
+    outer: object,
+) -> bool:
+    inner_bbox = _layout_bbox(inner)
+    outer_bbox = _layout_bbox(outer)
+    if inner_bbox is None or outer_bbox is None:
+        return False
+    return bool(
+        outer_bbox[0] <= inner_bbox[0] < inner_bbox[2] <= outer_bbox[2]
+        and outer_bbox[1] <= inner_bbox[1] < inner_bbox[3] <= outer_bbox[3]
+    )
+
+
+def _owner_quality_score(quality: dict) -> tuple[float, float, int]:
+    source_ratio = quality.get("source_scale_ratio")
+    if isinstance(source_ratio, (int, float)) and not isinstance(source_ratio, bool):
+        ratio_distance = abs(float(source_ratio) - 1.0)
+    else:
+        ratio_distance = 0.0
+    occupancy = float(quality.get("safe_height_occupancy", 0.0) or 0.0)
+    return ratio_distance, -occupancy, -int(quality.get("font_size_final", 0) or 0)
+
+
+_MAX_OWNER_PROPORTIONAL_RENDER_ATTEMPTS = 16
+
+
+def _owner_candidate_font_sizes(text_data: dict, plan: dict) -> range:
+    bounds = _owner_font_interval(
+        plan.get("font_size_bounds_px"),
+        label="font_size_bounds_px",
+    )
+    if bounds is None:
+        raise ValueError("owner render plan is missing font_size_bounds_px")
+    lower, upper = bounds
+    minimum = max(lower, _minimum_legible_font_px(text_data, plan))
+    return range(min(96, upper), minimum - 1, -1)
+
+
+def _sample_owner_candidate_font_sizes(candidate_sizes: Iterable[int]) -> list[int]:
+    sizes = [int(size) for size in candidate_sizes]
+    if len(sizes) <= _MAX_OWNER_PROPORTIONAL_RENDER_ATTEMPTS:
+        return sizes
+    last_index = len(sizes) - 1
+    sampled_indices = {
+        int(round(index * last_index / float(_MAX_OWNER_PROPORTIONAL_RENDER_ATTEMPTS - 1)))
+        for index in range(_MAX_OWNER_PROPORTIONAL_RENDER_ATTEMPTS)
+    }
+    return [sizes[index] for index in sorted(sampled_indices)]
+
+
+def _evaluate_rendered_owner_candidate(
+    *,
+    before_np: np.ndarray,
+    after_image: Image.Image,
+    child: dict,
+    plan: dict,
+    safe_polygon: object,
+    raster_result: GlyphRasterResult | None = None,
+) -> dict:
+    after_np = np.asarray(after_image.convert("RGB"), dtype=np.uint8)
+    changed_mask = np.any(after_np != before_np, axis=2).astype(np.uint8)
+    if (
+        isinstance(raster_result, GlyphRasterResult)
+        and np.asarray(raster_result.glyph_core_mask).shape == changed_mask.shape
+    ):
+        glyph_core_mask = np.where(
+            np.asarray(raster_result.glyph_core_mask) > 0, 1, 0
+        ).astype(np.uint8)
+    else:
+        glyph_core_mask = changed_mask
+    safe_mask = _owner_canvas_polygon_mask(
+        safe_polygon,
+        width=after_image.width,
+        height=after_image.height,
+        label="owner render safe polygon",
+    )
+    quality = evaluate_owner_render_quality(
+        render_bbox=list(child.get("render_bbox") or []),
+        safe_bbox=list(plan.get("safe_text_box") or plan.get("target_bbox") or []),
+        safe_mask=safe_mask,
+        glyph_core_mask=glyph_core_mask,
+        glyph_pixels=int(np.count_nonzero(glyph_core_mask)),
+        font_size_final=int(child.get("font_size_final", 0) or 0),
+        minimum_legible_font_px=int(child.get("minimum_legible_font_px", 0) or 0),
+        source_ink_heights_px=tuple(child.get("source_ink_heights_px") or ()),
+        source_x_heights_px=tuple(child.get("source_x_heights_px") or ()),
+        source_evidence_confidence=float(
+            child.get("source_scale_evidence_confidence", 0.0) or 0.0
+        ),
+        page_width=after_image.width,
+        page_height=after_image.height,
+        translated_text=str(child.get("translated_payload") or child.get("translated") or ""),
+        layout_profile=str(child.get("layout_profile") or plan.get("layout_profile") or ""),
+        trusted_container=bool(plan.get("trusted_container", True)),
+    ).to_dict()
+    child["owner_render_quality"] = quality
+    render_layout_contract = child.get("render_layout_contract")
+    if isinstance(render_layout_contract, dict):
+        render_layout_contract["owner_render_quality"] = copy.deepcopy(quality)
+    metrics = child.setdefault("qa_metrics", {})
+    if isinstance(metrics, dict):
+        metrics["owner_render_quality"] = copy.deepcopy(quality)
+    return quality
+
+
+def _mark_owner_proportional_review(
+    text_data: dict,
+    *,
+    attempts: list[dict],
+    minimum_font_size: int,
+    diagnostic_quality: dict | None = None,
+) -> None:
+    text_data.pop("render_bbox", None)
+    text_data["fit_status"] = "below_proportional_legibility"
+    text_data["render_completed"] = False
+    text_data["font_size_final"] = 0
+    text_data["minimum_legible_font_px"] = int(minimum_font_size)
+    text_data["route_action"] = "review_required"
+    text_data["route_reason"] = "owner_below_proportional_legibility"
+    _merge_qa_flags(
+        text_data,
+        ["fit_below_proportional_legibility", "owner_render_review_required"],
+    )
+    text_data["fit_attempts"] = attempts[-8:]
+    if diagnostic_quality is not None:
+        text_data["owner_render_quality"] = copy.deepcopy(diagnostic_quality)
+        metrics = text_data.setdefault("qa_metrics", {})
+        if isinstance(metrics, dict):
+            metrics["owner_render_quality"] = copy.deepcopy(diagnostic_quality)
+
+
+def _render_single_owner_proportionally(
+    img: Image.Image,
+    text_data: dict,
+    *,
+    pre_render_np: np.ndarray | None,
+) -> GlyphRasterResult | None:
+    owner_plan = plan_text_layout(text_data)
+    raw_candidate_sizes = list(_owner_candidate_font_sizes(text_data, owner_plan))
+    candidate_sizes = _sample_owner_candidate_font_sizes(raw_candidate_sizes)
+    if len(candidate_sizes) < len(raw_candidate_sizes):
+        text_data.setdefault("_render_debug", {})[
+            "owner_proportional_candidate_sampling"
+        ] = {
+            "raw_count": len(raw_candidate_sizes),
+            "sampled_count": len(candidate_sizes),
+            "sampled_sizes": list(candidate_sizes),
+        }
+    before_np = np.asarray(img.convert("RGB"), dtype=np.uint8).copy()
+    accepted: list[
+        tuple[
+            tuple[float, float, int],
+            Image.Image,
+            dict,
+            GlyphRasterResult | None,
+        ]
+    ] = []
+    attempts: list[dict] = []
+    diagnostic_quality: dict | None = None
+
+    for candidate_size in candidate_sizes:
+        child = copy.deepcopy(text_data)
+        child["source_font_bounds_px"] = [candidate_size, candidate_size]
+        child["container_font_bounds_px"] = [candidate_size, candidate_size]
+        child_plan = plan_text_layout(child)
+        if not _fits_in_box(
+            str(child.get("translated") or child.get("translated_payload") or ""),
+            str(child_plan.get("font_name") or ""),
+            candidate_size,
+            int(child_plan.get("max_width", 0) or 0),
+            int(child_plan.get("max_height", 0) or 0),
+            float(child_plan.get("line_spacing_ratio", 0.2) or 0.2),
+        ):
+            attempts.append({"font_px": candidate_size, "status": "overflow", "reason": "nominal_overflow"})
+            continue
+        trial_image = img.copy()
+        raster_result = _render_single_text_block(
+            trial_image,
+            child,
+            child_plan,
+            pre_render_np=pre_render_np,
+        )
+        _finalize_render_completion_contract(child)
+        quality = _evaluate_rendered_owner_candidate(
+            before_np=before_np,
+            after_image=trial_image,
+            child=child,
+            plan=child_plan,
+            safe_polygon=text_data.get("render_safe_polygon_page"),
+            raster_result=raster_result,
+        )
+        core_bbox = (
+            raster_result.glyph_core_envelope
+            if isinstance(raster_result, GlyphRasterResult)
+            else child.get("render_bbox")
+        )
+        diagnostic_quality = quality
+        accepted_ok = bool(
+            child.get("render_completed")
+            and quality.get("status") == "ok"
+            and (
+                not isinstance(raster_result, GlyphRasterResult)
+                or raster_result.status in {"applied", "fallback"}
+            )
+            and _owner_bbox_is_within(core_bbox, child_plan.get("safe_text_box"))
+        )
+        attempts.append(
+            {
+                "font_px": candidate_size,
+                "status": "ok" if accepted_ok else "rejected",
+                "reason": (
+                    "ok"
+                    if accepted_ok
+                    else (
+                        "raster_materialization_unavailable"
+                        if isinstance(raster_result, GlyphRasterResult)
+                        and raster_result.status != "applied"
+                        else str(quality.get("status") or "invalid")
+                    )
+                ),
+            }
+        )
+        if accepted_ok:
+            accepted.append(
+                (_owner_quality_score(quality), trial_image, child, raster_result)
+            )
+
+    if not accepted:
+        _mark_owner_proportional_review(
+            text_data,
+            attempts=attempts,
+            minimum_font_size=_minimum_legible_font_px(text_data, owner_plan),
+            diagnostic_quality=diagnostic_quality,
+        )
+        return
+
+    _score, selected_image, selected_child, raster_result = min(
+        accepted,
+        key=lambda item: (
+            0
+            if isinstance(item[3], GlyphRasterResult)
+            and item[3].status == "applied"
+            else 1,
+            *item[0],
+        ),
+    )
+    img.paste(selected_image)
+    text_data.update(selected_child)
+    text_data["fit_attempts"] = attempts[-8:]
+    text_data["fit_status"] = "ok"
+    text_data["render_completed"] = True
+    text_data["qa_flags"] = [
+        flag
+        for flag in list(text_data.get("qa_flags") or [])
+        if str(flag) not in {
+            "fit_below_minimum_legible",
+            "fit_below_proportional_legibility",
+            "owner_render_review_required",
+        }
+    ]
+    return raster_result
+
+
+def _render_owner_text_block(
+    img: Image.Image,
+    text_data: dict,
+    *,
+    pre_render_np: np.ndarray | None = None,
+) -> GlyphRasterResult | None:
+    """Render visual chunks without changing the owner's semantic payload."""
+
+    payload = text_data.get("translated_payload")
+    if not isinstance(payload, str) or not payload.strip():
+        raise ValueError("owner render block is missing its translated payload")
+    if text_data.get("translated") != payload:
+        raise ValueError("owner render alias diverges from translated_payload")
+
+    # Owner mode preserves semantic identity, but still needs the same
+    # functional foreground/background contrast policy as regular rendering.
+    # This is visual planning only: it never rewrites or partitions payloads.
+    _apply_auto_style_policy_if_needed(img, text_data)
+    if _should_apply_auto_style_policy(text_data):
+        text_data["visual_profile"] = copy.deepcopy(text_data.get("estilo") or {})
+    render_style = _canonical_render_style(text_data.get("estilo", {}))
+    visual_payload = payload.upper() if render_style.get("force_upper") else payload
+    text_data["_visual_render_payload"] = visual_payload
+
+    regions = [
+        copy.deepcopy(region)
+        for region in list(text_data.get("layout_regions", []) or [])
+        if isinstance(region, dict)
+    ]
+    regions.sort(
+        key=lambda region: (
+            int(region.get("order", 0) or 0),
+            str(region.get("layout_region_id") or ""),
+        )
+    )
+    if len(regions) <= 1:
+        visual_block = copy.deepcopy(text_data)
+        visual_block["translated"] = visual_payload
+        result = _render_single_owner_proportionally(
+            img,
+            visual_block,
+            pre_render_np=pre_render_np,
+        )
+        text_data.update(visual_block)
+        text_data["translated"] = payload
+        text_data["translated_payload"] = payload
+        return result
+
+    areas: list[float] = []
+    for region in regions:
+        bbox = _layout_bbox(region.get("bbox_page") or region.get("bbox"))
+        if bbox is None:
+            raise ValueError("owner layout region is missing a canonical bbox_page")
+        areas.append(float(max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))))
+    total_area = sum(areas)
+    chunks = _split_text_for_connected_balloons(
+        payload,
+        len(regions),
+        [area / total_area for area in areas],
+    )
+    if len(chunks) != len(regions) or any(not chunk.strip() for chunk in chunks):
+        raise ValueError("owner visual chunk partition is incomplete")
+    if _normalized_owner_payload(" ".join(chunks)) != _normalized_owner_payload(payload):
+        raise ValueError("owner visual chunks do not reconstruct translated_payload")
+
+    owner_plan = plan_text_layout(text_data)
+    font_bounds = _owner_font_interval(
+        owner_plan.get("font_size_bounds_px"),
+        label="font_size_bounds_px",
+    )
+    if font_bounds is None:
+        raise ValueError("connected owner is missing common font-size bounds")
+    minimum_font_size, maximum_font_size = font_bounds
+
+    selected_image: Image.Image | None = None
+    selected_children: list[dict] | None = None
+    common_font_size = 0
+    selected_joint_score: tuple[float, float, int] | None = None
+    joint_fit_attempts: list[dict] = []
+    child_safe_boxes = [
+        [int(value) for value in bbox]
+        for region in regions
+        if (bbox := _layout_bbox(region.get("bbox_page") or region.get("bbox")))
+        is not None
+    ]
+    if len(child_safe_boxes) != len(regions):
+        raise ValueError("owner visual chunk is missing verified bbox geometry")
+
+    for candidate_size in range(maximum_font_size, minimum_font_size - 1, -1):
+        trial_image = img.copy()
+        trial_children: list[dict] = []
+        candidate_reason = "ok"
+
+        for index, (region, chunk) in enumerate(zip(regions, chunks, strict=True)):
+            bbox = _layout_bbox(region.get("bbox_page") or region.get("bbox"))
+            polygon = region.get("safe_polygon_page")
+            if bbox is None or polygon is None:
+                raise ValueError("owner visual chunk is missing verified geometry")
+            child = copy.deepcopy(text_data)
+            render_chunk = chunk.upper() if render_style.get("force_upper") else chunk
+            for legacy_geometry_key in (
+                "source_bbox",
+                "text_pixel_bbox",
+                "line_polygons",
+                "source_line_polygons",
+            ):
+                child.pop(legacy_geometry_key, None)
+            child.update(
+                {
+                    "bbox": list(bbox),
+                    "translated": render_chunk,
+                    "translated_payload": chunk,
+                    "layout_regions": [copy.deepcopy(region)],
+                    "layout_region_ids": [str(region.get("layout_region_id") or "")],
+                    "render_safe_polygon_page": copy.deepcopy(polygon),
+                    "paint_safe_polygon_page": copy.deepcopy(
+                        region.get("paint_safe_polygon_page") or polygon
+                    ),
+                    "safe_text_box": list(bbox),
+                    "layout_safe_bbox": list(bbox),
+                    "layout_bbox": list(bbox),
+                    "balloon_bbox": list(bbox),
+                    "balloon_subregions": [],
+                    "connected_lobe_bboxes": [],
+                    "source_font_bounds_px": [candidate_size, candidate_size],
+                    "container_font_bounds_px": [candidate_size, candidate_size],
+                    "visual_chunk_index": index,
+                    "visual_chunk_count": len(chunks),
+                    "_owner_render_mode": True,
+                }
+            )
+            child_plan = plan_text_layout(child)
+            if not _fits_in_box(
+                render_chunk,
+                str(child_plan.get("font_name") or ""),
+                candidate_size,
+                int(child_plan.get("max_width", 0) or 0),
+                int(child_plan.get("max_height", 0) or 0),
+                float(child_plan.get("line_spacing_ratio", 0.2) or 0.2),
+            ):
+                candidate_reason = "nominal_overflow"
+                break
+
+            before_child = np.asarray(trial_image.convert("RGB"), dtype=np.uint8).copy()
+            raster_result = _render_single_text_block(
+                trial_image,
+                child,
+                child_plan,
+                pre_render_np=pre_render_np,
+            )
+            _finalize_render_completion_contract(child)
+            after_child = np.asarray(trial_image.convert("RGB"), dtype=np.uint8)
+            changed_child = np.any(after_child != before_child, axis=2)
+            region_mask = _owner_canvas_polygon_mask(
+                polygon,
+                width=img.width,
+                height=img.height,
+                label=f"owner layout region {region.get('layout_region_id') or index}",
+            )
+            paint_region_mask = _owner_canvas_polygon_mask(
+                region.get("paint_safe_polygon_page") or polygon,
+                width=img.width,
+                height=img.height,
+                label=(
+                    f"owner layout region {region.get('layout_region_id') or index} "
+                    "paint polygon"
+                ),
+            )
+            quality = _evaluate_rendered_owner_candidate(
+                before_np=before_child,
+                after_image=trial_image,
+                child=child,
+                plan=child_plan,
+                safe_polygon=polygon,
+                raster_result=raster_result,
+            )
+            core_mask = (
+                np.where(np.asarray(raster_result.glyph_core_mask) > 0, 1, 0)
+                if isinstance(raster_result, GlyphRasterResult)
+                else changed_child.astype(np.uint8)
+            )
+            core_bbox = (
+                raster_result.glyph_core_envelope
+                if isinstance(raster_result, GlyphRasterResult)
+                else child.get("render_bbox")
+            )
+            child_is_valid = bool(
+                child.get("render_completed")
+                and str(child.get("fit_status") or "").strip().lower() == "ok"
+                and int(child.get("font_size_final", 0) or 0) == candidate_size
+                and quality.get("status") == "ok"
+                and np.any(changed_child)
+                and not np.any(changed_child & (paint_region_mask == 0))
+                and not np.any((core_mask > 0) & (region_mask == 0))
+                and _owner_bbox_is_within(core_bbox, bbox)
+            )
+            if not child_is_valid:
+                candidate_reason = "render_outside_layout_region"
+                break
+            if not isinstance(raster_result, GlyphRasterResult):
+                candidate_reason = "child_raster_contract_missing"
+                break
+            child["_style_v2_raster_result"] = raster_result
+            child["_style_raster_segment"] = _build_owner_child_raster_segment(
+                child=child,
+                region=region,
+                order=index,
+                before=before_child,
+                rendered=after_child,
+                raster_result=raster_result,
+            )
+            trial_children.append(child)
+
+        candidate_valid = len(trial_children) == len(regions)
+        joint_fit_attempts.append(
+            {
+                "font_px": int(candidate_size),
+                "status": "ok" if candidate_valid else "overflow",
+                "reason": candidate_reason,
+            }
+        )
+        if candidate_valid:
+            joint_score = max(
+                (_owner_quality_score(child["owner_render_quality"]) for child in trial_children),
+                default=(999.0, 0.0, 0),
+            )
+            if selected_joint_score is None or joint_score < selected_joint_score:
+                selected_joint_score = joint_score
+                selected_image = trial_image
+                selected_children = trial_children
+                common_font_size = candidate_size
+
+    if selected_image is None or selected_children is None:
+        _mark_owner_proportional_review(
+            text_data,
+            attempts=joint_fit_attempts,
+            minimum_font_size=minimum_font_size,
+        )
+        text_data["_render_debug"] = {
+            "joint_font_fit_status": "below_proportional_legibility",
+            "joint_font_fit_attempts": joint_fit_attempts,
+            "child_safe_text_boxes": child_safe_boxes,
+        }
+        text_data["visual_chunks"] = [
+            {
+                "owner_id": text_data.get("owner_id"),
+                "layout_region_id": str(region.get("layout_region_id") or ""),
+                "visual_chunk_index": index,
+                "visual_chunk_count": len(chunks),
+                "text": chunk,
+                "font_size": 0,
+            }
+            for index, (region, chunk) in enumerate(
+                zip(regions, chunks, strict=True)
+            )
+        ]
+        text_data["translated"] = payload
+        text_data["translated_payload"] = payload
+        return
+
+    img.paste(selected_image)
+    children = selected_children
+
+    aggregate = _aggregate_split_render_blocks(children)
+    if aggregate is not None:
+        _copy_render_debug_fields(text_data, aggregate)
+    text_data["fit_status"] = "ok"
+    text_data["font_size_final"] = int(common_font_size)
+    text_data["minimum_legible_font_px"] = int(minimum_font_size)
+    text_data["render_completed"] = True
+    text_data["fit_attempts"] = joint_fit_attempts[-4:]
+    text_data["qa_flags"] = [
+        flag
+        for flag in list(text_data.get("qa_flags") or [])
+        if str(flag) != "fit_below_minimum_legible"
+    ]
+    render_debug = dict(text_data.get("_render_debug") or {})
+    render_debug["joint_font_fit_status"] = "ok"
+    render_debug["joint_font_size_px"] = int(common_font_size)
+    render_debug["joint_font_fit_attempts"] = joint_fit_attempts
+    text_data["_render_debug"] = render_debug
+    text_data["visual_chunks"] = [
+        {
+            "owner_id": text_data.get("owner_id"),
+            "layout_region_id": str(region.get("layout_region_id") or ""),
+            "visual_chunk_index": index,
+            "visual_chunk_count": len(chunks),
+            "text": chunk,
+            "font_size": int(child.get("font_size_final", common_font_size) or common_font_size),
+            "render_quality": copy.deepcopy(child.get("owner_render_quality") or {}),
+        }
+        for index, (region, chunk, child) in enumerate(
+            zip(regions, chunks, children, strict=True)
+        )
+    ]
+    text_data["translated"] = payload
+    text_data["translated_payload"] = payload
+    aggregate_result = text_data.get("_style_v2_raster_result")
+    return (
+        aggregate_result
+        if isinstance(aggregate_result, GlyphRasterResult)
+        else None
+    )
+
+
 def render_text_block(img: Image.Image, text_data: dict, img_size: tuple = None, pre_render_np=None):
     del img_size
+    if text_data.get("_owner_render_mode"):
+        return _render_owner_text_block(
+            img,
+            text_data,
+            pre_render_np=pre_render_np,
+        )
     if str(text_data.get("content_class") or "").strip().lower() == "sfx":
         from sfx.renderer import render_sfx_layer
 
@@ -18798,6 +21502,7 @@ def _revalidate_tight_contract_typeset_flags_after_layout(
     safe_text_box,
     target_bbox,
     render_fit_flags: list[str],
+    original_qa_flags: list | None = None,
 ) -> tuple[list, list[str]]:
     tight_fit = qa_metrics.get("contract_bbox_tight_but_visual_balloon_fit_ok")
     if not isinstance(tight_fit, dict):
@@ -18832,10 +21537,12 @@ def _revalidate_tight_contract_typeset_flags_after_layout(
         }
         return qa_flags, render_fit_flags
 
+    prior_flags = {str(item) for item in original_qa_flags or []}
+    current_flags = {str(item) for item in qa_flags}
     resolved_flags = [
         flag
         for flag in ("TEXT_CLIPPED", "TEXT_OVERFLOW", "fit_below_minimum_legible")
-        if flag in {str(item) for item in qa_flags}
+        if flag in current_flags or flag in prior_flags
     ]
     if not resolved_flags:
         return qa_flags, render_fit_flags
@@ -18945,6 +21652,11 @@ def _copy_render_debug_fields(source: dict, rendered: dict) -> None:
         "_debug_safe_text_box",
         "layout_safe_bbox",
         "layout_safe_reason",
+        "layout_category",
+        "card_panel_id",
+        "card_panel_role",
+        "card_panel_bbox",
+        "card_joint_layout_status",
         "bubble_id",
         "bubble_mask_bbox",
         "bubble_inner_bbox",
@@ -18955,12 +21667,17 @@ def _copy_render_debug_fields(source: dict, rendered: dict) -> None:
         "render_bbox",
         "fit_attempts",
         "fit_status",
+        "render_completed",
+        "font_size_final",
+        "minimum_legible_font_px",
         "rotation_deg",
         "rotation_source",
         "qa_metrics",
         "_render_debug",
         "_render_debug_candidates",
         "_render_debug_skipped",
+        "_style_raster_segments",
+        "_style_v2_raster_result",
     ):
         value = rendered.get(key)
         if value is not None:
@@ -18994,6 +21711,165 @@ def _copy_render_debug_fields(source: dict, rendered: dict) -> None:
     _drop_stale_render_geometry_flags(source)
 
 
+def _build_owner_child_raster_segment(
+    *,
+    child: dict,
+    region: dict,
+    order: int,
+    before: np.ndarray,
+    rendered: np.ndarray,
+    raster_result: GlyphRasterResult,
+) -> dict[str, Any]:
+    owner_id = _owner_identity(child.get("owner_id"), label="child owner_id")
+    raw_profile = child.get("visual_profile_v2")
+    if not isinstance(raw_profile, dict):
+        raise ValueError("child raster contract is missing visual profile")
+    profile = validate_owner_visual_profile(
+        raw_profile,
+        expected_owner_id=owner_id,
+        expected_sha256=str(child.get("visual_profile_sha256") or ""),
+    )
+    bbox = _layout_bbox(region.get("bbox_page") or region.get("bbox"))
+    if bbox is None:
+        raise ValueError("child raster contract is missing bbox_page")
+    changed_mask = np.where(
+        np.any(np.asarray(rendered) != np.asarray(before), axis=2),
+        255,
+        0,
+    ).astype(np.uint8)
+    if not np.any(changed_mask):
+        raise ValueError("child raster contract has no rendered pixels")
+    status, _requested, applied, abstained = _owner_style_contract_attributes(
+        profile,
+        raster_result,
+        render_completed=True,
+    )
+    segment: dict[str, Any] = {
+        "segment_id": str(region.get("layout_region_id") or f"region_{order}"),
+        "order": int(order),
+        "owner_id": owner_id,
+        "visual_profile_sha256": profile["visual_profile_sha256"],
+        "bbox_page": [int(value) for value in bbox],
+        "status": status,
+        "applied_attributes": applied,
+        "abstained_attributes": abstained,
+        "glyph_core_envelope": _owner_style_mask_envelope(
+            raster_result.glyph_core_mask
+        ),
+        "effect_envelope": _owner_style_mask_envelope(raster_result.effect_mask),
+        "rendered_before_sha256": _owner_array_sha256(before),
+        "rendered_patch_sha256": _owner_masked_pixels_sha256(
+            rendered,
+            changed_mask,
+        ),
+        "rendered_after_sha256": _owner_array_sha256(rendered),
+    }
+    segment["segment_sha256"] = owner_style_raster_segment_sha256(segment)
+    return validate_owner_style_raster_segment(
+        segment,
+        expected_owner_id=owner_id,
+        expected_visual_profile_sha256=profile["visual_profile_sha256"],
+    )
+
+
+def _aggregate_owner_style_raster_segments(blocks: list[dict]) -> list[dict[str, Any]]:
+    owner_blocks = [
+        block
+        for block in blocks
+        if isinstance(block, dict) and bool(block.get("_owner_render_mode"))
+    ]
+    if not owner_blocks:
+        return []
+    owner_ids = {str(block.get("owner_id") or "") for block in owner_blocks}
+    profile_hashes = {
+        str(block.get("visual_profile_sha256") or "") for block in owner_blocks
+    }
+    if len(owner_ids) != 1:
+        raise ValueError("child raster contract owner mismatch")
+    if len(profile_hashes) != 1:
+        raise ValueError("child raster contract visual profile mismatch")
+    owner_id = next(iter(owner_ids))
+    profile_hash = next(iter(profile_hashes))
+    segments: list[dict[str, Any]] = []
+    for block in owner_blocks:
+        raw_segment = block.get("_style_raster_segment")
+        if not isinstance(raw_segment, dict):
+            raise ValueError("child raster contract is missing")
+        segments.append(
+            validate_owner_style_raster_segment(
+                raw_segment,
+                expected_owner_id=owner_id,
+                expected_visual_profile_sha256=profile_hash,
+            )
+        )
+    segments.sort(key=lambda item: (item["order"], item["segment_id"]))
+    if len({item["segment_id"] for item in segments}) != len(segments):
+        raise ValueError("child raster contract has duplicate segment_id")
+    for index, left in enumerate(segments):
+        lx1, ly1, lx2, ly2 = left["bbox_page"]
+        for right in segments[index + 1 :]:
+            rx1, ry1, rx2, ry2 = right["bbox_page"]
+            if min(lx2, rx2) > max(lx1, rx1) and min(ly2, ry2) > max(ly1, ry1):
+                raise ValueError("child raster contracts overlap")
+    return segments
+
+
+def _aggregate_child_glyph_raster_results(blocks: list[dict]) -> GlyphRasterResult:
+    results = [block.get("_style_v2_raster_result") for block in blocks]
+    if not results or any(not isinstance(item, GlyphRasterResult) for item in results):
+        raise ValueError("child raster contract is missing renderer result")
+    typed_results = [item for item in results if isinstance(item, GlyphRasterResult)]
+    shape = typed_results[0].glyph_core_mask.shape
+    if any(item.glyph_core_mask.shape != shape for item in typed_results):
+        raise ValueError("child raster contracts use divergent canvas shapes")
+    core = np.zeros(shape, dtype=np.uint8)
+    effect = np.zeros(shape, dtype=np.uint8)
+    rgba = np.zeros((*shape, 4), dtype=np.uint8)
+    for item in typed_results:
+        core = np.maximum(core, item.glyph_core_mask)
+        effect = np.maximum(effect, item.effect_mask)
+        alpha = item.rgba[:, :, 3] > rgba[:, :, 3]
+        rgba[alpha] = item.rgba[alpha]
+    applied: dict[str, Any] = {}
+    abstained: dict[str, str] = {}
+    attribute_names = set().union(
+        *(set(item.applied_attributes) | set(item.abstained_attributes) for item in typed_results)
+    )
+    for name in attribute_names:
+        values = [item.applied_attributes.get(name) for item in typed_results]
+        if all(name in item.applied_attributes for item in typed_results) and all(
+            value == values[0] for value in values[1:]
+        ):
+            applied[name] = copy.deepcopy(values[0])
+        else:
+            reason = next(
+                (
+                    str(item.abstained_attributes[name])
+                    for item in typed_results
+                    if name in item.abstained_attributes
+                ),
+                "child_attribute_not_consistent",
+            )
+            abstained[name] = reason
+    status = (
+        "review_required"
+        if any(item.status == "review_required" for item in typed_results)
+        else ("applied" if applied else "fallback")
+    )
+    return GlyphRasterResult(
+        status=status,
+        rgba=rgba,
+        glyph_core_mask=core,
+        effect_mask=effect,
+        glyph_core_envelope=_owner_mask_bbox(core),
+        effect_envelope=_owner_mask_bbox(effect),
+        observed_attributes=applied,
+        abstained_attributes=abstained,
+        metrics={"segment_count": len(typed_results)},
+        unavailable_attributes=copy.deepcopy(abstained),
+    )
+
+
 def _aggregate_split_render_blocks(blocks: list[dict]) -> dict | None:
     rendered_blocks = [
         block
@@ -19006,6 +21882,8 @@ def _aggregate_split_render_blocks(blocks: list[dict]) -> dict | None:
     ]
     if not rendered_blocks:
         return None
+
+    raster_segments = _aggregate_owner_style_raster_segments(rendered_blocks)
 
     aggregate = dict(rendered_blocks[0])
     qa_metrics = dict(aggregate.get("qa_metrics") or {})
@@ -19068,6 +21946,11 @@ def _aggregate_split_render_blocks(blocks: list[dict]) -> dict | None:
     if child_safe_boxes:
         render_debug["child_safe_text_boxes"] = child_safe_boxes
     aggregate["_render_debug"] = render_debug
+    if raster_segments:
+        aggregate["_style_raster_segments"] = raster_segments
+        aggregate["_style_v2_raster_result"] = (
+            _aggregate_child_glyph_raster_results(rendered_blocks)
+        )
     return aggregate
 
 
@@ -19392,6 +22275,13 @@ def _record_render_plan(ocr_page: dict, block: dict) -> None:
         "font_name": render_debug.get("font_name"),
         "font_size_seed": render_debug.get("font_size_seed"),
         "font_size_final": render_debug.get("font_size_final"),
+        "minimum_legible_font_px": block.get("minimum_legible_font_px"),
+        "render_completed": block.get("render_completed"),
+        "layout_category": block.get("layout_category"),
+        "card_panel_id": block.get("card_panel_id"),
+        "card_panel_role": block.get("card_panel_role"),
+        "card_panel_bbox": block.get("card_panel_bbox"),
+        "card_joint_layout_status": block.get("card_joint_layout_status"),
         "line_height": render_debug.get("line_height"),
         "wrapped_lines": render_debug.get("wrapped_lines", []),
         "rotation_deg": block.get("rotation_deg", render_debug.get("rotation_deg")),
@@ -19746,6 +22636,39 @@ def _cleanup_bbox4(value, width: int, height: int, *, band_y_top: int = 0) -> li
 def _text_mask_cleanup_allowed(text: dict) -> bool:
     if not isinstance(text, dict):
         return False
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    metrics = text.get("qa_metrics") if isinstance(text.get("qa_metrics"), dict) else {}
+    connected_skip_probe = (
+        str(text.get("bubble_mask_source") or "").strip().lower() == "image_dark_bubble_mask"
+        and bool(flags & {
+            "dark_connected_component_safe_partition",
+            "dark_connected_lobe_anchor_component_filtered",
+            "broad_connected_bubble_mask_rejected",
+            "dark_connected_lobe_mask_rebuilt_from_glyphs",
+        })
+        and any(isinstance(metrics.get(key), dict) for key in (
+            "dark_connected_bubble_broad_mask_rejected",
+            "dark_connected_lobe_final_fit_repaired",
+            "dark_connected_local_anchor_overrode_scale_contract",
+            "dark_connected_text_pixel_bbox_replaced_by_lobe_bbox",
+        ))
+    )
+    if (
+        str(text.get("layout_category") or "").strip().lower() == "item_card"
+        or bool(str(text.get("card_panel_id") or "").strip())
+        or ("visual_text_only_inpaint_contract" in flags and not connected_skip_probe)
+    ):
+        # Visual cards are already cleaned by their glyph/expanded inpaint
+        # mask.  Painting a rectangular cleanup fill here destroys gradients
+        # and was the direct source of the black boxes over colored cards.
+        return False
+    profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+    if profile in {
+        "translucent_balloon",
+        "connected_balloon",
+        "standard",
+    }:
+        return False
     translated = str(text.get("translated") or text.get("traduzido") or "").strip()
     if not translated:
         return False
@@ -19761,7 +22684,34 @@ def _text_mask_cleanup_allowed(text: dict) -> bool:
         return False
     if render_policy in {"merged_into_primary", "preserve_original", "review_required"}:
         return False
-    return route_action.startswith("translate") or route_action == ""
+    if not (route_action.startswith("translate") or route_action == ""):
+        return False
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    style = text.get("estilo") or text.get("style") or {}
+    if not isinstance(style, dict):
+        style = {}
+    white_bubble_cleanup_case = _is_translator_note_text_only_mask(text) or (
+        len(translated) <= 28
+        and (
+            "!" in translated
+            or "!" in original
+            or (bool(style.get("bold")) and bool(style.get("italico") or style.get("italic")) and bool(style.get("force_upper")))
+        )
+    )
+    return source in {
+        "image_dark_bubble_mask",
+        "image_dark_panel_mask",
+        "derived_card_panel_mask",
+    } or (white_bubble_cleanup_case and (
+        source == "image_white_bubble_mask" or profile in {"white_balloon", "speech_balloon"}
+    )) or bool(
+        flags
+        & {
+            "visual_text_only_inpaint_contract",
+            "text_contract_direct_fill",
+            "dark_panel_style_grouped",
+        }
+    )
 
 
 def _cleanup_fill_rgb_for_text(img: Image.Image, text: dict, bbox: list[int]) -> tuple[int, int, int]:
@@ -19773,6 +22723,9 @@ def _cleanup_fill_rgb_for_text(img: Image.Image, text: dict, bbox: list[int]) ->
         "dark_panel_style_grouped",
     }:
         return (0, 0, 0)
+    white_sfx_fill = _sfx_white_bubble_cleanup_fill_rgb(img, text, bbox)
+    if white_sfx_fill is not None:
+        return white_sfx_fill
     raw_background = text.get("background_rgb")
     if isinstance(raw_background, (list, tuple)) and len(raw_background) >= 3:
         try:
@@ -19950,6 +22903,106 @@ def _should_skip_dark_connected_lobe_rect_cleanup(text: dict, bbox: list[int]) -
     return True
 
 
+def _sfx_white_bubble_cleanup_fill_rgb(img: Image.Image, text: dict, bbox: list[int]) -> tuple[int, int, int] | None:
+    source = str(text.get("bubble_mask_source") or text.get("bubbleMaskSource") or "").strip().lower()
+    profile = str(text.get("layout_profile") or text.get("block_profile") or "").strip().lower()
+    flags = {str(flag).strip() for flag in text.get("qa_flags") or [] if str(flag).strip()}
+    if source != "image_white_bubble_mask" and profile not in {"white_balloon", "speech_balloon"}:
+        return None
+    if flags & {"translator_note_text_only_mask", "visual_text_only_inpaint_contract", "text_contract_direct_fill"}:
+        return None
+    content_class = str(text.get("content_class") or text.get("tipo") or "").strip().lower()
+    route_action = str(text.get("route_action") or "").strip().lower()
+    if content_class == "sfx" or route_action == "translate_sfx_inpaint_render":
+        return None
+    translated = str(text.get("translated") or text.get("traduzido") or "").strip()
+    original = str(text.get("original") or text.get("text") or "").strip()
+    style = text.get("estilo") or text.get("style") or {}
+    sfx_like = (
+        0 < len(translated) <= 28
+        and (
+            "!" in translated
+            or "!" in original
+            or bool(isinstance(style, dict) and (style.get("italico") or style.get("bold")) and style.get("force_upper"))
+        )
+    )
+    if not sfx_like:
+        return None
+    raw_background = text.get("background_rgb")
+    if isinstance(raw_background, (list, tuple)) and len(raw_background) >= 3:
+        try:
+            if sum(float(value) for value in raw_background[:3]) / 3.0 >= 238.0:
+                return None
+        except (TypeError, ValueError):
+            pass
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        sample = np.asarray(img.crop((x1, y1, x2, y2)).convert("RGB"), dtype=np.uint8)
+        if sample.size == 0:
+            return None
+        flat = sample.reshape(-1, 3).astype(np.float32)
+        luma = flat.mean(axis=1)
+        mean_luma = float(luma.mean())
+        std_luma = float(luma.std())
+        light_ratio = float((luma >= 238.0).mean())
+        if mean_luma < 238.0 or std_luma > 10.0 or light_ratio < 0.92:
+            _record_white_sfx_cleanup_fill_metric(
+                text,
+                decision="rejected",
+                reason="background_required_for_legibility",
+                old_background=text.get("background_rgb"),
+                new_background=None,
+                sample_mean_luma=mean_luma,
+                sample_luma_std=std_luma,
+                sample_light_ratio=light_ratio,
+            )
+            return None
+        fill = tuple(int(max(0, min(255, round(float(v))))) for v in np.median(flat, axis=0)[:3])
+        if sum(fill) / 3.0 < 245.0:
+            fill = (255, 255, 255)
+        _record_white_sfx_cleanup_fill_metric(
+            text,
+            decision="applied",
+            reason="gray_background_rect_not_allowed_for_white_jagged_bubble",
+            old_background=text.get("background_rgb"),
+            new_background=list(fill),
+            sample_mean_luma=mean_luma,
+            sample_luma_std=std_luma,
+            sample_light_ratio=light_ratio,
+        )
+        return fill
+    except Exception:
+        return None
+
+
+def _record_white_sfx_cleanup_fill_metric(
+    text: dict,
+    *,
+    decision: str,
+    reason: str,
+    old_background,
+    new_background,
+    sample_mean_luma: float,
+    sample_luma_std: float,
+    sample_light_ratio: float,
+) -> None:
+    metrics = text.setdefault("qa_metrics", {})
+    key = "sfx_white_bubble_background_removed" if decision == "applied" else "sfx_white_bubble_background_removal_rejected"
+    metrics[key] = {
+        "decision": decision,
+        "reason": reason,
+        "old_background": old_background,
+        "new_background": new_background,
+        "style_profile": str(text.get("layout_profile") or text.get("block_profile") or ""),
+        "render_bbox": text.get("render_bbox"),
+        "safe_text_box": text.get("safe_text_box") or text.get("_debug_safe_text_box"),
+        "source_bbox": text.get("source_text_mask_bbox") or text.get("_source_text_mask_bbox") or text.get("text_pixel_bbox"),
+        "sample_mean_luma": round(float(sample_mean_luma), 3),
+        "sample_luma_std": round(float(sample_luma_std), 3),
+        "sample_light_ratio": round(float(sample_light_ratio), 4),
+    }
+
+
 def _apply_text_mask_cleanup_before_render(img: Image.Image, texts: list[dict], ocr_page: dict | None = None) -> bool:
     if not texts:
         return False
@@ -19997,7 +23050,714 @@ def _apply_text_mask_cleanup_before_render(img: Image.Image, texts: list[dict], 
 
 
 
-def render_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
+def _owner_array_sha256(value: np.ndarray) -> str:
+    array = np.asarray(value)
+    digest = sha256()
+    digest.update(b"traduzai.ndarray.v1\0")
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(",".join(str(dimension) for dimension in array.shape).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(array.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _owner_masked_pixels_sha256(
+    image_rgb: np.ndarray,
+    mask: np.ndarray,
+) -> str:
+    image = np.ascontiguousarray(image_rgb, dtype=np.uint8)
+    binary_mask = np.where(np.asarray(mask) > 0, 255, 0).astype(np.uint8)
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("owner masked pixel hash requires an RGB image")
+    if binary_mask.shape != image.shape[:2]:
+        raise ValueError("owner masked pixel hash shape mismatch")
+    digest = sha256()
+    digest.update(b"traduzai.masked-rgb.v1\0")
+    digest.update(_owner_array_sha256(binary_mask).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(image[binary_mask > 0].tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _owner_style_mask_envelope(mask: np.ndarray) -> dict[str, Any]:
+    binary_mask = np.where(np.asarray(mask) > 0, 255, 0).astype(np.uint8)
+    return {
+        "bbox_page": list(_owner_mask_bbox(binary_mask) or ()),
+        "mask_sha256": _owner_array_sha256(binary_mask),
+        "pixel_count": int(np.count_nonzero(binary_mask)),
+    }
+
+
+def _owner_style_contract_attributes(
+    profile: dict[str, Any],
+    raster_result: GlyphRasterResult | None,
+    *,
+    render_completed: bool,
+) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, str]]:
+    evidence = profile.get("style_evidence_v2")
+    raw_evidence = evidence.get("attributes") if isinstance(evidence, dict) else {}
+    raw_evidence = raw_evidence if isinstance(raw_evidence, dict) else {}
+    requested = {
+        str(name): copy.deepcopy(value.get("value", "unknown"))
+        for name, value in raw_evidence.items()
+        if isinstance(value, dict)
+    }
+    decision = profile.get("style_application_decision_v2")
+    decision = decision if isinstance(decision, dict) else {}
+    decision_applied = dict(decision.get("applied_attributes") or {})
+    decision_abstained = {
+        str(name): str(reason or "profile_abstained")
+        for name, reason in dict(decision.get("abstained_attributes") or {}).items()
+    }
+    for name, value in decision_applied.items():
+        requested.setdefault(str(name), copy.deepcopy(value))
+    for name in decision_abstained:
+        requested.setdefault(name, "unknown")
+
+    if not render_completed:
+        return (
+            "review_required",
+            requested,
+            {},
+            {
+                name: decision_abstained.get(name, "render_not_completed")
+                for name in requested
+            },
+        )
+    if str(profile.get("status") or "") != "applied":
+        status = (
+            "review_required"
+            if str(profile.get("status") or "") == "review_required"
+            else "fallback"
+        )
+        return (
+            status,
+            requested,
+            {},
+            {
+                name: decision_abstained.get(name, "profile_not_applied")
+                for name in requested
+            },
+        )
+
+    runtime_applied = (
+        dict(raster_result.applied_attributes)
+        if raster_result is not None
+        else {}
+    )
+    runtime_abstained = (
+        dict(raster_result.abstained_attributes)
+        if raster_result is not None
+        else {}
+    )
+    applied: dict[str, Any] = {}
+    abstained = dict(decision_abstained)
+    for name in decision_applied:
+        if name in runtime_applied:
+            applied[name] = copy.deepcopy(runtime_applied[name])
+            abstained.pop(name, None)
+        else:
+            abstained[name] = str(
+                runtime_abstained.get(name) or "backend_did_not_apply_attribute"
+            )
+    for name in requested:
+        if name not in applied and name not in abstained:
+            abstained[name] = "attribute_not_resolved"
+    return ("applied" if applied else "fallback", requested, applied, abstained)
+
+
+def _build_owner_style_raster_contract(
+    *,
+    owner_id: str,
+    page_id: str,
+    profile: dict[str, Any],
+    execution_component_geometry_sha256: str,
+    before: np.ndarray,
+    rendered: np.ndarray,
+    glyph_mask: np.ndarray,
+    render_completed: bool,
+    raster_result: GlyphRasterResult | None,
+    render_quality_contract: object,
+    text_data: Mapping[str, Any] | None = None,
+    segments: list[dict[str, Any]] | None = None,
+) -> OwnerStyleRasterContract | OwnerStyleRasterContractV2:
+    normalized_profile = validate_owner_visual_profile(
+        profile,
+        expected_owner_id=owner_id,
+        expected_sha256=str(profile.get("visual_profile_sha256") or ""),
+    )
+    status, requested, applied, abstained = _owner_style_contract_attributes(
+        normalized_profile,
+        raster_result,
+        render_completed=render_completed,
+    )
+    core_mask = (
+        raster_result.glyph_core_mask
+        if raster_result is not None
+        and raster_result.glyph_core_mask.shape == glyph_mask.shape
+        else glyph_mask
+    )
+    effect_mask = (
+        raster_result.effect_mask
+        if raster_result is not None
+        and raster_result.effect_mask.shape == glyph_mask.shape
+        else np.zeros_like(glyph_mask)
+    )
+    raster_metrics = (
+        copy.deepcopy(raster_result.metrics) if raster_result is not None else {}
+    )
+    raster_metrics.update(
+        {
+            "core_pixel_count": int(np.count_nonzero(core_mask)),
+            "effect_pixel_count": int(np.count_nonzero(effect_mask)),
+            "owner_render_quality": render_quality_contract.to_dict(),
+        }
+    )
+    raw: dict[str, Any] = {
+        "schema_version": 1,
+        "page_id": page_id,
+        "owner_id": owner_id,
+        "visual_profile_sha256": normalized_profile["visual_profile_sha256"],
+        "profile_component_geometry_sha256": normalized_profile[
+            "component_geometry_sha256"
+        ],
+        "execution_component_geometry_sha256": (
+            execution_component_geometry_sha256
+        ),
+        "source_artifact_sha256": normalized_profile["source_sha256"],
+        "source_glyph_mask_sha256": normalized_profile["glyph_mask_sha256"],
+        "status": status,
+        "backend": "python_ft2font",
+        "backend_version": str(getattr(matplotlib, "__version__", "unknown")),
+        "capabilities": tuple(
+            sorted(
+                {
+                    "fill",
+                    "font_name",
+                    "glow",
+                    "gradient",
+                    "rotation_deg",
+                    "shadow",
+                    "stroke",
+                }
+            )
+        ),
+        "requested_attributes": requested,
+        "applied_attributes": applied,
+        "abstained_attributes": abstained,
+        "glyph_core_envelope": _owner_style_mask_envelope(core_mask),
+        "effect_envelope": _owner_style_mask_envelope(effect_mask),
+        "render_metrics": raster_metrics,
+        "segments": tuple(copy.deepcopy(segments or [])),
+        "rendered_before_sha256": _owner_array_sha256(before),
+        "rendered_patch_sha256": _owner_masked_pixels_sha256(
+            rendered,
+            glyph_mask,
+        ),
+        "rendered_after_sha256": _owner_array_sha256(rendered),
+    }
+    sealed_payload = (
+        text_data.get("_sealed_materialization_plan_v1")
+        if isinstance(text_data, Mapping)
+        else None
+    )
+    if not isinstance(sealed_payload, Mapping):
+        raw["contract_sha256"] = owner_style_raster_contract_sha256(raw)
+        return OwnerStyleRasterContract(**raw)
+
+    plan_v2 = materialization_plan_from_dict(sealed_payload)
+    if (
+        plan_v2.owner_id != owner_id
+        or plan_v2.page_id != page_id
+        or plan_v2.visual_profile_sha256 != normalized_profile["visual_profile_sha256"]
+    ):
+        raise ValueError("sealed materialization plan binding mismatch")
+    materializable = {
+        name
+        for name, item in plan_v2.attribute_plans.items()
+        if item.resolution_kind in {"exact", "policy_adjusted", "derived"}
+    }
+    domain_observations: dict[str, dict[str, dict[str, Any]]] = {
+        "layout": _observe_layout_materialization(
+            text_data or {},
+            attribute_names={
+                name for name in materializable
+                if plan_v2.attribute_plans[name].domain == "layout"
+            },
+        ),
+        "font": {},
+        "raster": {},
+    }
+    raw_font_rows = (
+        text_data.get("_style_v2_font_observation")
+        if isinstance(text_data, Mapping)
+        else None
+    )
+    if isinstance(raw_font_rows, Mapping):
+        domain_observations["font"] = {
+            str(name): copy.deepcopy(dict(row))
+            for name, row in raw_font_rows.items()
+            if name in materializable
+            and plan_v2.attribute_plans[name].domain == "font"
+            and isinstance(row, Mapping)
+        }
+    if raster_result is not None:
+        for name in sorted(materializable):
+            if plan_v2.attribute_plans[name].domain != "raster":
+                continue
+            if name in raster_result.observed_attributes:
+                evidence = copy.deepcopy(
+                    raster_result.attribute_evidence.get(name) or {}
+                )
+                evidence_sha256 = str(
+                    raster_result.attribute_evidence_sha256.get(name) or ""
+                )
+                if len(evidence_sha256) != 64:
+                    evidence_sha256 = _canonical_runtime_sha256(
+                        {"attribute": name, "evidence": evidence}
+                    )
+                domain_observations["raster"][name] = {
+                    "value": copy.deepcopy(raster_result.observed_attributes[name]),
+                    "evidence_kind": str(
+                        evidence.get("evidence_kind") or "raster_pixels_and_mask"
+                    ),
+                    "evidence_sha256": evidence_sha256,
+                    "metrics": evidence,
+                }
+            elif name in raster_result.unavailable_attributes:
+                domain_observations["raster"][name] = {
+                    "status": "unavailable",
+                    "reason": raster_result.unavailable_attributes[name],
+                }
+    observation = build_materialization_observation(
+        plan=plan_v2,
+        domain_observations=domain_observations,
+        render_completed=render_completed,
+    )
+    comparison = compare_materialization(plan_v2, observation)
+    requested_v2 = {
+        name: copy.deepcopy(item.to_dict()["intent_value"])
+        for name, item in plan_v2.attribute_plans.items()
+    }
+    applied_v2: dict[str, Any] = {}
+    abstained_v2: dict[str, str] = {}
+    mismatch_by_name = {
+        str(item.get("attribute")): str(item.get("reason") or "materialization_mismatch")
+        for item in comparison.mismatches
+    }
+    for name, item in plan_v2.attribute_plans.items():
+        if comparison.status == "match" and item.resolution_kind in {
+            "exact", "policy_adjusted", "derived"
+        }:
+            applied_v2[name] = copy.deepcopy(item.to_dict()["target_value"])
+        elif item.resolution_kind == "abstained":
+            abstained_v2[name] = item.reason or "approved_abstention"
+        elif item.resolution_kind == "superseded":
+            abstained_v2[name] = f"superseded_by:{item.superseded_by}"
+        else:
+            abstained_v2[name] = mismatch_by_name.get(
+                name,
+                item.reason or "materialization_not_match",
+            )
+    raw.update(
+        {
+            "schema_version": 2,
+            "status": (
+                "applied"
+                if render_completed and comparison.status == "match"
+                else "review_required"
+            ),
+            "render_status": "completed" if render_completed else "failed",
+            "materialization_status": comparison.status,
+            "style_intent_sha256": plan_v2.intent_sha256,
+            "materialization_plan_sha256": plan_v2.plan_sha256,
+            "materialization_observation_sha256": observation.observation_sha256,
+            "materialization_plan": plan_v2.to_dict(),
+            "materialization_observation": observation.to_dict(),
+            "materialization_comparison": comparison.to_dict(),
+            "backend_selection_reason": str(
+                (text_data or {}).get("_render_debug", {}).get(
+                    "renderer_backend_selection_reason",
+                    "python_v2_materialization_observation",
+                )
+                if isinstance((text_data or {}).get("_render_debug"), Mapping)
+                else "python_v2_materialization_observation"
+            ),
+            "capabilities": tuple(
+                sorted(set(raw["capabilities"]) | {"materialization_observation_v2"})
+            ),
+            "requested_attributes": requested_v2,
+            "applied_attributes": applied_v2,
+            "abstained_attributes": abstained_v2,
+        }
+    )
+    raw["contract_sha256"] = owner_style_raster_contract_sha256(raw)
+    return OwnerStyleRasterContractV2(**raw)
+
+
+def _owner_component_geometry_sha256(
+    owner: object,
+    owner_graph: object,
+    *,
+    shape: tuple[int, int],
+) -> str:
+    component_by_id = {
+        _owner_identity(getattr(component, "component_id", None), label="component_id"): component
+        for component in list(getattr(owner_graph, "components", []) or [])
+    }
+    entries: list[tuple[str, tuple[int, int, int, int]]] = []
+    height, width = shape
+    for raw_component_id in list(getattr(owner, "component_ids", []) or []):
+        component_id = _owner_identity(raw_component_id, label="owner component_id")
+        component = component_by_id.get(component_id)
+        if component is None:
+            raise ValueError(f"owner component geometry is missing: {component_id}")
+        raw_bbox = getattr(component, "bbox_page", None)
+        if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+            raise ValueError(f"owner component bbox is malformed: {component_id}")
+        if any(isinstance(value, bool) for value in raw_bbox):
+            raise ValueError(f"owner component bbox is malformed: {component_id}")
+        try:
+            bbox = tuple(int(value) for value in raw_bbox)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"owner component bbox is malformed: {component_id}") from exc
+        x1, y1, x2, y2 = bbox
+        if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1 or x2 > width or y2 > height:
+            raise ValueError(f"owner component bbox escapes page geometry: {component_id}")
+        entries.append((component_id, bbox))
+    entries.sort(key=lambda item: item[0])
+    if not entries or len({component_id for component_id, _bbox in entries}) != len(entries):
+        raise ValueError("owner component geometry is empty or duplicated")
+    payload = json.dumps(
+        [[component_id, list(bbox)] for component_id, bbox in entries],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _owner_safe_polygon_evidence(
+    value: object,
+    *,
+    shape: tuple[int, int],
+) -> tuple[tuple[tuple[int, int], ...], np.ndarray, str]:
+    polygon = _canonical_owner_render_polygon(value)
+    height, width = shape
+    if any(x >= width or y >= height for x, y in polygon):
+        raise ValueError("owner render safe polygon escapes page geometry")
+    polygon_mask = np.zeros(shape, dtype=np.uint8)
+    cv2.fillPoly(polygon_mask, [np.asarray(polygon, dtype=np.int32)], 255)
+    payload = json.dumps(polygon, separators=(",", ":"))
+    return polygon, polygon_mask, sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _owner_layout_region_union_mask(
+    block: dict,
+    *,
+    shape: tuple[int, int],
+    fallback_mask: np.ndarray,
+) -> np.ndarray:
+    regions = [
+        region
+        for region in list(block.get("layout_regions", []) or [])
+        if isinstance(region, dict)
+    ]
+    if not regions:
+        return fallback_mask.copy()
+    height, width = shape
+    union_mask = np.zeros(shape, dtype=np.uint8)
+    for index, region in enumerate(regions):
+        region_mask = _owner_canvas_polygon_mask(
+            region.get("paint_safe_polygon_page")
+            or region.get("safe_polygon_page"),
+            width=width,
+            height=height,
+            label=f"owner layout region {region.get('layout_region_id') or index}",
+        )
+        union_mask[region_mask > 0] = 255
+    if not np.any(union_mask):
+        raise ValueError("owner renderer layout-region union is empty")
+    return union_mask
+
+
+def _owner_mask_bbox(mask: np.ndarray) -> tuple[int, int, int, int] | None:
+    ys, xs = np.nonzero(mask > 0)
+    if not len(xs):
+        return None
+    return (
+        int(xs.min()),
+        int(ys.min()),
+        int(xs.max()) + 1,
+        int(ys.max()) + 1,
+    )
+
+
+def _render_owner_band_image(
+    band_rgb: np.ndarray,
+    ocr_page: dict,
+    owner_graph: object,
+) -> OwnerGlyphPatch:
+    if not isinstance(owner_graph, OwnerGraph):
+        raise TypeError("verified owner renderer requires an OwnerGraph instance")
+    owner_graph.require_valid()
+    if not isinstance(band_rgb, np.ndarray) or band_rgb.dtype != np.uint8:
+        raise ValueError("owner renderer requires a uint8 RGB page")
+    if band_rgb.ndim != 3 or band_rgb.shape[2] != 3 or not band_rgb.size:
+        raise ValueError("owner renderer requires a non-empty RGB page")
+    height, width = band_rgb.shape[:2]
+    page_width = int(ocr_page.get("width", width) or width)
+    page_height = int(ocr_page.get("height", height) or height)
+    if (page_height, page_width) != (height, width):
+        raise ValueError("owner renderer input shape does not match canonical page dimensions")
+
+    graph_page_id = _owner_identity(
+        getattr(owner_graph, "page_id", None),
+        label="owner graph page_id",
+    )
+    if str(ocr_page.get("page_id") or graph_page_id).strip() != graph_page_id:
+        raise ValueError("owner renderer page_id does not match the owner graph")
+    owners = list(getattr(owner_graph, "owners", []) or [])
+    if len(owners) != 1:
+        raise ValueError("owner renderer executes exactly one owner at a time")
+    owner = owners[0]
+    owner_id = _owner_identity(getattr(owner, "owner_id", None), label="owner_id")
+    execution_tile_id = getattr(owner, "execution_tile_id", None)
+    executor_projections = [
+        projection
+        for projection in list(getattr(owner_graph, "projections", []) or [])
+        if str(getattr(projection, "owner_id", "") or "") == owner_id
+        and str(getattr(projection, "role", "") or "").strip().lower() == "executor"
+    ]
+    if len(executor_projections) != 1:
+        raise ValueError("owner renderer requires exactly one executor projection")
+    projection_tile_id = getattr(executor_projections[0], "tile_id", None)
+    if execution_tile_id != projection_tile_id:
+        raise ValueError("owner renderer executor projection does not match owner execution tile")
+
+    blocks = build_render_blocks(
+        list(ocr_page.get("texts", []) or []),
+        owner_graph=owner_graph,
+    )
+    if len(blocks) != 1 or blocks[0].get("owner_id") != owner_id:
+        raise ValueError("owner renderer did not resolve exactly one owner render block")
+    block = blocks[0]
+    raw_authority = block.get("owner_text_execution_authority")
+    if not isinstance(raw_authority, Mapping):
+        raise ValueError("owner renderer requires sealed text execution authority")
+    execution_authority = OwnerTextExecutionAuthority.from_dict(raw_authority)
+    if (
+        execution_authority.owner_id != owner_id
+        or execution_authority.page_id != graph_page_id
+        or execution_authority.translated_payload
+        != str(block.get("translated_payload") or "").strip()
+        or execution_authority.authority_sha256
+        != str(block.get("text_execution_authority_sha256") or "")
+    ):
+        raise ValueError("owner renderer text execution authority mismatch")
+    raw_render_geometry = block.get("owner_render_geometry")
+    if not isinstance(raw_render_geometry, dict):
+        raise ValueError("owner renderer requires authenticated render geometry")
+    owner_render_geometry = OwnerRenderGeometry.from_dict(raw_render_geometry)
+    if (
+        owner_render_geometry.owner_id != owner_id
+        or owner_render_geometry.page_id != graph_page_id
+        or owner_render_geometry.page_width != width
+        or owner_render_geometry.page_height != height
+        or owner_render_geometry.geometry_sha256
+        != str(block.get("owner_render_geometry_sha256") or "")
+    ):
+        raise ValueError("owner renderer render geometry binding mismatch")
+    layout_polygon, layout_polygon_mask, _layout_polygon_sha256 = (
+        _owner_safe_polygon_evidence(
+            block.get("render_safe_polygon_page"),
+            shape=(height, width),
+        )
+    )
+    polygon, polygon_mask, polygon_sha256 = _owner_safe_polygon_evidence(
+        block.get("paint_safe_polygon_page")
+        or block.get("render_safe_polygon_page"),
+        shape=(height, width),
+    )
+    layout_region_union_mask = _owner_layout_region_union_mask(
+        block,
+        shape=(height, width),
+        fallback_mask=polygon_mask,
+    )
+
+    before = np.ascontiguousarray(band_rgb.copy())
+    image = Image.fromarray(before.copy(), mode="RGB")
+    raster_result = render_text_block(image, block)
+    if "render_completed" not in block:
+        _finalize_render_completion_contract(block)
+    rendered = np.ascontiguousarray(np.asarray(image.convert("RGB"), dtype=np.uint8))
+    changed = np.any(rendered != before, axis=2)
+    changed_mask = np.where(changed, 255, 0).astype(np.uint8)
+    if isinstance(raster_result, GlyphRasterResult):
+        glyph_core_mask = np.where(
+            np.asarray(raster_result.glyph_core_mask) > 0, 255, 0
+        ).astype(np.uint8)
+        effect_mask = np.where(
+            np.asarray(raster_result.effect_mask) > 0, 255, 0
+        ).astype(np.uint8)
+    else:
+        # Preserve a reviewable failed patch without fabricating glyph-core proof.
+        glyph_core_mask = np.zeros((height, width), dtype=np.uint8)
+        effect_mask = np.zeros((height, width), dtype=np.uint8)
+    if glyph_core_mask.shape != (height, width) or effect_mask.shape != (height, width):
+        raise ValueError("owner renderer glyph raster evidence shape mismatch")
+    paint_mask = np.maximum(np.maximum(glyph_core_mask, effect_mask), changed_mask)
+    glyph_mask = paint_mask  # temporary compatibility alias for non-enforce readers
+    glyph_bbox = _owner_mask_bbox(paint_mask)
+    fit_status = str(block.get("fit_status") or "render_incomplete").strip().lower()
+    render_completed = bool(block.get("render_completed"))
+    if glyph_bbox is None:
+        render_completed = False
+        if fit_status in {"", "ok", "render_incomplete"}:
+            fit_status = "render_changed_no_pixels"
+    if np.any(changed & (polygon_mask == 0)):
+        render_completed = False
+        fit_status = "render_outside_safe_polygon"
+    if np.any((glyph_core_mask > 0) & (layout_polygon_mask == 0)):
+        render_completed = False
+        fit_status = "glyph_core_outside_layout_chord"
+    if np.any(changed & (layout_region_union_mask == 0)):
+        render_completed = False
+        fit_status = "render_outside_layout_regions"
+
+    safe_x = [point[0] for point in layout_polygon]
+    safe_y = [point[1] for point in layout_polygon]
+    render_quality_contract = evaluate_owner_render_quality(
+        render_bbox=list(glyph_bbox or []),
+        safe_bbox=[min(safe_x), min(safe_y), max(safe_x), max(safe_y)],
+        safe_mask=np.where(layout_polygon_mask > 0, 1, 0).astype(np.uint8),
+        glyph_core_mask=np.where(glyph_core_mask > 0, 1, 0).astype(np.uint8),
+        glyph_pixels=int(np.count_nonzero(glyph_core_mask)),
+        font_size_final=int(block.get("font_size_final", 0) or 0),
+        minimum_legible_font_px=int(block.get("minimum_legible_font_px", 0) or 0),
+        source_ink_heights_px=tuple(block.get("source_ink_heights_px") or ()),
+        source_x_heights_px=tuple(block.get("source_x_heights_px") or ()),
+        source_evidence_confidence=float(
+            block.get("source_scale_evidence_confidence", 0.0) or 0.0
+        ),
+        page_width=width,
+        page_height=height,
+        translated_text=str(block.get("translated_payload") or block.get("translated") or ""),
+        layout_profile=str(block.get("layout_profile") or ""),
+        trusted_container=True,
+    )
+    if render_quality_contract.status != "ok":
+        render_completed = False
+        if fit_status == "ok":
+            fit_status = "below_proportional_legibility"
+    block["owner_render_quality"] = render_quality_contract.to_dict()
+    render_layout_contract = block.get("render_layout_contract")
+    if isinstance(render_layout_contract, dict):
+        render_layout_contract["owner_render_quality"] = (
+            render_quality_contract.to_dict()
+        )
+
+    component_geometry_sha256 = _owner_component_geometry_sha256(
+        owner,
+        owner_graph,
+        shape=(height, width),
+    )
+    raw_profile = block.get("visual_profile_v2")
+    if not isinstance(raw_profile, dict):
+        raise ValueError("owner renderer lost visual_profile_v2 before raster binding")
+    style_raster_contract = _build_owner_style_raster_contract(
+        owner_id=owner_id,
+        page_id=graph_page_id,
+        profile=raw_profile,
+        execution_component_geometry_sha256=component_geometry_sha256,
+        before=before,
+        rendered=rendered,
+        glyph_mask=glyph_mask,
+        render_completed=render_completed,
+        raster_result=(
+            raster_result if isinstance(raster_result, GlyphRasterResult) else None
+        ),
+        render_quality_contract=render_quality_contract,
+        text_data=block,
+        segments=(
+            block.get("_style_raster_segments")
+            if isinstance(block.get("_style_raster_segments"), list)
+            else []
+        ),
+    )
+    rendered_lines = [
+        str(line)
+        for line in list((block.get("_render_debug") or {}).get("wrapped_lines") or [])
+        if str(line).strip()
+    ]
+    if str(block.get("_visual_render_payload") or "") != execution_authority.translated_payload:
+        rendered_lines = [execution_authority.translated_payload]
+    if not rendered_lines:
+        rendered_lines = [execution_authority.translated_payload]
+    glyph_span_runs = (
+        GlyphRunObservation.build(
+            text=execution_authority.translated_payload,
+            font_identity=str(block.get("font_name") or "python_ft2font"),
+            span_index=0,
+        ),
+    )
+    glyph_span_core_masks = (glyph_core_mask,)
+    delivery_contract = build_owner_text_delivery_contract(
+        execution_authority=execution_authority,
+        layout_payload=str(block.get("translated_payload") or ""),
+        rendered_lines=rendered_lines,
+        rendered_glyph_runs=glyph_span_runs,
+        glyph_core_mask=glyph_core_mask,
+        glyph_span_core_masks=glyph_span_core_masks,
+        rendered_patch_sha256=style_raster_contract.rendered_patch_sha256,
+    )
+    if delivery_contract.status != "delivered":
+        if render_completed:
+            fit_status = f"delivery_{delivery_contract.reason}"
+        render_completed = False
+
+    return OwnerGlyphPatch(
+        owner_id=owner_id,
+        page_id=graph_page_id,
+        coordinate_space="logical_page",
+        result_rgb=rendered,
+        glyph_mask=glyph_mask,
+        glyph_bbox_page=glyph_bbox,
+        render_completed=render_completed,
+        fit_status=fit_status,
+        before_sha256=_owner_array_sha256(before),
+        after_sha256=_owner_array_sha256(rendered),
+        glyph_mask_sha256=_owner_array_sha256(glyph_mask),
+        changed_outside_glyph_mask_pixels=int(
+            np.count_nonzero(changed & (glyph_mask == 0))
+        ),
+        render_safe_polygon_page=polygon,
+        render_safe_polygon_sha256=polygon_sha256,
+        component_geometry_sha256=component_geometry_sha256,
+        render_quality_contract=render_quality_contract,
+        style_raster_contract=style_raster_contract,
+        owner_render_geometry_sha256=owner_render_geometry.geometry_sha256,
+        owner_render_geometry=owner_render_geometry,
+        execution_tile_id=execution_tile_id,
+        projection_role="executor",
+        glyph_core_mask=glyph_core_mask,
+        paint_mask=paint_mask,
+        glyph_span_core_masks=glyph_span_core_masks,
+        glyph_span_runs=glyph_span_runs,
+        glyph_core_mask_sha256=_owner_array_sha256(glyph_core_mask),
+        paint_mask_sha256=_owner_array_sha256(paint_mask),
+        text_execution_authority_sha256=execution_authority.authority_sha256,
+        text_execution_authority=execution_authority,
+        delivery_contract=delivery_contract,
+    )
+
+
+def render_band_image(
+    band_rgb: np.ndarray,
+    ocr_page: dict,
+    *,
+    owner_graph: object | None = None,
+) -> np.ndarray | OwnerGlyphPatch:
     """Adapter em-memÃ³ria: renderiza textos traduzidos sobre a banda.
 
     Reusa `build_render_blocks` + `render_text_block` (mesmo caminho da pÃ¡gina).
@@ -20005,6 +23765,8 @@ def render_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
     import logging
     from PIL import Image
 
+    if owner_graph is not None:
+        return _render_owner_band_image(band_rgb, ocr_page, owner_graph)
     if band_rgb.size == 0 or not ocr_page.get("texts"):
         return band_rgb.copy()
     _ensure_typeset_trace_metadata(ocr_page)
@@ -20062,6 +23824,7 @@ def render_band_image(band_rgb: np.ndarray, ocr_page: dict) -> np.ndarray:
             render_text_block(img, block)
         else:
             render_text_block(img, block, pre_render_np=pre_render_np)
+        _finalize_render_completion_contract(block)
         _drop_stale_render_geometry_flags(block)
         _record_render_plan(ocr_page, block)
         if (

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+from pathlib import Path
 from typing import Any
 
 from qa.translation_qa import severity_for_flag
@@ -87,6 +89,331 @@ SCANLATION_CONTEXTUAL_RE = re.compile(
     r"\b(?:WARNING|NOTICE|READ\s+THIS|OFFICIAL\s+SITE|FASTER\s+UPDATES?)\b",
     re.IGNORECASE,
 )
+FINAL_PIXEL_CONTRACTS = {
+    "source_coverage_contract",
+    "owner_graph_contract",
+    "route_state_contract",
+    "pixel_ownership_contract",
+    "final_language_contract",
+    "layout_legibility_contract",
+    "residual_cleanup_contract",
+    "protected_art_contract",
+    "qa_integrity_contract",
+}
+
+
+def _final_pixel_blocker(
+    *,
+    page_id: str,
+    page_number: int | None,
+    reason: str,
+    owner_id: str | None = None,
+    component_ids: list[str] | None = None,
+    offenders: list[str] | None = None,
+    issue_id: str | None = None,
+    contract: str | None = None,
+) -> dict[str, Any]:
+    stable_owner = owner_id or "page"
+    stable_trace = f"{page_id}:{stable_owner}:{reason}"
+    artifact_links = [
+        "04_text_normalization_router/page_owner_graph.json",
+        "04_text_normalization_router/source_evidence_ledger.jsonl",
+        "06_mask_segmentation/owner_masks",
+        "08_inpaint/owner_cleanup_contracts.jsonl",
+        "09_typeset/render_plan_final.jsonl",
+        "11_qa_export_gate/final_pixel_ocr.jsonl",
+        "11_qa_export_gate/persisted_artifact_hashes.jsonl",
+    ]
+    issue: dict[str, Any] = {
+        "page": page_number,
+        "page_id": page_id,
+        "type": "final_pixel_contract",
+        "issue_scope": "page",
+        "severity": "critical",
+        "blocks_export": True,
+        "source": "final_pixel_qa",
+        "reason": reason,
+        "flags": [reason],
+        "component_ids": list(component_ids or []),
+        "offenders": list(offenders or [reason]),
+        "trace_id": stable_trace,
+        "artifact_links": artifact_links,
+        "linked_artifacts": artifact_links,
+    }
+    if owner_id:
+        issue["owner_id"] = owner_id
+    if issue_id:
+        issue["issue_id"] = issue_id
+    if contract:
+        issue["contract"] = contract
+    return issue
+
+
+def _collect_final_pixel_report_issues(project: dict[str, Any]) -> list[dict[str, Any]]:
+    """Fail closed on final persisted pixels for verified owner-graph projects."""
+    if str(project.get("owner_graph_status") or "").strip().lower() != "verified":
+        return []
+
+    pages: list[tuple[str, int | None]] = []
+    for index, page in enumerate(project.get("paginas") or [], start=1):
+        if not isinstance(page, dict):
+            continue
+        try:
+            page_number = int(page.get("numero") or index)
+        except (TypeError, ValueError):
+            page_number = index
+        pages.append((str(page.get("page_id") or f"page_{page_number:03d}"), page_number))
+
+    qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
+    raw_reports = qa.get("final_pixel_reports")
+    reports = raw_reports if isinstance(raw_reports, list) else []
+    reports_by_page: dict[str, list[dict[str, Any]]] = {}
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        report_page_id = str(report.get("page_id") or "").strip()
+        if report_page_id:
+            reports_by_page.setdefault(report_page_id, []).append(report)
+
+    issues: list[dict[str, Any]] = []
+    expected_page_ids = {page_id for page_id, _ in pages}
+    for page_id, page_number in pages:
+        matches = reports_by_page.get(page_id, [])
+        if len(matches) != 1:
+            reason = "final_pixel_report_missing" if not matches else "final_pixel_report_duplicate"
+            issues.append(
+                _final_pixel_blocker(page_id=page_id, page_number=page_number, reason=reason)
+            )
+            continue
+        report = matches[0]
+        observer = str(report.get("observer") or "").strip()
+        if report.get("observer_available") is not True or not observer:
+            issues.append(
+                _final_pixel_blocker(
+                    page_id=page_id,
+                    page_number=page_number,
+                    reason="final_pixel_observer_unavailable",
+                )
+            )
+            continue
+        if report.get("observation_complete") is not True:
+            issues.append(
+                _final_pixel_blocker(
+                    page_id=page_id,
+                    page_number=page_number,
+                    reason="final_pixel_observation_incomplete",
+                )
+            )
+            continue
+        if report.get("coverage_complete") is False:
+            failures = [
+                str(value)
+                for value in report.get("coverage_failures") or []
+                if str(value).strip()
+            ] or ["final_pixel_observation_incomplete"]
+            for failure in failures:
+                issues.append(
+                    _final_pixel_blocker(
+                        page_id=page_id,
+                        page_number=page_number,
+                        reason=failure,
+                        offenders=[
+                            f"detected_blocks:{int(report.get('detected_block_count', 0) or 0)}",
+                            f"ocr_records:{int(report.get('ocr_record_count', 0) or 0)}",
+                        ],
+                        contract="qa_integrity_contract",
+                    )
+                )
+            continue
+
+        artifact_path = Path(str(report.get("artifact_path") or ""))
+        expected_hash = str(report.get("persisted_sha256") or "").strip().lower()
+        hash_is_well_formed = bool(re.fullmatch(r"[0-9a-f]{64}", expected_hash))
+        try:
+            actual_hash = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            actual_hash = ""
+        if not hash_is_well_formed or actual_hash != expected_hash:
+            issues.append(
+                _final_pixel_blocker(
+                    page_id=page_id,
+                    page_number=page_number,
+                    reason="final_pixel_artifact_hash_stale",
+                )
+            )
+            continue
+
+        contracts = report.get("contracts")
+        if not isinstance(contracts, dict) or not FINAL_PIXEL_CONTRACTS.issubset(contracts):
+            issues.append(
+                _final_pixel_blocker(
+                    page_id=page_id,
+                    page_number=page_number,
+                    reason="final_pixel_contracts_incomplete",
+                )
+            )
+            continue
+
+        report_issues = report.get("issues") if isinstance(report.get("issues"), list) else []
+        blocked_contracts_with_issue: set[str] = set()
+        for report_issue in report_issues:
+            if not isinstance(report_issue, dict):
+                continue
+            reason = str(report_issue.get("reason") or "final_pixel_contract_blocked").strip()
+            contract = str(report_issue.get("contract") or "").strip() or None
+            if contract:
+                blocked_contracts_with_issue.add(contract)
+            component_ids = [
+                str(value) for value in report_issue.get("component_ids") or [] if str(value).strip()
+            ]
+            offenders = [
+                str(value) for value in report_issue.get("offenders") or [] if str(value).strip()
+            ]
+            issues.append(
+                _final_pixel_blocker(
+                    page_id=page_id,
+                    page_number=page_number,
+                    reason=reason,
+                    owner_id=str(report_issue.get("owner_id") or "").strip() or None,
+                    component_ids=component_ids,
+                    offenders=offenders,
+                    issue_id=str(report_issue.get("issue_id") or "").strip() or None,
+                    contract=contract,
+                )
+            )
+        for contract in sorted(FINAL_PIXEL_CONTRACTS):
+            status = str(contracts.get(contract) or "").strip().upper()
+            if status not in {"PASS", "BLOCK"}:
+                issues.append(
+                    _final_pixel_blocker(
+                        page_id=page_id,
+                        page_number=page_number,
+                        reason="final_pixel_contract_status_invalid",
+                        contract=contract,
+                    )
+                )
+            elif status == "BLOCK" and contract not in blocked_contracts_with_issue:
+                issues.append(
+                    _final_pixel_blocker(
+                        page_id=page_id,
+                        page_number=page_number,
+                        reason="final_pixel_contract_blocked",
+                        contract=contract,
+                    )
+                )
+
+    for extra_page_id in sorted(set(reports_by_page) - expected_page_ids):
+        issues.append(
+            _final_pixel_blocker(
+                page_id=extra_page_id,
+                page_number=None,
+                reason="final_pixel_report_unexpected_page",
+            )
+        )
+    return issues
+
+
+def _collect_owner_functional_contract_issues(
+    project: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if str(project.get("owner_graph_status") or "").strip().lower() != "verified":
+        return []
+    issues: list[dict[str, Any]] = []
+    for page_index, page in enumerate(project.get("paginas") or [], start=1):
+        if not isinstance(page, dict):
+            continue
+        page_number = int(page.get("numero") or page_index)
+        page_id = str(page.get("page_id") or f"page_{page_number:03d}")
+        for layer in page.get("text_layers") or page.get("textos") or []:
+            if not isinstance(layer, dict):
+                continue
+            owner_id = str(layer.get("owner_id") or "").strip()
+            if not owner_id or layer.get("render_completed") is not True:
+                continue
+            component_ids = [str(value) for value in layer.get("component_ids") or []]
+
+            def add(reason: str, contract: str, offenders: list[str] | None = None) -> None:
+                issues.append(
+                    _final_pixel_blocker(
+                        page_id=page_id,
+                        page_number=page_number,
+                        reason=reason,
+                        owner_id=owner_id,
+                        component_ids=component_ids,
+                        offenders=offenders or [],
+                        contract=contract,
+                    )
+                )
+
+            quality = layer.get("owner_render_quality")
+            if not isinstance(quality, dict):
+                render_contract = layer.get("render_layout_contract")
+                quality = (
+                    render_contract.get("owner_render_quality")
+                    if isinstance(render_contract, dict)
+                    else None
+                )
+            if not isinstance(quality, dict):
+                add(
+                    "missing_owner_render_quality_contract",
+                    "layout_legibility_contract",
+                )
+            else:
+                status = str(quality.get("status") or "").strip()
+                if status != "ok":
+                    add(status or "invalid_owner_render_quality_contract", "layout_legibility_contract")
+                if int(quality.get("outside_safe_pixels", 0) or 0) > 0:
+                    add(
+                        "core_pixels_outside_safe_polygon",
+                        "layout_legibility_contract",
+                        [f"outside_safe_pixels:{quality.get('outside_safe_pixels')}"],
+                    )
+                if not quality.get("rendered_line_core_heights_px"):
+                    add("missing_rendered_line_core_metrics", "layout_legibility_contract")
+                try:
+                    source_scale_ratio = float(quality.get("source_scale_ratio"))
+                except (TypeError, ValueError):
+                    source_scale_ratio = None
+                if (
+                    source_scale_ratio is not None
+                    and source_scale_ratio < 0.75
+                    and status != "under_source_scale"
+                ):
+                    add("under_source_scale", "layout_legibility_contract")
+                try:
+                    x_height_ratio = float(quality.get("x_height_ratio"))
+                except (TypeError, ValueError):
+                    x_height_ratio = None
+                if x_height_ratio is not None and x_height_ratio < 0.75:
+                    add("under_source_x_height", "layout_legibility_contract")
+            if str(layer.get("fit_status") or "") == "below_proportional_legibility":
+                add("below_proportional_legibility", "layout_legibility_contract")
+
+            if str(layer.get("route_action") or "") in {
+                "translate_inpaint_render",
+                "translate_sfx_inpaint_render",
+            }:
+                residual = layer.get("residual_cleanup_contract")
+                if not isinstance(residual, dict) or residual.get("residual_verified") is not True:
+                    add("unverified_owner_residual", "residual_cleanup_contract")
+                else:
+                    try:
+                        score = float(residual.get("residual_score"))
+                        threshold = float(residual.get("residual_threshold"))
+                    except (TypeError, ValueError):
+                        add("invalid_owner_residual_contract", "residual_cleanup_contract")
+                    else:
+                        if score > threshold:
+                            add("owner_residual_above_threshold", "residual_cleanup_contract")
+                protected = layer.get("protected_art_contract")
+                if not isinstance(protected, dict):
+                    add("missing_protected_art_contract", "protected_art_contract")
+                elif (
+                    int(protected.get("protected_art_changed_pixels", 0) or 0) > 0
+                    or int(protected.get("action_protected_overlap_pixels", 0) or 0) > 0
+                ):
+                    add("protected_art_contract_violation", "protected_art_contract")
+    return issues
 
 
 def _page_id_from_identity(identity: str) -> str | None:
@@ -168,6 +495,11 @@ def _is_suppressed_scanlation_credit_layer(layer: dict[str, Any]) -> bool:
 
 def _layer_is_export_gate_candidate(layer: dict[str, Any]) -> bool:
     if _is_suppressed_scanlation_credit_layer(layer):
+        return False
+    # A layer explicitly hidden by the automatic safety guard is not emitted
+    # into the translated image.  Its diagnostic flags remain useful in the
+    # project, but must not block exporting pixels that are absent by design.
+    if layer.get("visible") is False:
         return False
     route_action = _clean_string(layer.get("route_action"))
     if route_action:
@@ -667,13 +999,16 @@ def _critical_flag_can_be_review_only(flag: str, flags: set[str], layer: dict[st
         if _source_and_render_are_displaced(layer):
             return False
         return _render_geometry_contained(layer)
-    if flag in {"bbox_overreach_critical", "fit_below_minimum_legible"}:
-        if flag == "fit_below_minimum_legible" and _translator_note_fit_is_review_only(layer):
-            return True
-        if flag == "fit_below_minimum_legible" and "compact_small_text_capacity" in flags:
-            return _render_inside_safe_box(layer)
-        if flag == "fit_below_minimum_legible" and _rendered_background_is_white_balloon(layer):
-            return _render_geometry_contained(layer) and _render_inside_safe_box(layer)
+    if flag == "missing_real_bubble_mask":
+        # A rejected derived mask is not enough to prove inpaint damage after
+        # the final render.  Preserve it for review, but do not block export
+        # when the final text is demonstrably inside both its safe box and the
+        # detected balloon, and no other confirmed visual-damage flag exists.
+        source = str(layer.get("bubble_mask_source") or "").strip().lower()
+        return source in {"rejected_derived_bubble_mask", "derived_white_crop_rejected"} and _render_inside_safe_box(layer) and _render_geometry_contained(layer)
+    if flag == "fit_below_minimum_legible":
+        return _translator_note_fit_is_review_only(layer)
+    if flag == "bbox_overreach_critical":
         if _microtext_render_is_upscaled(layer):
             return False
         return _is_microtext_layer(layer) and _render_geometry_contained(layer)
@@ -693,6 +1028,13 @@ def _critical_flag_can_be_review_only(flag: str, flags: set[str], layer: dict[st
 def _translator_note_fit_is_review_only(layer: dict[str, Any]) -> bool:
     text = str(layer.get("translated") or layer.get("text") or "").strip().lower()
     if not (text.startswith("t/n:") or text.startswith("tn:") or text.startswith("n/t:")):
+        return False
+    try:
+        final_font_px = int(layer.get("font_size_final", 0) or 0)
+        minimum_font_px = int(layer.get("minimum_legible_font_px", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if minimum_font_px <= 0 or final_font_px < minimum_font_px:
         return False
     qa_metrics = layer.get("qa_metrics") if isinstance(layer.get("qa_metrics"), dict) else {}
     containment = _float_or_none(qa_metrics.get("render_balloon_containment"))
@@ -767,6 +1109,7 @@ def _artifact_links_for_issue(
         "text_residual_after_inpaint_suspected",
         "fast_fill_unverified_residual",
         "fast_fill_insufficient_coverage",
+        "inpaint_texture_flattened",
     }
     translation_flags = {
         "vlm_failure_phrase",
@@ -815,6 +1158,16 @@ def _artifact_links_for_issue(
                 ]
             )
 
+    if "inpaint_texture_flattened" in flags and band_id:
+        links.extend(
+            [
+                f"08_inpaint/{band_id}/00_band_before_inpaint.jpg",
+                f"08_inpaint/{band_id}/05_inpaint_mask_overlay.jpg",
+                f"08_inpaint/{band_id}/06_band_after_inpaint.jpg",
+                f"08_inpaint/{band_id}/inpaint_decision.json",
+            ]
+        )
+
     if flags & translation_flags:
         links.extend(
             [
@@ -836,37 +1189,260 @@ def _artifact_links_for_issue(
     return deduped
 
 
+def _terminal_owner_gate(project: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Validate terminal source-language evidence by exact proof-to-probe linkage."""
+
+    source_manifest = project.get("chapter_source_manifest")
+    if not isinstance(source_manifest, dict):
+        return [], {}
+    expected_pages = source_manifest.get("pages")
+    pages = project.get("paginas")
+    if not isinstance(expected_pages, list) or not isinstance(pages, list):
+        return [_terminal_integrity_issue("source_manifest_page_set_mismatch")], {
+            "english_dialogue_residual_count": 0
+        }
+    expected_identity = [
+        (str(item.get("page_id") or ""), str(item.get("page_source_sha256") or ""))
+        for item in expected_pages if isinstance(item, dict)
+    ]
+    actual_identity = [
+        (str(item.get("page_id") or ""), str(item.get("page_source_sha256") or ""))
+        for item in pages if isinstance(item, dict)
+    ]
+    gate_issues: list[dict[str, Any]] = []
+    if expected_identity != actual_identity or len(actual_identity) != len(pages):
+        gate_issues.append(_terminal_integrity_issue("source_manifest_page_set_mismatch"))
+        return gate_issues, {"english_dialogue_residual_count": 0}
+
+    source_issue_count = 0
+    source_kinds = {
+        "source_language_visible",
+        "mixed_language_overlay",
+        "independently_detected_text_without_owner",
+        "cleanup_incomplete",
+    }
+    for page in pages:
+        result = page.get("owner_page_result") or page.get("page_execution_result")
+        if not isinstance(result, dict):
+            gate_issues.append(_terminal_integrity_issue("page_lifecycle_incomplete", page))
+            continue
+        if str(result.get("status") or "") != "final_verified":
+            gate_issues.append(_terminal_integrity_issue("page_lifecycle_incomplete", page))
+            continue
+        proof = result.get("terminal_proof")
+        probes = result.get("qa_probes")
+        residuals = result.get("language_residual_issues")
+        if not isinstance(proof, dict) or not isinstance(probes, list) or not isinstance(residuals, list):
+            gate_issues.append(_terminal_integrity_issue("terminal_probe_integrity_error", page))
+            continue
+        probe_id = str(proof.get("final_qa_probe_id") or "")
+        matches = [item for item in probes if isinstance(item, dict) and item.get("probe_id") == probe_id]
+        if len(matches) != 1:
+            gate_issues.append(_terminal_integrity_issue("terminal_probe_integrity_error", page))
+            continue
+        probe = matches[0]
+        exact_fields = (
+            ("ocr_invocation_id", "fresh_ocr_invocation_id"),
+            ("root_input_pixel_sha256", "fresh_ocr_root_input_pixel_sha256"),
+            ("fresh_ocr_attempt_ids", "fresh_ocr_attempt_ids"),
+            ("fresh_ocr_attempt_chain_sha256", "fresh_ocr_attempt_chain_sha256"),
+        )
+        if any(probe.get(left) != proof.get(right) for left, right in exact_fields):
+            gate_issues.append(_terminal_integrity_issue("terminal_probe_integrity_error", page))
+            continue
+        issue_by_id: dict[str, list[dict[str, Any]]] = {}
+        for item in residuals:
+            if isinstance(item, dict):
+                issue_by_id.setdefault(str(item.get("issue_id") or ""), []).append(item)
+        terminal_issue_ids = [str(value) for value in probe.get("issue_ids") or []]
+        if len(terminal_issue_ids) != len(set(terminal_issue_ids)) or any(
+            len(issue_by_id.get(issue_id, ())) != 1 for issue_id in terminal_issue_ids
+        ):
+            gate_issues.append(_terminal_integrity_issue("terminal_probe_integrity_error", page))
+            continue
+        terminal_issues = [issue_by_id[issue_id][0] for issue_id in terminal_issue_ids]
+        visible = [item for item in terminal_issues if str(item.get("kind") or "") in source_kinds]
+        source_issue_count += len(visible)
+        for item in visible:
+            gate_issues.append({
+                "page_id": page.get("page_id"),
+                "type": "terminal_source_language_residual",
+                "reason": "terminal_source_language_residual",
+                "severity": "critical",
+                "blocks_export": True,
+                "flags": [str(item.get("kind") or "source_language_visible")],
+                "issue_id": item.get("issue_id"),
+                "owner_id": item.get("owner_id"),
+            })
+    return gate_issues, {"english_dialogue_residual_count": source_issue_count}
+
+
+def _terminal_integrity_issue(reason: str, page: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "page_id": (page or {}).get("page_id"),
+        "type": "owner_terminal_integrity",
+        "reason": reason,
+        "severity": "critical",
+        "blocks_export": True,
+        "flags": [reason],
+    }
+
+
 def evaluate_export_gate(project: dict[str, Any], *, override: bool = False) -> dict[str, Any]:
     issues = collect_export_blocking_issues(project)
-    critical_issues = [issue for issue in issues if issue.get("severity") == "critical"]
+    terminal_issues, terminal_metrics = _terminal_owner_gate(project)
+    issues.extend(terminal_issues)
     review_issues = [issue for issue in issues if issue.get("severity") == "warning"]
     blocking_issues = [
         issue
         for issue in issues
         if issue.get("severity") == "critical" or bool(issue.get("blocks_export"))
     ]
-    critical_flag_count = sum(len(issue.get("flags") or []) for issue in critical_issues)
-    review_flag_count = sum(len(issue.get("flags") or []) for issue in review_issues)
-    blocking_flag_count = sum(len(issue.get("flags") or []) for issue in blocking_issues)
-    status = "PASS"
-    if blocking_issues:
-        status = "OVERRIDDEN" if override else "BLOCK"
-    elif any(issue.get("type") == "sfx_inpaint_review" for issue in review_issues):
-        status = "REVIEW"
-    return {
-        "status": status,
-        "allowed": status != "BLOCK",
-        "override": bool(override),
-        "issue_count": len(issues),
-        "blocking_issue_count": len(blocking_issues),
-        "blocking_flag_count": blocking_flag_count,
-        "critical_issue_count": len(critical_issues),
-        "critical_flag_count": critical_flag_count,
-        "review_issue_count": len(review_issues),
-        "review_flag_count": review_flag_count,
-        "needs_review": bool(review_issues),
-        "issues": issues,
-    }
+    from qa.gate_composition import normalize_export_gate
+
+    result = normalize_export_gate(
+        issues,
+        blocked=bool(blocking_issues),
+        review=any(issue.get("type") == "sfx_inpaint_review" for issue in review_issues),
+        override=override,
+    )
+    result.update(terminal_metrics)
+    return result
+
+
+def append_qa_integrity_failure(
+    export_gate: dict[str, Any], failures: list[str]
+) -> dict[str, Any]:
+    """Add one fail-closed row and make all exported gate counts self-consistent."""
+    failures = list(dict.fromkeys(str(value) for value in failures if str(value).strip()))
+    if not failures:
+        return export_gate
+    issues = [item for item in export_gate.get("issues") or [] if isinstance(item, dict)]
+    if not any(issue.get("reason") == "qa_integrity_failure" for issue in issues):
+        issues.append(
+            {
+                "page": None,
+                "page_id": "run",
+                "owner_id": None,
+                "component_ids": [],
+                "trace_id": "run:qa_integrity:failure",
+                "coordinate_space": "page",
+                "type": "qa_integrity_failure",
+                "issue_scope": "run",
+                "severity": "critical",
+                "blocks_export": True,
+                "source": "owner_artifacts",
+                "reason": "qa_integrity_failure",
+                "flags": ["qa_integrity_failure"],
+                "offenders": failures,
+                "artifact_links": [
+                    "11_qa_export_gate/owner_invariant_report.json",
+                    "11_qa_export_gate/qa_export_gate_consistency.json",
+                ],
+            }
+        )
+    critical = [item for item in issues if item.get("severity") == "critical"]
+    review = [item for item in issues if item.get("severity") == "warning"]
+    blocking = [
+        item
+        for item in issues
+        if item.get("severity") == "critical" or bool(item.get("blocks_export"))
+    ]
+    export_gate.update(
+        {
+            "status": "BLOCK",
+            "allowed": False,
+            "issue_count": len(issues),
+            "blocking_issue_count": len(blocking),
+            "blocking_flag_count": sum(len(item.get("flags") or []) for item in blocking),
+            "critical_issue_count": len(critical),
+            "critical_flag_count": sum(len(item.get("flags") or []) for item in critical),
+            "review_issue_count": len(review),
+            "review_flag_count": sum(len(item.get("flags") or []) for item in review),
+            "needs_review": bool(review),
+            "issues": issues,
+        }
+    )
+    return export_gate
+
+
+def _collect_final_visual_contract_issues(project: dict[str, Any], existing_issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
+    contract = qa.get("post_rerender_final_visual_contract") if isinstance(qa, dict) else None
+    visual_qa = contract.get("qa") if isinstance(contract, dict) and isinstance(contract.get("qa"), dict) else {}
+    rows = visual_qa.get("rows") if isinstance(visual_qa, dict) else []
+    if not isinstance(rows, list):
+        return []
+
+    layers_by_trace: dict[str, dict[str, Any]] = {}
+    for page in project.get("paginas") or []:
+        for layer in page.get("text_layers") or page.get("textos") or []:
+            if not isinstance(layer, dict):
+                continue
+            trace_id = _clean_string(layer.get("trace_id") or layer.get("text_instance_id"))
+            if trace_id:
+                layers_by_trace[trace_id] = layer
+
+    generated: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("status") or "").strip().lower() != "fail":
+            continue
+        band_id = _clean_string(row.get("band_id")) or "unresolved"
+        trace_ids = list(dict.fromkeys(
+            str(value).strip() for value in row.get("trace_ids") or [] if str(value).strip()
+        ))
+        flags = list(dict.fromkeys(str(flag).strip() for flag in row.get("flags") or [] if str(flag).strip()))
+        if not flags:
+            continue
+        already_reported = {
+            str(flag)
+            for issue in [*existing_issues, *generated]
+            if str(issue.get("band_id") or "") == band_id
+            and (
+                not trace_ids
+                or str(issue.get("trace_id") or "") in trace_ids
+                or bool(set(issue.get("trace_ids") or []) & set(trace_ids))
+            )
+            for flag in issue.get("flags") or []
+        }
+        flags = [flag for flag in flags if flag not in already_reported]
+        if not flags:
+            continue
+        page_match = re.search(r"page_(\d+)", band_id, re.IGNORECASE)
+        page_number = int(page_match.group(1)) if page_match else None
+        page_id = f"page_{page_number:03d}" if page_number is not None else "unresolved"
+        matched_layers = [layers_by_trace[trace_id] for trace_id in trace_ids if trace_id in layers_by_trace]
+        artifact_links = list(dict.fromkeys([
+            "11_qa_export_gate/final_rerender_visual_qa.json",
+            "11_qa_export_gate/final_rerender_visual_qa.jsonl",
+            "10_copyback_reassemble/final_band_crops.jsonl",
+            *[str(link) for link in row.get("artifact_links") or [] if str(link).strip()],
+        ]))
+        generated.append(
+            {
+                "page": page_number,
+                "page_id": page_id,
+                "band_id": band_id,
+                "layer": (
+                    matched_layers[0].get("id") or matched_layers[0].get("text_id")
+                    if matched_layers else band_id
+                ),
+                "text_id": matched_layers[0].get("text_id") or matched_layers[0].get("id") if matched_layers else None,
+                "trace_id": trace_ids[0] if trace_ids else None,
+                "trace_ids": trace_ids,
+                "coordinate_space": "page",
+                "type": "p0_final_visual_blocker",
+                "issue_scope": "band",
+                "severity": "critical",
+                "blocks_export": True,
+                "source": "post_rerender_final_visual_contract",
+                "flags": flags,
+                "metrics": dict(row.get("metrics") or {}),
+                "artifact_links": artifact_links,
+                "linked_artifacts": artifact_links,
+            }
+        )
+    return generated
 
 
 def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1000,6 +1576,7 @@ def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, An
                         **({"artifact_links": artifact_links} if artifact_links else {}),
                     }
                 )
+    issues.extend(_collect_final_visual_contract_issues(project, issues))
     qa = project.get("qa") if isinstance(project.get("qa"), dict) else {}
     propagation_audit = qa.get("flag_propagation_audit") if isinstance(qa, dict) else None
     if isinstance(propagation_audit, dict):
@@ -1097,4 +1674,6 @@ def collect_export_blocking_issues(project: dict[str, Any]) -> list[dict[str, An
                     "linked_artifacts": artifact_links,
                 }
             )
+    issues.extend(_collect_final_pixel_report_issues(project))
+    issues.extend(_collect_owner_functional_contract_issues(project))
     return issues

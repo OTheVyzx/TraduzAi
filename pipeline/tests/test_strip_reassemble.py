@@ -97,6 +97,23 @@ class SplitPointMarginTests(unittest.TestCase):
 
 
 class AssembleOutputPagesTests(unittest.TestCase):
+    def test_reassemble_defines_framing_but_not_pixel_precedence(self):
+        from strip.reassemble import assemble_output_pages
+        from strip.types import VerticalStrip
+        import numpy as np
+
+        authoritative = np.full((120, 32, 3), [11, 77, 201], dtype=np.uint8)
+        strip = VerticalStrip(
+            image=authoritative.copy(),
+            width=32,
+            height=120,
+            source_page_breaks=[0, 120],
+        )
+
+        pages = assemble_output_pages(strip, balloons=[], target_count=2)
+
+        np.testing.assert_array_equal(np.concatenate([page.image for page in pages]), authoritative)
+
     def test_assemble_preserves_source_page_breaks_when_target_matches_input_count(self):
         from strip.reassemble import assemble_output_pages
         from strip.types import VerticalStrip

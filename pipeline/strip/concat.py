@@ -25,6 +25,7 @@ def build_strip(
             width=0,
             height=0,
             source_page_breaks=[0],
+            source_page_widths=[],
         )
 
     # Primeira passada: ler imagens
@@ -32,11 +33,11 @@ def build_strip(
     for i, path in enumerate(page_paths):
         if progress_callback:
             progress_callback("concat", i, len(page_paths))
-        img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        img_bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
 
-        if img is None:
+        if img_bgr is None:
             raise FileNotFoundError(f"Não consegui ler {path}")
-        images.append(img)
+        images.append(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
 
     max_width = max(img.shape[1] for img in images)
     total_height = sum(img.shape[0] for img in images)
@@ -61,6 +62,7 @@ def build_strip(
         height=total_height,
         source_page_breaks=page_breaks,
         page_x_offsets=page_x_offsets,
+        source_page_widths=[int(image.shape[1]) for image in images],
     )
 
 

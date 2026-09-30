@@ -36,3 +36,13 @@ def test_preserved_sfx_is_ignored():
     flags = detect_visual_text_leak(page=1, final_ocr_text="WHAT", expected_layers=[{"tipo": "sfx", "preserve_original": True, "original": "WHAT"}])
 
     assert flags == []
+
+
+def test_source_ngram_leak_is_detected_without_fixed_english_phrase():
+    flags = detect_visual_text_leak(
+        page=3,
+        final_ocr_text="ZEPHYR QUANTUM",
+        expected_layers=[{"original": "ZEPHYR QUANTUM"}],
+    )
+
+    assert flags[0]["type"] == "visual_text_leak"

@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "validated_at": "2026-08-11T04:05:13Z",
+  "branch": "Troca_de_motores",
+  "head": "415a0314",
+  "scope": {
+    "english_cleanup_and_ptbr_materialization": true,
+    "style_copy": false,
+    "scan_credits_translation": false,
+    "layout_and_typography_acceptance": false
+  },
+  "run": {
+    "input": "N:\\TraduzAI\\temporario1\\mch39",
+    "output": "N:\\TraduzAI\\.codex-tmp\\universal-source-replacement-20260804\\validation-20260811T022732353089Z-71f5b80a08b8\\off6",
+    "run_id": "owner-run-c58bd542582e4cfeb6a3326d04375972",
+    "execution_id": "owner-execution-108a41d3617546618029576ab1c68d11",
+    "owner_graph_mode": "enforce",
+    "style_copy_mode": "off",
+    "device": "gpu:0",
+    "page_count": 42,
+    "export_gate_status": "PASS",
+    "export_manifest_sha256": "699bbef1460aba3dec28b2356e0ecde9450846e3d045ebfacda2b527ec0d02fc",
+    "publication_receipt_sha256": "045a6221f801dcd005b6ee104c88d4d2e238f3ee6dd90d09a6f8d4c636b95f1f",
+    "chapter_source_manifest_sha256": "e6adf7fb4668169fae33401d40be76a2c5bcefc0aebb59757bcda0c2bd2ceb6f"
+  },
+  "external_audit": {
+    "path": "N:\\TraduzAI\\.codex-tmp\\universal-source-replacement-20260804\\validation-20260811T022732353089Z-71f5b80a08b8\\off6-audit.json",
+    "file_sha256": "c3d5810a472c6b763639f691fca89a9ab04a79fd2a7cbbcf4955554803b9f842",
+    "status": "PASS",
+    "page_count": 42,
+    "source_manifest_page_count": 42,
+    "source_manifest_matches_final_page_set": true,
+    "all_project_asset_paths_resolve": true,
+    "all_project_asset_hashes_match": true,
+    "english_dialogue_residual_count": 0,
+    "external_english_dialogue_residual_count": 0,
+    "unowned_external_source_residuals": 0,
+    "translatable_components_without_owner": 0,
+    "material_components_without_ocr_attempt": 0,
+    "owners_without_valid_pt_br": 0,
+    "owners_without_atomic_cleanup_render": 0,
+    "owners_without_target_materialization": 0,
+    "material_components_without_terminal_lifecycle": 0,
+    "final_pixel_ocr_coverage_complete": true,
+    "fresh_ocr_root_hash_matches_final": true,
+    "unverified_physical_ocr_attempts": 0,
+    "fresh_ocr_cache_hits": 0,
+    "external_auditor_fresh_ocr_complete": true,
+    "external_page_audits_count": 42,
+    "auditor_invocation_is_independent": true,
+    "auditor_root_hash_matches_final": true,
+    "auditor_unverified_physical_ocr_attempts": 0,
+    "auditor_cache_hits": 0,
+    "external_audit_gate_status": "PASS"
+  },
+  "human_visual_review": {
+    "reviewed_page_count": 42,
+    "material_english_dialogue_residual_pages": [],
+    "functional_go_pages": 42,
+    "preserved_non_dialogue_examples": [
+      "KIM SHYEOK",
+      "ARVENCOMICS.COM",
+      "HAHAHA",
+      "SFX"
+    ],
+    "contaminated_source_pages": [3, 5],
+    "contaminated_source_note": "The supplied inputs already contain fused PT/EN overlays; English material is removed, but semantic PT reconstruction cannot be judged from these source bytes.",
+    "out_of_scope_visual_defects_present": true
+  },
+  "verification": {
+    "focused_tests": {
+      "passed": 278,
+      "failed": 0,
+      "duration_seconds": 7.32
+    },
+    "compileall": "PASS",
+    "diff_check": "PASS",
+    "full_suite_snapshot": {
+      "passed": 4284,
+      "failed": 242,
+      "skipped": 34,
+      "subtests_passed": 74,
+      "status": "NOT_GREEN_LEGACY_FAILURES"
+    }
+  },
+  "verdict": "GO_FUNCTIONAL_SCOPE_ONLY"
+}

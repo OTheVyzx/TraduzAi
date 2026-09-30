@@ -6460,6 +6460,13 @@ def build_mask_regions(texts: list[dict], image_shape: tuple[int, int, int]) -> 
     for text in texts:
         if _merged_fragment_without_glyph_evidence(text):
             continue
+        owner_id_raw = text.get("owner_id")
+        if owner_id_raw is not None and (
+            not isinstance(owner_id_raw, str)
+            or not owner_id_raw
+            or owner_id_raw != owner_id_raw.strip()
+        ):
+            raise ValueError("owner_id must be a canonical non-empty string")
         bbox = _mask_region_seed_bbox(text, image_shape)
         if not bbox:
             continue
@@ -6470,18 +6477,27 @@ def build_mask_regions(texts: list[dict], image_shape: tuple[int, int, int]) -> 
                 "balloon_bbox": balloon_bbox,
                 "tipo": text.get("tipo", "fala"),
                 "text": text,
+                "owner_ids": {owner_id_raw} if owner_id_raw is not None else set(),
             }
         )
+
+    def owner_compatible(left: dict, right: dict) -> bool:
+        left_ids = set(left.get("owner_ids") or ())
+        right_ids = set(right.get("owner_ids") or ())
+        if not left_ids and not right_ids:
+            return True
+        return bool(len(left_ids) == 1 and left_ids == right_ids)
 
     clusters: list[dict] = []
     for seed in seeds:
         merged = False
         for cluster in clusters:
-            if should_merge_text_blocks(cluster, seed):
+            if owner_compatible(cluster, seed) and should_merge_text_blocks(cluster, seed):
                 cluster["bbox"] = union_bbox(cluster["bbox"], seed["bbox"])
                 cluster["balloon_bbox"] = _union_optional_bbox(cluster.get("balloon_bbox"), seed.get("balloon_bbox"))
                 cluster["texts"].append(seed["text"])
                 cluster["tipos"].append(seed["tipo"])
+                cluster["owner_ids"].update(seed["owner_ids"])
                 merged = True
                 break
         if not merged:
@@ -6491,6 +6507,7 @@ def build_mask_regions(texts: list[dict], image_shape: tuple[int, int, int]) -> 
                     "balloon_bbox": seed.get("balloon_bbox"),
                     "texts": [seed["text"]],
                     "tipos": [seed["tipo"]],
+                    "owner_ids": set(seed["owner_ids"]),
                 }
             )
 
@@ -6510,11 +6527,12 @@ def build_mask_regions(texts: list[dict], image_shape: tuple[int, int, int]) -> 
             for j in range(i + 1, len(clusters)):
                 if j in skip:
                     continue
-                if should_merge_text_blocks(current, clusters[j]):
+                if owner_compatible(current, clusters[j]) and should_merge_text_blocks(current, clusters[j]):
                     current["bbox"] = union_bbox(current["bbox"], clusters[j]["bbox"])
                     current["balloon_bbox"] = _union_optional_bbox(current.get("balloon_bbox"), clusters[j].get("balloon_bbox"))
                     current["texts"].extend(clusters[j]["texts"])
                     current["tipos"].extend(clusters[j]["tipos"])
+                    current["owner_ids"].update(clusters[j]["owner_ids"])
                     skip.add(j)
                     changed = True
             new_clusters.append(current)
@@ -6522,15 +6540,17 @@ def build_mask_regions(texts: list[dict], image_shape: tuple[int, int, int]) -> 
 
     regions = []
     for cluster in clusters:
-        regions.append(
-            {
-                "bbox": cluster["bbox"],
-                "balloon_bbox": cluster.get("balloon_bbox"),
-                "texts": cluster["texts"],
-                "tipo": Counter(cluster["tipos"]).most_common(1)[0][0],
-                "kind": "cluster" if len(cluster["texts"]) > 1 else "single",
-            }
-        )
+        region = {
+            "bbox": cluster["bbox"],
+            "balloon_bbox": cluster.get("balloon_bbox"),
+            "texts": cluster["texts"],
+            "tipo": Counter(cluster["tipos"]).most_common(1)[0][0],
+            "kind": "cluster" if len(cluster["texts"]) > 1 else "single",
+        }
+        owner_ids = set(cluster.get("owner_ids") or ())
+        if len(owner_ids) == 1:
+            region["owner_id"] = next(iter(owner_ids))
+        regions.append(region)
     return regions
 
 

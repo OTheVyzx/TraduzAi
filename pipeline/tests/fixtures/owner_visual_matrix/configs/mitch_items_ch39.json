@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "input_key": "mitch_items_ch39",
+  "obra": "Mitch Items",
+  "capitulo": 39,
+  "idioma_origem": "en",
+  "idioma_destino": "pt-BR",
+  "engine_preset_id": "manhwa_manhua",
+  "mode": "auto",
+  "debug": true,
+  "skip_inpaint": false,
+  "skip_ocr": false,
+  "strict": true,
+  "export_mode": "strict",
+  "owner_graph_mode": "enforce",
+  "style_copy_mode": "off",
+  "inpaint_policy": "pure"
+}

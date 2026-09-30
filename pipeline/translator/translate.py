@@ -6,16 +6,19 @@ Agora com consciencia de tipo de texto, contexto local e memoria curta.
 
 from __future__ import annotations
 
+import copy
+from dataclasses import dataclass
 import json
 import logging
 import os
 import re
 import time
+import urllib.parse
 import urllib.request
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,21 @@ try:
     from ocr.text_router import ROUTE_ACTIONS, route_action_requires_translation
 except ImportError:
     from ..ocr.text_router import ROUTE_ACTIONS, route_action_requires_translation
+
+try:
+    from translator.locale_policy import canonical_target_locale, validate_target_locale
+except ImportError:
+    from .locale_policy import canonical_target_locale, validate_target_locale
+
+try:
+    from translator.language_policy import recover_noisy_source_anchors, repair_source_numeric_ocr_confusions
+except ImportError:
+    from .language_policy import recover_noisy_source_anchors, repair_source_numeric_ocr_confusions
+
+try:
+    from ownership.hash_contract import canonical_json_bytes, sha256_bytes
+except ImportError:
+    from ..ownership.hash_contract import canonical_json_bytes, sha256_bytes
 
 OLLAMA_HOST = "http://localhost:11434"
 
@@ -480,7 +498,36 @@ class _GoogleTranslator:
             except Exception:
                 if attempt < 2:
                     time.sleep(0.5 * (2 ** attempt))
-        return None
+        try:
+            query = urllib.parse.urlencode(
+                {
+                    "client": "gtx",
+                    "sl": self._source_lang,
+                    "tl": self._target_lang,
+                    "dt": "t",
+                    "q": text,
+                }
+            )
+            request = urllib.request.Request(
+                f"https://translate.googleapis.com/translate_a/single?{query}",
+                headers={"User-Agent": "TraduzAI/1.0"},
+            )
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            segments = payload[0] if isinstance(payload, list) and payload else []
+            result = "".join(
+                str(segment[0])
+                for segment in segments
+                if isinstance(segment, list) and segment and segment[0] is not None
+            ).strip()
+            if not result:
+                return None
+            self._cache[key] = result
+            self._persistent_store(key, result)
+            return result
+        except Exception as exc:
+            logger.debug("Fallback Google publico falhou: %s", exc)
+            return None
 
     def _translate_uncached_batch(self, uncached_texts: list[str]) -> list[str]:
         results: list[Optional[str]] = [None] * len(uncached_texts)
@@ -714,7 +761,7 @@ def _prepare_source_text_for_translation(
     *,
     preserve_case: bool = False,
 ) -> str:
-    result = text.strip()
+    result = repair_source_numeric_ocr_confusions(text.strip())
     if not result:
         return result
 
@@ -1059,7 +1106,15 @@ def _should_block_translation_render(
 ) -> bool:
     del source_text
     normalized_source_lang = normalize_google_language_code(source_lang)
-    critical_lock_flags = {"placeholder_lost", "unrestored_placeholder", "glossary_violation", "forbidden_translation"}
+    critical_lock_flags = {
+        "placeholder_lost",
+        "unrestored_placeholder",
+        "glossary_violation",
+        "forbidden_translation",
+        "translation_locale_mismatch",
+        "numeric_magnitude_mismatch",
+        "pt_pt_long_scale_lexeme",
+    }
     if normalized_source_lang not in {"ja", "ko", "zh-CN", "zh-TW"}:
         return bool(critical_lock_flags & set(qa_flags))
     if tipo == "sfx":
@@ -1588,6 +1643,36 @@ def _apply_translation_render_blocks(
             item["translation_blocked_text"] = translated
             item["translated"] = ""
             item["qa_flags"] = _merge_qa_flags(qa_flags, ["translation_failed", "translation_render_blocked"])
+    return translated_pages
+
+
+def _apply_target_locale_validation(
+    translated_pages: list[dict],
+    target_locale: str,
+) -> list[dict]:
+    """Attach deterministic locale evidence without rewriting translations."""
+
+    locale = canonical_target_locale(target_locale)
+    for page in translated_pages:
+        for item in page.get("texts", []) or []:
+            source = repair_source_numeric_ocr_confusions(
+                str(item.get("original") or item.get("text") or "")
+            )
+            target = str(item.get("translated") or "")
+            validation = validate_target_locale(
+                source_text=source,
+                target_text=target,
+                target_locale=locale,
+            )
+            issue_codes = [issue.code for issue in validation.issues]
+            policy_flags: list[str] = issue_codes
+            if validation.status == "blocked":
+                policy_flags.append("translation_locale_mismatch")
+            elif validation.status == "review":
+                policy_flags.append("translation_locale_review")
+            item["target_locale"] = locale
+            item["locale_validation"] = validation.to_dict()
+            item["qa_flags"] = _merge_qa_flags(item.get("qa_flags"), policy_flags)
     return translated_pages
 
 
@@ -2217,8 +2302,12 @@ def _preserve_caps_proper_nouns_enabled() -> bool:
 
 def _probe_google_backend(translator: _GoogleTranslator, source_lang: str, target_lang: str) -> None:
     probe = _GOOGLE_HEALTH_PROBES.get(source_lang, "hello")
-    backend = getattr(translator, "_translator", translator)
-    result = backend.translate(probe)
+    translate = getattr(translator, "translate", None)
+    if not callable(translate):
+        translate = getattr(getattr(translator, "_translator", None), "translate", None)
+    if not callable(translate):
+        raise RuntimeError("Google Translate sem metodo de health check")
+    result = translate(probe)
     if not result or not str(result).strip():
         raise RuntimeError("Google Translate retornou resposta vazia no health check")
     if source_lang != target_lang and str(result).strip() == probe:
@@ -2228,6 +2317,10 @@ def _probe_google_backend(translator: _GoogleTranslator, source_lang: str, targe
 def _resolve_translation_backend(google_ok: bool, ollama_status: dict) -> str:
     if google_ok:
         return "google"
+    if bool(ollama_status.get("running")) and bool(
+        ollama_status.get("has_translator") or ollama_status.get("models")
+    ):
+        return "ollama"
     return "passthrough"
 
 
@@ -2403,6 +2496,386 @@ def _refine_google_translations_with_semantic_llm(
     return translated_pages
 
 
+@dataclass(frozen=True)
+class TranslationAttemptControl:
+    backend: Literal["google", "ollama", "ocr_recovery"]
+    variant: str
+    disable_cache: bool
+    provider_model: str | None = None
+
+
+@dataclass(frozen=True)
+class FrozenTranslationOCRResult:
+    owner_id: str
+    canonical_json_bytes: bytes
+    sha256: str
+
+    @classmethod
+    def build(cls, owner_id: str, payload: dict[str, Any]) -> "FrozenTranslationOCRResult":
+        encoded = canonical_json_bytes(payload)
+        return cls(
+            owner_id=str(owner_id),
+            canonical_json_bytes=encoded,
+            sha256=sha256_bytes(encoded),
+        )
+
+    def read(self) -> dict[str, Any]:
+        return copy.deepcopy(json.loads(self.canonical_json_bytes.decode("utf-8")))
+
+
+@dataclass(frozen=True)
+class TranslationProviderAttemptResult:
+    translated_items: tuple[FrozenTranslationOCRResult, ...]
+    backend: Literal["google", "ollama"]
+    variant: str
+    provider_model: str | None
+    provider_called: bool
+    cache_hit: bool
+    provider_metadata_json_bytes: bytes
+    provider_metadata_sha256: str
+
+
+class TranslationProviderUnavailable(RuntimeError):
+    def __init__(self, message: str, *, provider_metadata: dict[str, Any]):
+        self.provider_metadata_json_bytes = canonical_json_bytes(provider_metadata)
+        self.provider_metadata_sha256 = sha256_bytes(self.provider_metadata_json_bytes)
+        super().__init__(message)
+
+
+def _single_owner_identity(ocr_result: dict[str, Any]) -> tuple[str, str]:
+    texts = list(ocr_result.get("texts") or [])
+    if len(texts) != 1 or not isinstance(texts[0], dict):
+        raise ValueError("translation attempt boundary requires exactly one owner record")
+    record = texts[0]
+    owner_id = str(record.get("owner_id") or record.get("id") or "").strip()
+    if not owner_id:
+        raise ValueError("translation attempt boundary requires owner_id")
+    source_text = str(record.get("text") or record.get("original") or "")
+    return owner_id, source_text
+
+
+def _context_character_names(context: dict[str, Any]) -> tuple[str, ...]:
+    names: list[str] = []
+    for key in ("personagens", "characters"):
+        values = context.get(key) or []
+        if isinstance(values, (str, dict)):
+            values = [values]
+        for value in values:
+            candidate = (value.get("name") or value.get("nome") or value.get("full_name")) if isinstance(value, dict) else value
+            normalized = " ".join(str(candidate or "").split())
+            if normalized and normalized not in names:
+                names.append(normalized)
+    return tuple(names)
+
+
+def _reconstruct_noisy_owner_source(source_text: str, *, context: dict[str, Any], model: str, host: str) -> tuple[str, dict[str, Any]]:
+    recovery = recover_noisy_source_anchors(source_text, context_names=_context_character_names(context))
+    if recovery is None:
+        raise ValueError("owner OCR recovery requires low-coherence source anchors")
+    anchor_text = " | ".join(recovery.anchors)
+    system = (
+        "You repair severely corrupted English comic OCR. The bitmap contains the English source and a translated layer drawn over each other. "
+        "Unknown letters are interference, not a cipher. Reliable ordered anchors: "
+        f"{anchor_text}. Reconstruct one short grammatical English line using only those anchors; add only function words required for grammar, "
+        "preserve names, and return only JSON [{\"id\":\"t1\",\"translated\":\"clean English\"}]."
+    )
+    user = f"OCR source:\n{source_text}"
+    reconstructed = ""
+    local_error: str | None = None
+    try:
+        local_items = _call_ollama(model, system, user, host)
+        if local_items:
+            reconstructed = str(local_items[0].get("translated") or "").strip()
+    except Exception as exc:
+        local_error = exc.__class__.__name__
+    compact = re.sub(r"[^a-z]", "", reconstructed.casefold())
+    matches = sum(re.sub(r"[^a-z]", "", anchor.casefold()) in compact for anchor in recovery.anchors)
+    if not reconstructed or reconstructed.casefold() == source_text.casefold() or matches < max(3, (len(recovery.anchors) + 1) // 2):
+        reconstructed = " ".join(recovery.anchors)
+        if recovery.anchors and recovery.anchors[0] in {"HOW", "WHY", "WHO", "WHAT", "WHERE"}:
+            reconstructed += "?"
+    return reconstructed, {
+        "reason": recovery.reason,
+        "anchors": list(recovery.anchors),
+        "local_model": model,
+        "local_error": local_error,
+        "reconstructed_source_sha256": sha256_bytes(reconstructed.encode("utf-8")),
+    }
+
+
+def translate_one_owner_attempt(
+    ocr_result: dict[str, Any],
+    obra: str,
+    context: dict[str, Any],
+    glossario: dict[str, str],
+    *,
+    idioma_destino: str,
+    idioma_origem: str,
+    qualidade: str,
+    ollama_host: str,
+    ollama_model: str,
+    models_dir: str,
+    translation_context: dict[str, Any] | None,
+    control: TranslationAttemptControl,
+    legacy_batch: bool = False,
+    progress_callback: Callable | None = None,
+    debug_session: _TranslationDebugSession | None = None,
+) -> TranslationProviderAttemptResult:
+    """Physically invoke exactly one selected provider for exactly one owner."""
+
+    del qualidade, models_dir
+    global _google
+    if legacy_batch:
+        owner_id = str(ocr_result.get("page_id") or "legacy-page")
+        source_text = "\n".join(
+            str(item.get("text") or item.get("original") or "")
+            for item in ocr_result.get("texts") or []
+            if isinstance(item, dict)
+        )
+    else:
+        owner_id, source_text = _single_owner_identity(ocr_result)
+    source_lang = normalize_google_language_code(idioma_origem)
+    target_lang = normalize_google_language_code(idioma_destino)
+    target_locale = canonical_target_locale(idioma_destino)
+    provider_called = True
+    cache_hit = False
+    provider_model = control.provider_model
+    metadata = {
+        "backend": control.backend,
+        "variant": control.variant,
+        "owner_id": owner_id,
+        "source_language": source_lang,
+        "target_locale": target_locale,
+        "disable_cache": bool(control.disable_cache),
+    }
+    provider_page = copy.deepcopy(ocr_result)
+    if not legacy_batch:
+        provider_page["_owner_translation_contract"] = {
+            "owner_id": owner_id,
+            "source_text_sha256": sha256_bytes(source_text.encode("utf-8")),
+        }
+    try:
+        if control.backend == "google":
+            if _google is None:
+                _google = _GoogleTranslator(source=source_lang, target=target_lang)
+                _google._source_lang = source_lang
+                _google._target_lang = target_lang
+            memory_cache = getattr(_google, "_cache", None)
+            persistent_cache = getattr(_google, "_persistent_cache", None)
+            normalized_key = source_text.strip()
+            memory_cache_hit = bool(
+                not control.disable_cache
+                and isinstance(memory_cache, dict)
+                and normalized_key in memory_cache
+            )
+            persistent_cache_hit = False
+            if (
+                not control.disable_cache
+                and not memory_cache_hit
+                and persistent_cache is not None
+                and callable(getattr(persistent_cache, "get", None))
+            ):
+                try:
+                    persistent_cache_hit = (
+                        persistent_cache.get(normalized_key, source_lang, target_lang)
+                        is not None
+                    )
+                except Exception:
+                    persistent_cache_hit = False
+            cache_hit = memory_cache_hit or persistent_cache_hit
+            provider_called = not cache_hit
+            if control.disable_cache:
+                _google._cache = {}
+                _google._persistent_cache = None
+            try:
+                translated_pages = _translate_with_google(
+                    [provider_page],
+                    context,
+                    glossario,
+                    progress_callback,
+                    idioma_origem=source_lang,
+                    idioma_destino=target_lang,
+                    target_locale=target_locale,
+                    translation_context=translation_context,
+                    debug_session=debug_session,
+                )
+            finally:
+                if control.disable_cache:
+                    _google._cache = memory_cache
+                    _google._persistent_cache = persistent_cache
+            provider_model = provider_model or "google-public"
+        elif control.backend == "ollama":
+            provider_model = provider_model or ollama_model
+            translated_pages = _translate_with_ollama(
+                [provider_page],
+                obra,
+                context,
+                glossario,
+                target_lang,
+                source_lang,
+                provider_model,
+                ollama_host,
+                repair_translator=None,
+                progress_callback=progress_callback,
+                translation_context=translation_context,
+                target_locale=target_locale,
+                debug_session=debug_session,
+            )
+        elif control.backend == "ocr_recovery":
+            reconstruction_model = provider_model or ollama_model
+            reconstructed_source, recovery_metadata = _reconstruct_noisy_owner_source(
+                source_text, context=context, model=reconstruction_model, host=ollama_host
+            )
+            if _google is None:
+                _google = _GoogleTranslator(source=source_lang, target=target_lang)
+                _google._source_lang = source_lang
+                _google._target_lang = target_lang
+            memory_cache = getattr(_google, "_cache", None)
+            persistent_cache = getattr(_google, "_persistent_cache", None)
+            provider_page["texts"][0]["text"] = reconstructed_source
+            provider_page["texts"][0]["original"] = reconstructed_source
+            _google._cache = {}
+            _google._persistent_cache = None
+            try:
+                translated_pages = _translate_with_google(
+                    [provider_page], context, glossario, progress_callback,
+                    idioma_origem=source_lang, idioma_destino=target_lang,
+                    target_locale=target_locale, translation_context=translation_context,
+                    debug_session=debug_session,
+                )
+            finally:
+                _google._cache = memory_cache
+                _google._persistent_cache = persistent_cache
+            metadata["recovery"] = recovery_metadata
+            provider_model = f"{reconstruction_model}+google-public"
+        else:  # pragma: no cover - Literal protects typed callers
+            raise ValueError(f"unsupported translation backend: {control.backend}")
+    except Exception as exc:
+        metadata.update(
+            {
+                "provider_model": provider_model,
+                "provider_called": bool(provider_called),
+                "cache_hit": bool(cache_hit),
+                "error_code": exc.__class__.__name__,
+            }
+        )
+        raise TranslationProviderUnavailable(
+            f"{control.backend} translation attempt unavailable",
+            provider_metadata=metadata,
+        ) from exc
+
+    if len(translated_pages) != 1 or not isinstance(translated_pages[0], dict):
+        raise TranslationProviderUnavailable(
+            f"{control.backend} returned invalid page cardinality",
+            provider_metadata=metadata,
+        )
+    translated_record_ids = {
+        str(item.get("owner_id") or item.get("id") or "")
+        for item in translated_pages[0].get("texts") or []
+        if isinstance(item, dict)
+    }
+    if not legacy_batch and owner_id not in translated_record_ids:
+        raise TranslationProviderUnavailable(
+            f"{control.backend} response lost owner identity",
+            provider_metadata=metadata,
+        )
+    frozen = FrozenTranslationOCRResult.build(owner_id, translated_pages[0])
+    metadata.update(
+        {
+            "provider_model": provider_model,
+            "provider_called": bool(provider_called),
+            "cache_hit": bool(cache_hit),
+            "response_sha256": frozen.sha256,
+        }
+    )
+    metadata_bytes = canonical_json_bytes(metadata)
+    return TranslationProviderAttemptResult(
+        translated_items=(frozen,),
+        backend=control.backend,
+        variant=control.variant,
+        provider_model=provider_model,
+        provider_called=bool(provider_called),
+        cache_hit=bool(cache_hit),
+        provider_metadata_json_bytes=metadata_bytes,
+        provider_metadata_sha256=sha256_bytes(metadata_bytes),
+    )
+
+
+def _translate_pages_via_attempt_boundary(
+    ocr_results: list[dict],
+    *,
+    obra: str,
+    context: dict[str, Any],
+    glossario: dict[str, str],
+    idioma_destino: str,
+    idioma_origem: str,
+    qualidade: str,
+    ollama_host: str,
+    ollama_model: str,
+    models_dir: str,
+    translation_context: dict[str, Any] | None,
+    control: TranslationAttemptControl,
+    progress_callback: Callable | None,
+    debug_session: _TranslationDebugSession | None,
+) -> list[dict]:
+    translated_pages: list[dict] = []
+    for page_index, page in enumerate(ocr_results):
+        request_page = copy.deepcopy(page)
+        request_page["page_id"] = str(
+            page.get("page_id") or f"legacy-page-{page_index + 1}"
+        )
+        original_identity: dict[str, tuple[bool, bool]] = {}
+        for record_index, raw_record in enumerate(page.get("texts") or []):
+            if not isinstance(raw_record, dict):
+                continue
+            record = copy.deepcopy(raw_record)
+            had_id = bool(str(record.get("id") or "").strip())
+            had_owner_id = bool(str(record.get("owner_id") or "").strip())
+            owner_id = str(
+                record.get("owner_id")
+                or record.get("id")
+                or f"legacy-owner:p{page_index + 1}:t{record_index + 1}"
+            )
+            record["id"] = str(record.get("id") or owner_id)
+            record["owner_id"] = owner_id
+            original_identity[owner_id] = (had_id, had_owner_id)
+            request_page.setdefault("texts", [])
+            request_page["texts"][record_index] = record
+        frozen_result = translate_one_owner_attempt(
+            request_page,
+            obra,
+            context,
+            glossario,
+            idioma_destino=idioma_destino,
+            idioma_origem=idioma_origem,
+            qualidade=qualidade,
+            ollama_host=ollama_host,
+            ollama_model=ollama_model,
+            models_dir=models_dir,
+            translation_context=translation_context,
+            control=control,
+            legacy_batch=True,
+            progress_callback=progress_callback,
+            debug_session=debug_session,
+        )
+        translated_page = frozen_result.translated_items[0].read()
+        output_page = copy.deepcopy(page)
+        output_page["texts"] = []
+        for translated_record in translated_page.get("texts") or []:
+            if not isinstance(translated_record, dict):
+                continue
+            restored = copy.deepcopy(translated_record)
+            response_owner_id = str(restored.get("owner_id") or restored.get("id") or "")
+            had_id, had_owner_id = original_identity.get(response_owner_id, (True, True))
+            if not had_owner_id:
+                restored.pop("owner_id", None)
+            if not had_id:
+                restored.pop("id", None)
+            output_page["texts"].append(restored)
+        translated_pages.append(output_page)
+    return translated_pages
+
+
 def translate_pages(
     ocr_results: list[dict],
     obra: str,
@@ -2417,9 +2890,8 @@ def translate_pages(
     models_dir: str = "",
     translation_context: dict | None = None,
 ) -> list[dict]:
-    del qualidade
-
     global _google, _google_health_key, _google_health_ok
+    target_locale = canonical_target_locale(idioma_destino)
     idioma_origem = normalize_google_language_code(idioma_origem)
     idioma_destino = normalize_google_language_code(idioma_destino)
 
@@ -2458,7 +2930,11 @@ def translate_pages(
         logger.warning(f"Google Translate indisponivel: {exc}")
 
     semantic_review_requested = False
-    ollama = {"running": False, "models": [], "has_translator": False, "skipped": True}
+    ollama = (
+        {"running": False, "models": [], "has_translator": False, "skipped": True}
+        if google_ok
+        else _check_ollama(ollama_host)
+    )
     backend = _resolve_translation_backend(google_ok=google_ok, ollama_status=ollama)
     selected_model = "google" if backend == "google" else (ollama_model if backend == "ollama" else "passthrough")
     debug_session = _TranslationDebugSession(backend=backend, model=selected_model)
@@ -2467,6 +2943,7 @@ def translate_pages(
     logger.info(f"Backend selecionado: {backend}")
     logger.info(f"Idioma Origem: {idioma_origem}")
     logger.info(f"Idioma Destino: {idioma_destino}")
+    logger.info(f"Locale Destino: {target_locale}")
     logger.info(f"Google OK: {google_ok}")
     logger.info(f"-------------------------")
     record_decision(
@@ -2478,30 +2955,27 @@ def translate_pages(
             "ollama_running": bool(ollama.get("running")),
             "idioma_origem": idioma_origem,
             "idioma_destino": idioma_destino,
+            "target_locale": target_locale,
         },
     )
 
     try:
         if backend == "google":
             logger.info("Traducao usando Google Translate.")
-            semantic_model = None
-            if semantic_review_requested and bool(ollama.get("running")) and bool(ollama.get("models")):
-                semantic_model = _pick_ollama_model_for_language_pair(
-                    ollama["models"],
-                    ollama_model,
-                    idioma_origem,
-                    idioma_destino,
-                )
-            return _translate_with_google(
+            return _translate_pages_via_attempt_boundary(
                 ocr_results,
-                context,
-                glossario,
-                progress_callback,
+                obra=obra,
+                context=context,
+                glossario=glossario,
+                idioma_destino=target_locale,
                 idioma_origem=idioma_origem,
-                idioma_destino=idioma_destino,
-                semantic_reviewer_model=semantic_model,
-                semantic_reviewer_host=ollama_host,
+                qualidade=qualidade,
+                ollama_host=ollama_host,
+                ollama_model=ollama_model,
+                models_dir=models_dir,
                 translation_context=translation_context,
+                control=TranslationAttemptControl("google", "legacy_public", False),
+                progress_callback=progress_callback,
                 debug_session=debug_session,
             )
 
@@ -2513,18 +2987,25 @@ def translate_pages(
                 idioma_destino,
             )
             logger.info("Traducao usando backend local Ollama: %s", model)
-            return _translate_with_ollama(
+            return _translate_pages_via_attempt_boundary(
                 ocr_results,
-                obra,
-                context,
-                glossario,
-                idioma_destino,
-                idioma_origem,
-                model,
-                ollama_host,
-                _google if google_ok else None,
-                progress_callback,
+                obra=obra,
+                context=context,
+                glossario=glossario,
+                idioma_destino=target_locale,
+                idioma_origem=idioma_origem,
+                qualidade=qualidade,
+                ollama_host=ollama_host,
+                ollama_model=ollama_model,
+                models_dir=models_dir,
                 translation_context=translation_context,
+                control=TranslationAttemptControl(
+                    "ollama",
+                    "legacy_public",
+                    False,
+                    provider_model=model,
+                ),
+                progress_callback=progress_callback,
                 debug_session=debug_session,
             )
 
@@ -2569,6 +3050,7 @@ def _translate_with_google(
     semantic_reviewer_host: str = OLLAMA_HOST,
     translation_context: dict | None = None,
     debug_session: _TranslationDebugSession | None = None,
+    target_locale: str | None = None,
 ) -> list[dict]:
     total = len(ocr_results)
     translated_pages = []
@@ -2590,6 +3072,7 @@ def _translate_with_google(
             semantic_reviewer_model=semantic_reviewer_model,
             semantic_reviewer_host=semantic_reviewer_host,
             debug_session=debug_session,
+            target_locale=target_locale,
         )
         translated_pages.append(translated)
 
@@ -2599,14 +3082,43 @@ def _translate_with_google(
             context=context,
             glossario=glossario,
             source_lang=idioma_origem,
-            target_lang=idioma_destino,
+            target_lang=canonical_target_locale(target_locale or idioma_destino),
             model=semantic_reviewer_model,
             host=semantic_reviewer_host,
             translation_context=translation_context,
         )
 
+    translated_pages = _apply_target_locale_validation(
+        translated_pages,
+        target_locale or idioma_destino,
+    )
     translated_pages = _apply_translation_render_blocks(translated_pages, idioma_origem)
     return translated_pages
+
+
+def _prepare_page_translation_records(
+    ocr_page: dict,
+    glossario: dict,
+) -> list[dict]:
+    """Normalize records while keeping verified owner payloads semantically atomic."""
+
+    from ocr.ocr_normalizer import (
+        merge_same_balloon_fragments_before_translation,
+        normalize_ocr_record,
+    )
+
+    source_records = [
+        text
+        for text in list(ocr_page.get("texts") or [])
+        if isinstance(text, dict)
+    ]
+    if isinstance(ocr_page.get("_owner_translation_contract"), dict):
+        return [copy.deepcopy(text) for text in source_records]
+    records = [
+        normalize_ocr_record(text, glossario)
+        for text in source_records
+    ]
+    return merge_same_balloon_fragments_before_translation(records)
 
 
 def _translate_google_single_page(
@@ -2623,6 +3135,7 @@ def _translate_google_single_page(
     semantic_reviewer_model: str | None,
     semantic_reviewer_host: str,
     debug_session: _TranslationDebugSession | None = None,
+    target_locale: str | None = None,
 ) -> tuple[dict, list[dict]]:
     """Translate a single page using Google backend with shared history state.
 
@@ -2631,10 +3144,10 @@ def _translate_google_single_page(
     """
     is_cjk = idioma_origem in ("ja", "ko", "zh", "zh-CN", "zh-TW")
 
-    from ocr.ocr_normalizer import normalize_ocr_record, merge_same_balloon_fragments_before_translation
-
-    texts = merge_same_balloon_fragments_before_translation(
-        [normalize_ocr_record(text, glossario) for text in ocr_page.get("texts", [])]
+    texts = _prepare_page_translation_records(ocr_page, glossario)
+    owner_translation_contract = isinstance(
+        ocr_page.get("_owner_translation_contract"),
+        dict,
     )
     if not texts:
         if progress_callback:
@@ -2743,7 +3256,11 @@ def _translate_google_single_page(
             pending_texts.append(prepared)
 
     handled_context_indices: set[int] = set()
-    context_groups = _build_translation_context_groups(texts, repaired_sources)
+    context_groups = (
+        []
+        if owner_translation_contract
+        else _build_translation_context_groups(texts, repaired_sources)
+    )
     context_requests: list[tuple[list[int], list[str], str]] = []
     pending_set = set(pending_indices)
     for group in context_groups:
@@ -3033,11 +3550,13 @@ def _translate_with_ollama(
     progress_callback: Callable | None,
     translation_context: dict | None = None,
     debug_session: _TranslationDebugSession | None = None,
+    target_locale: str | None = None,
 ) -> list[dict]:
     total = len(ocr_results)
     tc_header = build_translation_context_header(translation_context)
+    locale_for_prompt = canonical_target_locale(target_locale or idioma_destino)
     system = (
-        f"Voce e um tradutor de manga especializado em {idioma_origem}->{idioma_destino}. Responda SOMENTE com JSON array.\n"
+        f"Voce e um tradutor de manga especializado em {idioma_origem}->{locale_for_prompt}. Responda SOMENTE com JSON array.\n"
         f"OBRA: {obra}\n"
         f"PERSONAGENS: {', '.join(context.get('personagens', [])[:8]) or 'N/A'}\n"
         f"GLOSSARIO: {json.dumps(glossario, ensure_ascii=False)}\n"
@@ -3049,11 +3568,7 @@ def _translate_with_ollama(
     translated_pages = []
     history_tail: list[dict] = []
     for page_idx, ocr_page in enumerate(ocr_results):
-        from ocr.ocr_normalizer import normalize_ocr_record, merge_same_balloon_fragments_before_translation
-
-        texts = merge_same_balloon_fragments_before_translation(
-            [normalize_ocr_record(text, glossario) for text in ocr_page.get("texts", [])]
-        )
+        texts = _prepare_page_translation_records(ocr_page, glossario)
         if not texts:
             translated_pages.append({"texts": []})
             if progress_callback:
@@ -3297,11 +3812,11 @@ def _translate_with_ollama(
                     text=original,
                     details={"hits": glossary_hits},
                 )
+            payload_for_hash = next(
+                (item.get("source", "") for item in text_list if item.get("id") == f"t{index + 1}"),
+                original,
+            )
             if debug_session:
-                payload_for_hash = next(
-                    (item.get("source", "") for item in text_list if item.get("id") == f"t{index + 1}"),
-                    original,
-                )
                 debug_session.record_output(
                     page_idx=page_idx,
                     index=index,
@@ -3332,7 +3847,11 @@ def _translate_with_ollama(
         if progress_callback:
             progress_callback(page_idx + 1, total, f"[{model}] Pagina {page_idx + 1}/{total}")
 
-    return translated_pages
+    translated_pages = _apply_target_locale_validation(
+        translated_pages,
+        target_locale or idioma_destino,
+    )
+    return _apply_translation_render_blocks(translated_pages, idioma_origem)
 
 
 def _passthrough(
@@ -3393,7 +3912,8 @@ def translate_single_block(block: dict, project: dict):
     global _google
     
     source_lang = project.get("idioma_origem", "en")
-    target_lang = project.get("idioma_destino", "pt-BR")
+    target_locale = canonical_target_locale(project.get("idioma_destino", "pt-BR"))
+    target_lang = target_locale
     
     source_lang = normalize_google_language_code(source_lang)
     target_lang = normalize_google_language_code(target_lang)
@@ -3426,6 +3946,19 @@ def translate_single_block(block: dict, project: dict):
         block.get("qa_flags"),
         _translation_quality_flags(text, final, source_lang),
     )
+    locale_validation = validate_target_locale(
+        source_text=text,
+        target_text=final,
+        target_locale=target_locale,
+    )
+    locale_flags = [issue.code for issue in locale_validation.issues]
+    if locale_validation.status == "blocked":
+        locale_flags.append("translation_locale_mismatch")
+    elif locale_validation.status == "review":
+        locale_flags.append("translation_locale_review")
+    qa_flags = _merge_qa_flags(qa_flags, locale_flags)
+    block["target_locale"] = target_locale
+    block["locale_validation"] = locale_validation.to_dict()
     if _should_block_translation_render(text, final, source_lang, tipo, qa_flags):
         block["translation_blocked_text"] = final
         final = ""

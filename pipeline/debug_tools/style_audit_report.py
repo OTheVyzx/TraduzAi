@@ -17,6 +17,14 @@ import cv2
 import numpy as np
 
 from typesetter.style_extractor import extract_text_style_evidence
+from typesetter.style_contract import style_evidence_v2_from_v1
+from typesetter.gradient_model import canonicalize_linear_gradient
+from typesetter.style_policy import (
+    decide_style_copy_v2,
+    style_candidate_copy_allowed,
+    style_evidence_v2_shadow_policy,
+)
+from qa.style_fidelity import audit_style_fidelity, resolve_original_path
 
 
 CARD_W = 360
@@ -24,8 +32,6 @@ CARD_H = 250
 CROP_H = 155
 MARGIN = 14
 FONT = cv2.FONT_HERSHEY_SIMPLEX
-STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD = 0.70
-STYLE_COPY_SFX_PROMOTION_THRESHOLD = 0.66
 
 
 def _bbox4(value: object) -> list[int] | None:
@@ -43,11 +49,23 @@ def _layer_style(layer: dict) -> dict:
 
 
 def _non_empty_gradient(value: object) -> bool:
-    return isinstance(value, list | tuple) and len(value) >= 2 and all(str(item).strip() for item in value[:2])
+    return canonicalize_linear_gradient(value) is not None
+
+
+def _gradient_direction(value: object) -> dict[str, object] | None:
+    gradient = canonicalize_linear_gradient(value)
+    if gradient is None:
+        return None
+    return {
+        "start": list(gradient["start"]),
+        "end": list(gradient["end"]),
+        "coordinate_space": str(gradient["coordinate_space"]),
+    }
 
 
 def _applied_style_fields(layer: dict) -> dict:
     style = _layer_style(layer)
+    gradient = canonicalize_linear_gradient(style.get("cor_gradiente"))
     return {
         "style_origin": str(layer.get("style_origin") or style.get("style_origin") or ""),
         "style_confidence": float(layer.get("style_confidence") or style.get("style_confidence") or 0.0),
@@ -59,10 +77,10 @@ def _applied_style_fields(layer: dict) -> dict:
         "applied_text_color": str(style.get("cor") or ""),
         "applied_stroke_color": str(style.get("contorno") or ""),
         "applied_stroke_width_px": int(style.get("contorno_px") or 0),
-        "applied_gradient": _non_empty_gradient(style.get("cor_gradiente")),
-        "applied_gradient_colors": list(style.get("cor_gradiente") or [])[:2]
-        if _non_empty_gradient(style.get("cor_gradiente"))
-        else [],
+        "applied_gradient": gradient is not None,
+        "applied_gradient_colors": list(gradient["colors"]) if gradient else [],
+        "applied_gradient_direction": _gradient_direction(gradient),
+        "applied_gradient_spec": gradient,
         "applied_glow": bool(style.get("glow")),
         "applied_glow_color": str(style.get("glow_cor") or ""),
         "applied_glow_px": int(style.get("glow_px") or 0),
@@ -81,57 +99,17 @@ def _has_applied_style_effect(fields: dict) -> bool:
     )
 
 
-def _float_or_none(value) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _candidate_confidence_from_fields(layer: dict, fields: tuple[str, ...]) -> float | None:
-    for field in fields:
-        value = _float_or_none(layer.get(field))
-        if value is not None:
-            return value
-    return None
-
-
 def _primary_text_style_candidate_confident(layer: dict) -> bool:
-    confidence = _candidate_confidence_from_fields(
-        layer,
-        ("confidence", "ocr_confidence", "confianca_ocr"),
-    )
-    if confidence is None:
-        return True
-    return confidence >= STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD
+    return style_candidate_copy_allowed(layer)
 
 
 def _sfx_style_candidate_confident(layer: dict) -> bool:
-    sfx = layer.get("sfx") if isinstance(layer.get("sfx"), dict) else {}
-    sfx_ocr = layer.get("sfx_ocr") if isinstance(layer.get("sfx_ocr"), dict) else {}
-    confidence_values = [
-        _float_or_none(layer.get("sfx_promotion_score")),
-        _float_or_none(sfx.get("promotion_score")),
-        _float_or_none(layer.get("confidence")),
-        _float_or_none(layer.get("ocr_confidence")),
-        _float_or_none(sfx.get("visual_confidence")),
-        _float_or_none(sfx_ocr.get("confidence")),
-        _float_or_none(sfx_ocr.get("ocr_confidence")),
-    ]
-    confidence_values = [value for value in confidence_values if value is not None]
-    if not confidence_values:
-        return True
-    promotion_score = _float_or_none(layer.get("sfx_promotion_score"))
-    if promotion_score is None:
-        promotion_score = _float_or_none(sfx.get("promotion_score"))
-    if promotion_score is not None and promotion_score >= STYLE_COPY_SFX_PROMOTION_THRESHOLD:
-        return True
-    return max(confidence_values) >= STYLE_COPY_CANDIDATE_CONFIDENCE_THRESHOLD
+    return style_candidate_copy_allowed(layer)
 
 
 def _style_scan_allowed_for_layer(layer: dict, bbox: list[int]) -> bool:
+    if not style_candidate_copy_allowed(layer):
+        return False
     applied = _applied_style_fields(layer)
     if _has_applied_style_effect(applied):
         return True
@@ -159,6 +137,9 @@ def _style_scan_allowed_for_layer(layer: dict, bbox: list[int]) -> bool:
 
 def _style_scan_skip_reason(layer: dict) -> str:
     route_action = str(layer.get("route_action") or "").strip().lower()
+    render_policy = str(layer.get("render_policy") or "").strip().lower()
+    if route_action == "review_required" or render_policy == "review_required":
+        return "not_style_copy_candidate"
     content_class = str(layer.get("content_class") or "").strip().lower()
     if route_action == "translate_sfx_inpaint_render" or content_class == "sfx":
         if not _sfx_style_candidate_confident(layer):
@@ -205,7 +186,7 @@ def _read_project_records(run_dir: Path, originals_dir: Path) -> list[dict]:
     records: list[dict] = []
 
     for page_index, page in enumerate(pages, start=1):
-        image_path = originals_dir / f"{page_index:03d}.jpg"
+        image_path = resolve_original_path(run_dir, page, page_index) or (originals_dir / f"{page_index:03d}.jpg")
         img_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         if img_bgr is None:
             continue
@@ -235,22 +216,44 @@ def _read_project_records(run_dir: Path, originals_dir: Path) -> list[dict]:
                     skipped=True,
                     reason=_style_scan_skip_reason(layer),
                 )
+            evidence_v2 = style_evidence_v2_from_v1(evidence)
+            decision_v2 = decide_style_copy_v2(layer, evidence_v2)
+            gradient_attribute = evidence_v2.attributes.get("gradient")
+            detected_gradient = canonicalize_linear_gradient(
+                gradient_attribute.value if gradient_attribute is not None else None
+            )
             records.append(
                 {
                     "page": page_index,
+                    "owner_id": layer.get("owner_id"),
+                    "source_path": str(image_path.resolve()),
+                    "visual_profile_sha256": layer.get("visual_profile_sha256"),
+                    "source_sha256": (layer.get("visual_profile_v2") or {}).get("source_sha256") if isinstance(layer.get("visual_profile_v2"), dict) else None,
+                    "glyph_mask_sha256": (layer.get("visual_profile_v2") or {}).get("glyph_mask_sha256") if isinstance(layer.get("visual_profile_v2"), dict) else None,
                     "id": layer.get("id") or layer.get("text_id"),
                     "tipo": layer.get("tipo"),
                     "text": str(layer.get("text") or "")[:120],
                     "bbox": [x1, y1, x2, y2],
                     **applied_fields,
                     **evidence,
+                    "gradient_colors": (
+                        list(detected_gradient["colors"])
+                        if detected_gradient is not None
+                        else list(evidence.get("gradient_colors") or [])[:2]
+                    ),
+                    "gradient_direction": _gradient_direction(detected_gradient),
+                    "gradient_spec": detected_gradient,
+                    "style_evidence_v2": evidence_v2.to_dict(),
+                    "style_evidence_v2_shadow_policy": style_evidence_v2_shadow_policy(evidence_v2),
+                    "style_application_decision_v2": decision_v2.to_dict(),
                 }
             )
     return records
 
 
 def _read_crop(rec: dict, originals_dir: Path) -> np.ndarray:
-    img = cv2.imread(str(originals_dir / f"{int(rec['page']):03d}.jpg"), cv2.IMREAD_COLOR)
+    source_path = rec.get("source_path") or (originals_dir / f"{int(rec['page']):03d}.jpg")
+    img = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
     if img is None:
         return np.full((80, 160, 3), 245, np.uint8)
     x1, y1, x2, y2 = [int(v) for v in rec["bbox"]]
@@ -492,6 +495,12 @@ def main() -> int:
     output_dir = args.output or (run_dir / "debug" / "codex_style_audit" / "visual_report")
     records = _read_project_records(run_dir, originals_dir)
     summary = _write_visual_report(records, run_dir, originals_dir, output_dir)
+    project = json.loads((run_dir / "project.json").read_text(encoding="utf-8"))
+    fidelity = audit_style_fidelity(project, run_dir, mode="render")
+    fidelity_path = output_dir / "style_fidelity_by_owner.json"
+    fidelity_path.write_text(json.dumps(fidelity, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary["style_fidelity"] = fidelity["summary"]
+    summary["style_fidelity_file"] = str(fidelity_path)
     print(json.dumps(summary, indent=2, ensure_ascii=False))
     return 0
 

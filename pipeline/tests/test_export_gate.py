@@ -1,4 +1,97 @@
+import pytest
+
 from qa.export_gate import evaluate_export_gate
+from qa.gate_composition import compose_export_gate
+
+
+@pytest.mark.parametrize(
+    ("functional", "style", "expected"),
+    [
+        ("PASS", "PASS", "PASS"),
+        ("PASS", "BLOCK", "BLOCK"),
+        ("BLOCK", "PASS", "BLOCK"),
+        ("BLOCK", "BLOCK", "BLOCK"),
+    ],
+)
+def test_export_gate_is_conjunction_of_normalized_subgates(functional, style, expected):
+    gate = compose_export_gate(
+        {"status": functional, "allowed": functional == "PASS", "issues": []},
+        {"status": style, "blocking_owner_ids": ["owner_a"] if style == "BLOCK" else []},
+    )
+
+    assert gate["status"] == expected
+    assert gate["allowed"] is (expected == "PASS")
+
+
+def test_export_gate_recomputes_counts_and_applies_override_once():
+    functional = {
+        "status": "BLOCK",
+        "allowed": True,
+        "critical_issue_count": 0,
+        "issues": [
+            {
+                "code": "english_residual",
+                "severity": "critical",
+                "blocks_export": True,
+                "flags": ["source_payload_visible"],
+            }
+        ],
+    }
+
+    gate = compose_export_gate(functional, {"status": "PASS"}, override=True)
+
+    assert gate["status"] == "OVERRIDDEN"
+    assert gate["allowed"] is True
+    assert gate["override"] is True
+    assert gate["critical_issue_count"] == 1
+    assert gate["blocking_issue_count"] == 1
+
+
+def test_english_residual_remains_in_functional_subgate_only():
+    functional = {
+        "status": "BLOCK",
+        "allowed": False,
+        "issues": [{"code": "english_residual", "severity": "critical", "blocks_export": True}],
+    }
+
+    gate = compose_export_gate(functional, {"status": "PASS"})
+
+    assert gate["subgates"]["functional"]["status"] == "BLOCK"
+    assert gate["subgates"]["style"]["status"] == "PASS"
+    assert {issue["code"] for issue in gate["issues"]} == {"english_residual"}
+
+
+def test_style_mismatch_does_not_reclassify_functional_subgate():
+    gate = compose_export_gate(
+        {"status": "PASS", "allowed": True, "issues": []},
+        {"status": "BLOCK", "blocking_owner_ids": ["owner_a"]},
+    )
+
+    assert gate["subgates"]["functional"]["status"] == "PASS"
+    assert gate["subgates"]["style"]["status"] == "BLOCK"
+    assert gate["issues"][0]["code"] == "style_fidelity_high_confidence_mismatch"
+
+
+def test_verified_owner_export_fails_closed_without_final_pixel_qa():
+    gate = evaluate_export_gate(
+        {
+            "owner_graph_status": "verified",
+            "paginas": [{"numero": 1, "page_id": "page_001", "text_layers": []}],
+            "qa": {},
+        }
+    )
+
+    assert gate["status"] == "BLOCK"
+
+
+def test_export_gate_blocks_inpaint_texture_flattened():
+    gate = evaluate_export_gate({"paginas": [{"numero": 1, "text_layers": [{"id": "t1", "band_id": "page_001_band_004", "translated": "Texto", "qa_flags": ["inpaint_texture_flattened"]}]}]})
+
+    assert gate["status"] == "BLOCK"
+    assert "inpaint_texture_flattened" in gate["issues"][0]["flags"]
+    assert "08_inpaint/page_001_band_004/00_band_before_inpaint.jpg" in gate["issues"][0]["artifact_links"]
+    assert "08_inpaint/page_001_band_004/05_inpaint_mask_overlay.jpg" in gate["issues"][0]["artifact_links"]
+    assert "08_inpaint/page_001_band_004/06_band_after_inpaint.jpg" in gate["issues"][0]["artifact_links"]
 
 
 def test_export_gate_blocks_renderable_p0_flags():
@@ -629,6 +722,35 @@ def test_export_gate_demotes_aligned_contained_mask_outside_balloon_critical_wit
     assert gate["issues"][0]["blocks_export"] is False
 
 
+def test_export_gate_demotes_missing_real_mask_when_final_render_is_geometrically_contained():
+    project = {
+        "paginas": [
+            {
+                "text_layers": [
+                    {
+                        "id": "ocr_001",
+                        "translated": "TUDO BEM, O EVENTO VAI COMECAR",
+                        "qa_flags": ["missing_real_bubble_mask"],
+                        "bubble_mask_source": "derived_white_crop_rejected",
+                        "bbox": [256, 10603, 613, 10806],
+                        "balloon_bbox": [120, 10432, 755, 10967],
+                        "safe_text_box": [288, 10628, 580, 10776],
+                        "render_bbox": [291, 10650, 579, 10755],
+                    }
+                ]
+            }
+        ]
+    }
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "PASS"
+    assert gate["needs_review"] is True
+    assert gate["issues"][0]["severity"] == "warning"
+    assert gate["issues"][0]["blocks_export"] is False
+    assert gate["issues"][0]["flags"] == ["missing_real_bubble_mask"]
+
+
 def test_export_gate_demotes_mask_outside_critical_when_render_overlaps_text_bbox_despite_tiny_source():
     project = {
         "paginas": [
@@ -822,6 +944,31 @@ def test_export_gate_keeps_content_missing_render_blocking():
     assert gate["status"] == "BLOCK"
     assert gate["allowed"] is False
     assert gate["critical_issue_count"] == 1
+
+
+def test_export_gate_ignores_hidden_unsafe_render_suppression():
+    project = {
+        "paginas": [
+            {
+                "numero": 3,
+                "text_layers": [
+                    {
+                        "id": "unsafe_fragment",
+                        "text": "THIS MUST NOT RENDER",
+                        "route_action": "translate_inpaint_render",
+                        "visible": False,
+                        "render_policy": "suppressed_unsafe_automatic_render",
+                        "qa_flags": ["missing_render_bbox", "mask_outside_balloon_critical"],
+                    }
+                ],
+            }
+        ],
+    }
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "PASS"
+    assert gate["critical_issue_count"] == 0
 
 
 def test_export_gate_demotes_credit_tier_only_when_band_has_strong_credit_context():
@@ -1286,7 +1433,7 @@ def test_export_gate_drops_dark_bubble_overflow_when_render_fit_safe_box_contain
     assert all("TEXT_OVERFLOW" not in issue["flags"] for issue in gate["issues"])
 
 
-def test_export_gate_demotes_compact_small_text_fit_when_render_is_contained():
+def test_export_gate_blocks_unresolved_compact_small_text_fit_when_render_is_contained():
     project = {
         "paginas": [
             {
@@ -1307,9 +1454,9 @@ def test_export_gate_demotes_compact_small_text_fit_when_render_is_contained():
 
     gate = evaluate_export_gate(project)
 
-    assert gate["status"] == "PASS"
-    assert gate["blocking_issue_count"] == 0
-    assert gate["critical_issue_count"] == 0
+    assert gate["status"] == "BLOCK"
+    assert gate["blocking_issue_count"] == 1
+    assert gate["critical_issue_count"] == 1
 
 
 def test_export_gate_demotes_fast_fill_for_group_sibling_render_geometry():
@@ -1645,7 +1792,7 @@ def test_export_gate_blocks_unpropagated_debug_qa_flags():
     assert issue["flags"] == ["qa_flag_not_propagated"]
 
 
-def test_export_gate_does_not_block_white_balloon_fit_below_minimum_legible():
+def test_export_gate_blocks_unresolved_white_balloon_fit_below_minimum_legible():
     project = {
         "idioma_origem": "en",
         "paginas": [
@@ -1676,14 +1823,11 @@ def test_export_gate_does_not_block_white_balloon_fit_below_minimum_legible():
 
     gate = evaluate_export_gate(project)
 
-    assert gate["status"] == "PASS"
-    assert gate["needs_review"] is True
-    assert gate["critical_issue_count"] == 0
-    assert gate["review_issue_count"] == 1
+    assert gate["status"] == "BLOCK"
+    assert gate["critical_issue_count"] == 1
     issue = gate["issues"][0]
-    assert issue["type"] == "needs_review"
-    assert issue["severity"] == "warning"
-    assert issue["blocks_export"] is False
+    assert issue["severity"] == "critical"
+    assert issue["blocks_export"] is True
     assert issue["flags"] == ["fit_below_minimum_legible"]
 
 
@@ -1697,6 +1841,8 @@ def test_export_gate_demotes_translator_note_fit_below_minimum_on_flat_white_bac
                         "id": "ocr_001",
                         "translated": "T/N: HYUNGNIM É UM TERMO USADO PARA CHAMAR O CHEFE DA MÁFIA.",
                         "qa_flags": ["fit_below_minimum_legible", "safe_text_box_recomputed"],
+                        "font_size_final": 9,
+                        "minimum_legible_font_px": 8,
                         "bbox": [595, 14319, 643, 14365],
                         "source_bbox": [595, 14319, 643, 14365],
                         "balloon_bbox": [535, 14278, 797, 14413],
@@ -1726,6 +1872,77 @@ def test_export_gate_demotes_translator_note_fit_below_minimum_on_flat_white_bac
     assert issue["type"] == "needs_review"
     assert issue["blocks_export"] is False
     assert "fit_below_minimum_legible" in issue["flags"]
+
+
+def test_export_gate_blocks_final_visual_render_bbox_missing():
+    project = {
+        "paginas": [{"numero": 3, "text_layers": [{"id": "ocr_1", "trace_id": "ocr_1@page_003_band_042", "band_id": "page_003_band_042", "translated": "OLA"}]}],
+        "qa": {"post_rerender_final_visual_contract": {"qa": {"rows": [{
+            "band_id": "page_003_band_042",
+            "trace_ids": ["ocr_1@page_003_band_042"],
+            "status": "fail",
+            "flags": ["render_bbox_missing"],
+            "metrics": {"layers": [{"trace_id": "ocr_1@page_003_band_042"}]},
+        }]}}},
+    }
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "BLOCK"
+    assert gate["issues"][0]["source"] == "post_rerender_final_visual_contract"
+
+
+def test_export_gate_blocks_translated_crop_mismatch():
+    project = {
+        "paginas": [{"numero": 4, "text_layers": []}],
+        "qa": {"post_rerender_final_visual_contract": {"qa": {"rows": [{
+            "band_id": "page_004_band_009",
+            "trace_ids": [],
+            "status": "fail",
+            "flags": ["translated_crop_mismatch_final_band"],
+            "metrics": {"translated_crop_mean_abs_diff": 42.0},
+        }]}}},
+    }
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "BLOCK"
+    assert gate["issues"][0]["flags"] == ["translated_crop_mismatch_final_band"]
+
+
+def test_export_gate_links_visual_failure_to_trace_ids():
+    trace_ids = ["ocr_a@page_005_band_011", "ocr_b@page_005_band_011"]
+    project = {
+        "paginas": [{"numero": 5, "text_layers": [
+            {"id": "ocr_a", "trace_id": trace_ids[0], "band_id": "page_005_band_011", "translated": "A"},
+            {"id": "ocr_b", "trace_id": trace_ids[1], "band_id": "page_005_band_011", "translated": "B"},
+        ]}],
+        "qa": {"post_rerender_final_visual_contract": {"qa": {"rows": [{
+            "band_id": "page_005_band_011", "trace_ids": trace_ids, "status": "fail",
+            "flags": ["dark_text_center_drift"], "metrics": {"dark_text_center_drift": 48.0},
+        }]}}},
+    }
+
+    gate = evaluate_export_gate(project)
+
+    issue = next(issue for issue in gate["issues"] if issue.get("source") == "post_rerender_final_visual_contract")
+    assert issue["trace_ids"] == trace_ids
+    assert "11_qa_export_gate/final_rerender_visual_qa.json" in issue["artifact_links"]
+
+
+def test_visual_control_band_pass_does_not_create_issue():
+    project = {
+        "paginas": [{"numero": 6, "text_layers": []}],
+        "qa": {"post_rerender_final_visual_contract": {"qa": {"rows": [{
+            "band_id": "page_006_band_012", "trace_ids": [], "status": "pass", "flags": [],
+            "metrics": {"translated_crop_matches_final_band": True},
+        }]}}},
+    }
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "PASS"
+    assert not any(issue.get("source") == "post_rerender_final_visual_contract" for issue in gate["issues"])
 
 
 def test_export_gate_does_not_block_unpropagated_fast_fill_no_glyph_evidence():
