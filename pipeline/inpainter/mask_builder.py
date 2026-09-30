@@ -71,6 +71,7 @@ FAST_FILL_MASK_EVIDENCE_KINDS = {
     "sfx_glyph_mask",
     "component_bubble_cleaner",
     "verified_rect_sign",
+    "component_bubble_cleaner",
 }
 DIALOGUE_MASK_CONTENT_CLASSES = {
     "dialogue",
@@ -89,6 +90,24 @@ AUTOMATIC_MASK_EVIDENCE_REJECT_REASONS = {
     "coverage_too_low",
     "mask_kind_not_fast_fill_allowed",
 }
+TEXT_MASK_ENGINE_ENV = "TRADUZAI_TEXT_MASK_ENGINE"
+LEGACY_BUBBLE_PRIMARY_ENGINE_ENV = "TRADUZAI_BUBBLE_PRIMARY_ENGINE"
+COMPONENT_BUBBLE_CLEANER_MODES = {
+    "component_bubble_cleaner",
+    "notanother",
+    "notanotherbubblecleaner",
+    "notanother_bubble_cleaner",
+}
+
+
+def _selected_text_mask_engine() -> str:
+    value = os.getenv(TEXT_MASK_ENGINE_ENV, "").strip().lower()
+    if value in COMPONENT_BUBBLE_CLEANER_MODES:
+        return "component_bubble_cleaner"
+    legacy = os.getenv(LEGACY_BUBBLE_PRIMARY_ENGINE_ENV, "").strip().lower()
+    if legacy in COMPONENT_BUBBLE_CLEANER_MODES:
+        return "component_bubble_cleaner"
+    return value
 
 
 def _image_hw(image_shape: tuple[int, ...]) -> tuple[int, int]:

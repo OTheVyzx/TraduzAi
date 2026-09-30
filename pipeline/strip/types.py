@@ -82,6 +82,7 @@ class Balloon:
         """Stable page-global visual identity, when assigned by detection."""
         value = self.metadata.get("region_id")
         return str(value) if value else None
+    mask: np.ndarray | None = None
 
 
 @dataclass

@@ -67,6 +67,17 @@ except ImportError:  # pragma: no cover - supports package imports
         route_action_requires_inpaint,
     )
 
+try:
+    from .lama_onnx import (
+        get_lama_session,
+        inpaint_region_with_lama,
+        select_lama_onnx_providers,
+    )
+except Exception:  # pragma: no cover - optional import for tests/diagnostic paths
+    select_lama_onnx_providers = None
+    get_lama_session = None
+    inpaint_region_with_lama = None
+
 FAST_FILL_BLOCKING_QA_FLAGS = {
     "bbox_overreach",
     "bbox_overreach_critical",
@@ -2018,6 +2029,17 @@ def _text_bbox_for_inpaint_geometry(item: dict, width: int, height: int) -> list
         return peer
     return text_bbox or peer
 
+def _has_runtime_value(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value != ""
+    if isinstance(value, np.ndarray):
+        return value.size > 0
+    if isinstance(value, (list, tuple, dict, set)):
+        return bool(value)
+    return True
+
 
 def _enrich_vision_blocks_from_texts_for_inpaint(
     vision_blocks: list[dict],
@@ -2106,6 +2128,12 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
                 "balloon_bbox",
                 "background_rgb",
                 "layout_bbox",
+                "bubble_id",
+                "bubble_mask",
+                "mask",
+                "bubble_mask_source",
+                "bubble_mask_bbox",
+                "bubble_inner_bbox",
                 "_merged_source_bboxes",
                 "merged_source_bboxes",
                 "content_class",
@@ -2141,7 +2169,7 @@ def _enrich_vision_blocks_from_texts_for_inpaint(
                 if key == "bbox" and block_bbox is not None:
                     continue
                 value = best_text.get(key)
-                if value not in (None, [], ""):
+                if _has_runtime_value(value):
                     current[key] = copy.deepcopy(value)
             coherent_text_bbox = _text_bbox_for_inpaint_geometry(current, width, height)
             if coherent_text_bbox is not None:

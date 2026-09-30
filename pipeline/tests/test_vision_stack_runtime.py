@@ -51,6 +51,7 @@ from vision_stack.runtime import (
     _apply_textured_balloon_band_artifact_cleanup,
     _apply_textured_light_text_residual_cleanup,
     _apply_textured_balloon_seam_cleanup,
+    _selected_inpaint_engine,
     _apply_geometry_white_balloon_cleanup,
     _apply_glyph_residual_cleanup_for_texts,
     _apply_white_balloon_artifact_cleanup,
@@ -111,6 +112,7 @@ from vision_stack.runtime import (
     _should_use_koharu_cjk_ocr,
     _run_koharu_blockwise_inpaint_page,
     _run_koharu_worker_detect_ocr_batch,
+    _call_inpainter_in_roi,
     _run_masked_inpaint_passes,
     _restore_dark_line_art_outside_text_geometry,
     _scan_orphan_white_balloon_blocks,
@@ -9004,6 +9006,119 @@ class VisionStackRuntimeTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls, [False, False])
+
+    def test_aot_manga_roi_snaps_reflect_pads_and_pastes_mask_only(self):
+        calls = []
+
+        class FakeInpainter:
+            def inpaint(self, image_np, mask, *args, **kwargs):
+                calls.append((image_np.shape, mask.shape))
+                result = image_np.copy()
+                result[mask > 0] = 200
+                return result
+
+        image = np.zeros((65, 67, 3), dtype=np.uint8)
+        mask = np.zeros((65, 67), dtype=np.uint8)
+        mask[20:30, 20:30] = 255
+
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_PRIMARY_ENGINE": "aot_manga_roi"}, clear=False):
+            result = _call_inpainter_in_roi(FakeInpainter(), image, mask, [15, 15, 35, 35], True)
+
+        self.assertTrue(calls)
+        self.assertEqual(calls[0][0][0] % 8, 0)
+        self.assertEqual(calls[0][0][1] % 8, 0)
+        self.assertTrue(np.all(result[25, 25] == 200))
+        self.assertTrue(np.all(result[0, 0] == 0))
+
+    def test_aot_manga_roi_uses_provided_bbox_not_mask_span(self):
+        calls = []
+
+        class FakeInpainter:
+            def inpaint(self, image_np, mask, *args, **kwargs):
+                calls.append((image_np.shape, mask.shape))
+                result = image_np.copy()
+                result[mask > 0] = 200
+                return result
+
+        image = np.full((100, 100, 3), 33, dtype=np.uint8)
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[20:30, 20:30] = 255
+        mask[70:90, 70:90] = 255
+
+        with patch.dict("os.environ", {"TRADUZAI_INPAINT_PRIMARY_ENGINE": "aot_manga_roi"}, clear=False):
+            result = _call_inpainter_in_roi(FakeInpainter(), image, mask, [10, 10, 40, 40], True)
+
+        self.assertTrue(calls)
+        self.assertEqual(calls[0][0][0] % 8, 0)
+        self.assertEqual(calls[0][0][1] % 8, 0)
+        self.assertTrue(np.all(result[20:30, 20:30] == 200))
+        self.assertTrue(np.all(result[70:80, 70:80] == 33))
+
+    def test_lama_onnx_uses_provided_bbox_not_mask_span(self):
+        calls = []
+        fake_session = object()
+
+        def fake_get_session(*_args, **_kwargs):
+            return fake_session
+
+        def fake_inpaint(session, crop_rgb, crop_mask):
+            calls.append((crop_rgb.shape, crop_mask.shape))
+            output = crop_rgb.copy()
+            output[crop_mask > 0] = 220
+            return output
+
+        image = np.full((100, 100, 3), 45, dtype=np.uint8)
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[20:30, 20:30] = 255
+        mask[70:90, 70:90] = 255
+
+        with patch.dict(
+            "os.environ",
+            {"TRADUZAI_INPAINT_PRIMARY_ENGINE": "lama_onnx"},
+            clear=False,
+        ), patch("inpainter.lama_onnx.get_lama_session", side_effect=fake_get_session), patch(
+            "inpainter.lama_onnx.inpaint_region_with_lama",
+            side_effect=fake_inpaint,
+        ), patch("inpainter.lama_onnx.select_lama_onnx_providers", return_value=["CPUExecutionProvider"]):
+            result = _call_inpainter_in_roi(object(), image, mask, [10, 10, 40, 40], True)
+
+        self.assertTrue(calls)
+        self.assertEqual(calls[0][0][0] % 8, 0)
+        self.assertEqual(calls[0][0][1] % 8, 0)
+        self.assertTrue(np.all(result[20:30, 20:30] == 220))
+        self.assertTrue(np.all(result[70:80, 70:80] == 45))
+
+    def test_lama_onnx_route_uses_roi_crop_with_masked_pasteback(self):
+        calls = []
+        fake_session = object()
+
+        def fake_get_session(*_args, **_kwargs):
+            return fake_session
+
+        def fake_inpaint(session, crop_rgb, crop_mask):
+            calls.append((crop_rgb.shape, crop_mask.shape))
+            output = crop_rgb.copy()
+            output[crop_mask > 0] = 220
+            return output
+
+        with patch.dict(
+            "os.environ",
+            {"TRADUZAI_INPAINT_PRIMARY_ENGINE": "lama_onnx"},
+            clear=False,
+        ), patch("inpainter.lama_onnx.get_lama_session", side_effect=fake_get_session), patch(
+            "inpainter.lama_onnx.inpaint_region_with_lama",
+            side_effect=fake_inpaint,
+        ), patch("inpainter.lama_onnx.select_lama_onnx_providers", return_value=["CPUExecutionProvider"]):
+            image = np.zeros((65, 67, 3), dtype=np.uint8)
+            mask = np.zeros((65, 67), dtype=np.uint8)
+            mask[20:30, 20:30] = 255
+            result = _call_inpainter_in_roi(object(), image, mask, [15, 15, 35, 35], True)
+
+        self.assertTrue(calls)
+        self.assertEqual(calls[0][0][0] % 8, 0)
+        self.assertEqual(calls[0][0][1] % 8, 0)
+        self.assertTrue(np.all(result[25, 25] == 220))
+        self.assertTrue(np.all(result[0, 0] == 0))
 
     def test_build_residual_cleanup_mask_targets_dark_rectangular_seams(self):
         image = np.full((120, 160, 3), 120, dtype=np.uint8)

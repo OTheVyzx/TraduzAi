@@ -57,6 +57,32 @@ def _validate_final_pixel_reports(project: dict[str, Any]) -> None:
             raise ValueError(f"final pixel artifact mudou apos o gate: {report['page_id']}")
 
 
+_RASTER_MASK_KEYS = frozenset(
+    {
+        "bubble_mask",
+        "bubbleMask",
+        "balloon_mask",
+        "balloonMask",
+        "segmentation_mask",
+        "mask",
+    }
+)
+
+
+def _strip_raster_mask_fields(record: Any) -> None:
+    if isinstance(record, list):
+        for item in record:
+            _strip_raster_mask_fields(item)
+        return
+    if not isinstance(record, dict):
+        return
+    for key in tuple(record.keys()):
+        if key in _RASTER_MASK_KEYS:
+            record.pop(key, None)
+        elif key == "metadata":
+            _strip_raster_mask_fields(record[key])
+
+
 def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
     route_action = str(layer.get("route_action") or "").strip().lower()
     content_class = str(layer.get("content_class") or "").strip().lower()
@@ -113,6 +139,14 @@ def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
 def neutralize_project_compatibility_metadata(
     project: dict[str, Any],
 ) -> dict[str, Any]:
+    for page in project.get("paginas") or []:
+        if not isinstance(page, dict):
+            continue
+        for key in ("text_layers", "textos", "texts", "_vision_blocks", "_bubble_regions", "bubble_regions"):
+            _strip_raster_mask_fields(page.get(key))
+        if isinstance(page.get("metadata"), dict):
+            _strip_raster_mask_fields(page["metadata"])
+
     for page in project.get("paginas") or []:
         if not isinstance(page, dict):
             continue

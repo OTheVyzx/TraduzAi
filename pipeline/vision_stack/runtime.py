@@ -328,6 +328,13 @@ def _inpaint_clustered_crop_windows_enabled() -> bool:
     return _env_flag("TRADUZAI_INPAINT_CLUSTERED_CROP_WINDOWS", False)
 
 
+INPAINT_PRIMARY_ENGINE_ENV = "TRADUZAI_INPAINT_PRIMARY_ENGINE"
+
+
+def _selected_inpaint_engine() -> str:
+    return os.getenv(INPAINT_PRIMARY_ENGINE_ENV, "").strip().lower()
+
+
 def _koharu_blockwise_inpaint_enabled() -> bool:
     return _env_flag("TRADUZAI_KOHARU_BLOCKWISE_INPAINT", False)
 
@@ -3238,6 +3245,69 @@ def _call_inpainter_in_roi(
             debug=debug,
             force_no_tiling=force_no_tiling,
         )
+
+    selected_engine = _selected_inpaint_engine()
+    if selected_engine == "manga_cleaner_roi_lama":
+        selected_engine = "lama_onnx"
+
+    if selected_engine in {"aot_manga_roi", "lama_onnx"}:
+        from inpainter.region_strategy import (
+            pasteback_masked_pixels,
+            reflect_pad_crop_to_multiple,
+        )
+
+        try:
+            roi = _clip_bbox_to_shape(roi_bbox, image_np.shape)
+            if roi is None:
+                roi = [0, 0, int(image_np.shape[1]), int(image_np.shape[0])]
+            x1, y1, x2, y2 = roi
+            source_slice = (slice(y1, y2), slice(x1, x2))
+            crop_image = image_np[source_slice].copy()
+            crop_mask = mask[source_slice].copy()
+            padded_image, padded_mask, (pad_top, pad_left) = reflect_pad_crop_to_multiple(
+                crop_image,
+                crop_mask,
+                multiple=8,
+            )
+            if selected_engine == "lama_onnx":
+                from inpainter import lama_onnx as _lama_onnx
+
+                session = _lama_onnx.get_lama_session(
+                    providers=_lama_onnx.select_lama_onnx_providers(
+                        os.getenv("TRADUZAI_LAMA_ONNX_PROVIDERS", "auto"),
+                    )
+                )
+                crop_output = _lama_onnx.inpaint_region_with_lama(
+                    session,
+                    padded_image,
+                    padded_mask,
+                )
+            else:
+                crop_output = _call_inpainter(
+                    inpainter,
+                    padded_image,
+                    padded_mask,
+                    batch_size=batch_size,
+                    debug=debug,
+                    force_no_tiling=force_no_tiling,
+                )
+
+            crop_output = crop_output[
+                pad_top : pad_top + (y2 - y1),
+                pad_left : pad_left + (x2 - x1),
+            ]
+            if crop_output.shape[:2] != crop_mask.shape[:2]:
+                raise ValueError(
+                    f"roi inpaint retornou shape {crop_output.shape[:2]} esperado {crop_mask.shape[:2]}"
+                )
+            return pasteback_masked_pixels(
+                image_np,
+                crop_output,
+                crop_mask,
+                roi,
+            )
+        except Exception:
+            raise
 
     rx1, ry1, rx2, ry2 = roi_bbox
     crop_image = image_np[ry1:ry2, rx1:rx2].copy()

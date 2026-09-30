@@ -1,12 +1,17 @@
 import unittest
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 
 from inpainter.lama_onnx import (
     build_lama_region_jobs,
     merge_inpainted_crop,
+    get_lama_session,
+    select_lama_onnx_providers,
     pad_to_modulo,
     prepare_lama_dynamic_inputs,
     prepare_lama_inputs,
@@ -89,6 +94,55 @@ class LamaOnnxTests(unittest.TestCase):
                 [path.resolve() for path in expected_dirs],
             )
 
+    def test_select_lama_onnx_providers_prefers_cuda_when_available(self):
+        fake_ort = SimpleNamespace(
+            get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        )
+        with patch.dict("sys.modules", {"onnxruntime": fake_ort}):
+            providers = select_lama_onnx_providers("auto")
+            self.assertEqual(providers, ["CUDAExecutionProvider", "CPUExecutionProvider"])
+
+    def test_select_lama_onnx_providers_cpu_mode(self):
+        providers = select_lama_onnx_providers("cpu")
+        self.assertEqual(providers, ["CPUExecutionProvider"])
+
+    def test_get_lama_session_defaults_cpu_when_no_explicit_provider_and_none_arg(self):
+        with TemporaryDirectory() as temp_dir:
+            dummy_model = Path(temp_dir) / "lama-manga-dynamic.onnx"
+            dummy_model.write_bytes(b"dummy")
+
+            session_calls: dict[str, object] = {}
+
+            class FakeSession:
+                def __init__(self, model_path, sess_options=None, providers=None):
+                    session_calls["model_path"] = model_path
+                    session_calls["providers"] = providers
+                    self.sess_options = sess_options
+
+            fake_ort = SimpleNamespace(
+                preload_dlls=Mock(),
+                SessionOptions=Mock(return_value=SimpleNamespace()),
+                GraphOptimizationLevel=SimpleNamespace(ORT_ENABLE_ALL=3),
+                InferenceSession=Mock(side_effect=FakeSession),
+            )
+
+            with (
+                patch("inpainter.lama_onnx.ensure_lama_manga_model", return_value=dummy_model),
+                patch("inpainter.lama_onnx.prepare_windows_onnxruntime_gpu_runtime", Mock()),
+                patch("inpainter.lama_onnx.select_lama_onnx_providers", Mock()) as mocked_select,
+                patch.dict("os.environ", {}, clear=False) as env,
+                patch.object(sys.modules["inpainter.lama_onnx"], "_session", None),
+                patch.object(sys.modules["inpainter.lama_onnx"], "_session_path", None),
+                patch.object(sys.modules["inpainter.lama_onnx"], "_session_providers", None),
+                patch.dict("sys.modules", {"onnxruntime": fake_ort}),
+            ):
+                env.pop("TRADUZAI_LAMA_ONNX_PROVIDERS", None)
+                session = get_lama_session()
+
+                self.assertEqual(session_calls.get("providers"), ["CPUExecutionProvider"])
+                self.assertFalse(mocked_select.called)
+                self.assertIsNotNone(session)
+                self.assertEqual(session_calls.get("model_path"), str(dummy_model))
 
 if __name__ == "__main__":
     unittest.main()

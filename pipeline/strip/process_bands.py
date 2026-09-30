@@ -339,6 +339,74 @@ _LEGACY_DECISION_FIELDS = frozenset(
 )
 
 
+_RUNTIME_BUBBLE_FIELDS = (
+    "bubble_id",
+    "bubble_mask",
+    "mask",
+    "bubble_mask_source",
+    "bubble_mask_bbox",
+    "bubble_inner_bbox",
+)
+
+
+def _copy_runtime_bubble_fields(target: dict, source: dict | None) -> None:
+    if not isinstance(target, dict) or not isinstance(source, dict):
+        return
+    for key in _RUNTIME_BUBBLE_FIELDS:
+        value = source.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and value == "":
+            continue
+        if isinstance(value, (list, tuple, dict, set)) and not value:
+            continue
+        target[key] = value if isinstance(value, np.ndarray) else copy.deepcopy(value)
+
+
+def _record_identity_values(record: dict) -> list[str]:
+    values: list[str] = []
+    for key in ("trace_id", "text_id", "id"):
+        value = record.get(key) if isinstance(record, dict) else None
+        if value not in (None, ""):
+            values.append(str(value))
+    return values
+
+
+def _merge_runtime_bubble_fields_into_blocks(target_blocks: list[dict], source_blocks: list[dict]) -> None:
+    if not target_blocks or not source_blocks:
+        return
+    source_by_identity: dict[str, dict] = {}
+    for source in source_blocks:
+        if not isinstance(source, dict):
+            continue
+        for identity in _record_identity_values(source):
+            source_by_identity.setdefault(identity, source)
+
+    for index, target in enumerate(target_blocks):
+        if not isinstance(target, dict):
+            continue
+        source = None
+        for identity in _record_identity_values(target):
+            source = source_by_identity.get(identity)
+            if source is not None:
+                break
+        if source is None and index < len(source_blocks) and isinstance(source_blocks[index], dict):
+            source = source_blocks[index]
+        if source is None:
+            target_bbox = _coerce_bbox(target.get("bbox"))
+            best_score = 0.0
+            for candidate in source_blocks:
+                if not isinstance(candidate, dict):
+                    continue
+                score = _bbox_overlap_ratio(target_bbox, _coerce_bbox(candidate.get("bbox")))
+                if score > best_score:
+                    best_score = score
+                    source = candidate
+            if best_score < 0.35:
+                source = None
+        _copy_runtime_bubble_fields(target, source)
+
+
 def _legacy_record_key(record: dict, index: int) -> tuple[str, str | int]:
     for key in ("trace_id", "text_id", "id"):
         value = record.get(key)
@@ -3449,6 +3517,100 @@ class OwnerPageExecution:
     repair_history: tuple[Any, ...] = ()
     repair_budget_policy_sha256: str | None = None
 
+def _derive_white_balloon_mask_from_band_slice(image: np.ndarray, bbox_local: list[int]) -> np.ndarray | None:
+    if not isinstance(image, np.ndarray) or image.size == 0:
+        return None
+    height, width = image.shape[:2]
+    if len(bbox_local) != 4:
+        return None
+    x1, y1, x2, y2 = [int(v) for v in bbox_local]
+    x1 = max(0, min(width, x1))
+    x2 = max(0, min(width, x2))
+    y1 = max(0, min(height, y1))
+    y2 = max(0, min(height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = image[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    gray = cv2.cvtColor(crop.astype(np.uint8), cv2.COLOR_RGB2GRAY) if crop.ndim == 3 else crop.astype(np.uint8)
+    if float(np.median(gray)) < 190.0:
+        return None
+    light = (gray >= 218).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    light = cv2.morphologyEx(light, cv2.MORPH_CLOSE, kernel, iterations=1)
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats((light > 0).astype(np.uint8), 8)
+    if count <= 1:
+        return None
+    best_label = 0
+    best_area = 0
+    min_area = max(64, int((x2 - x1) * (y2 - y1) * 0.20))
+    for label in range(1, int(count)):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area > best_area:
+            best_area = area
+            best_label = label
+    if best_label <= 0 or best_area < min_area:
+        return None
+    page_mask = np.zeros((height, width), dtype=np.uint8)
+    component = np.where(labels == best_label, 255, 0).astype(np.uint8)
+    page_mask[y1:y2, x1:x2] = component
+    return page_mask if np.any(page_mask) else None
+
+
+def _normalize_detector_mask(mask: np.ndarray) -> np.ndarray | None:
+    if not isinstance(mask, np.ndarray) or mask.ndim != 2 or mask.size == 0:
+        return None
+    return np.where(mask > 0, 255, 0).astype(np.uint8)
+
+
+def _materialize_detector_mask_for_band(
+    mask: np.ndarray,
+    bbox_local: list[int],
+    *,
+    width: int,
+    height: int,
+    band_y_top: int,
+) -> np.ndarray | None:
+    detector_mask = _normalize_detector_mask(mask)
+    if detector_mask is None:
+        return None
+
+    if detector_mask.shape == (height, width):
+        return detector_mask
+
+    if (
+        detector_mask.shape[1] == width
+        and band_y_top >= 0
+        and band_y_top + height <= detector_mask.shape[0]
+    ):
+        local_start = int(band_y_top)
+        local_end = local_start + int(height)
+        block_mask = detector_mask[local_start:local_end, :width].copy()
+        return block_mask if np.any(block_mask) else None
+
+    x1, y1, x2, y2 = [int(v) for v in bbox_local[:4]]
+    bbox_w = max(0, x2 - x1)
+    bbox_h = max(0, y2 - y1)
+    if detector_mask.shape != (bbox_h, bbox_w):
+        return None
+
+    dst_x1 = max(0, min(width, x1))
+    dst_y1 = max(0, min(height, y1))
+    dst_x2 = max(0, min(width, x2))
+    dst_y2 = max(0, min(height, y2))
+    if dst_x2 <= dst_x1 or dst_y2 <= dst_y1:
+        return None
+
+    src_x1 = dst_x1 - x1
+    src_y1 = dst_y1 - y1
+    src_x2 = src_x1 + (dst_x2 - dst_x1)
+    src_y2 = src_y1 + (dst_y2 - dst_y1)
+
+    block_mask = np.zeros((height, width), dtype=np.uint8)
+    block_mask[dst_y1:dst_y2, dst_x1:dst_x2] = detector_mask[src_y1:src_y2, src_x1:src_x2]
+    return block_mask if np.any(block_mask) else None
+
 
 def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None = None) -> dict:
     """Converte uma Band para o formato dict que vision_stack.runtime aceita."""
@@ -3475,6 +3637,24 @@ def _band_to_page_dict(band: Band, page_idx: int, source_page_number: int | None
             "bubble_id": bubble_id,
             "bubble_mask_bbox": list(bbox_local),
         }
+        if balloon.mask is not None and isinstance(balloon.mask, np.ndarray) and balloon.mask.ndim == 2:
+            block_mask = _materialize_detector_mask_for_band(
+                balloon.mask,
+                bbox_local,
+                width=width,
+                height=height,
+                band_y_top=int(band.y_top),
+            )
+            if block_mask is not None:
+                block["bubble_mask_source"] = "detector"
+                block["mask"] = block_mask
+                block["bubble_mask"] = block_mask
+        if "bubble_mask" not in block:
+            derived_mask = _derive_white_balloon_mask_from_band_slice(band.strip_slice, bbox_local)
+            if derived_mask is not None:
+                block["bubble_mask_source"] = "derived_white_balloon"
+                block["bubble_mask"] = derived_mask
+                block["mask"] = derived_mask
         if bubble_inner_bbox is not None:
             block["bubble_inner_bbox"] = bubble_inner_bbox
         _attach_real_bubble_mask_to_block(block, band.strip_slice)
@@ -3693,6 +3873,11 @@ def _merge_translated_page_metadata(ocr_page: dict, translated_page: dict) -> di
 
     if not merged_page.get("_vision_blocks"):
         merged_page["_vision_blocks"] = list((ocr_page or {}).get("_vision_blocks") or [])
+    else:
+        target_blocks = [block for block in list(merged_page.get("_vision_blocks") or []) if isinstance(block, dict)]
+        source_blocks = [block for block in list((ocr_page or {}).get("_vision_blocks") or []) if isinstance(block, dict)]
+        _merge_runtime_bubble_fields_into_blocks(target_blocks, source_blocks)
+        merged_page["_vision_blocks"] = target_blocks
 
     for key in (
         "numero",
@@ -8065,6 +8250,7 @@ def _ensure_text_balloon_bboxes(page: dict, band: Band) -> None:
                         best_mask_applied = True
             if best_has_mask and _contract_value_missing(best.get("bubble_mask_error")):
                 txt.pop("bubble_mask_error", None)
+            _copy_runtime_bubble_fields(txt, best)
         else:
             if not txt.get("balloon_bbox"):
                 w = page.get("width", band.strip_slice.shape[1])
