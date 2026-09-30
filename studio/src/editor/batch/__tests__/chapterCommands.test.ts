@@ -167,6 +167,9 @@ describe("comandos de produtividade do capitulo", () => {
     ]);
     expect(queue[0].reasons).toEqual(expect.arrayContaining(["Revisao solicitada", "ocr_low_confidence"]));
     expect(queue[1].reasons).toContain("Traducao vazia");
+    expect(queue[0].canResolve).toBe(true);
+    expect(queue[1].canResolve).toBe(false);
+    expect(() => createResolveReviewCommand(project, [queue[1]])).toThrow("corrigido antes");
 
     const command = createResolveReviewCommand(project, [queue[0]], "2026-07-13T12:00:00.000Z");
     const resolved = command.after.paginas[0].text_layers[1];

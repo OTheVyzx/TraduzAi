@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 import copy
 from io import BytesIO
@@ -50,6 +51,39 @@ class PagePipelineStateError(ValueError):
 
 class ContentReplayIntegrityError(ValueError):
     """Raised before any content from a tampered publication can be replayed."""
+
+
+def _derived_rejected_owner_ids(
+    layers: Sequence[Mapping[str, Any]],
+    owners: Sequence[Any],
+) -> set[str]:
+    """Identify fail-closed QA records that intentionally have no pixel commit."""
+
+    canonical_owners = {
+        str(getattr(owner, "owner_id", "")): owner
+        for owner in owners
+        if str(getattr(owner, "owner_id", ""))
+        and str(getattr(owner, "disposition", "")) == "owned"
+        and str(getattr(owner, "state", "")) != "review_required"
+        and str(getattr(owner, "route_action", "")) != "review_required"
+    }
+    rejected: set[str] = set()
+    for layer in layers:
+        if not isinstance(layer, Mapping):
+            continue
+        owner_id = str(layer.get("owner_id") or "")
+        if (
+            owner_id in canonical_owners
+            and layer.get("execution_rejected") is True
+            and layer.get("derived_qa_status") == "review_required"
+            and layer.get("write_authority") == "revoked"
+            and layer.get("visible") is False
+            and layer.get("action_mask_ref") is None
+            and layer.get("render_policy") == "review_required"
+            and bool(str(layer.get("owner_execution_rejection_reason") or "").strip())
+        ):
+            rejected.add(owner_id)
+    return rejected
 
 
 CANONICAL_VISUAL_STAGE_NAMES = (
@@ -939,8 +973,22 @@ class PageExecutionResult:
             item for item in commits
             if bool(getattr(item, "translation_binding_sha256", ""))
         )
+        execution_layers: list[Mapping[str, Any]] = []
+        if text_layers_view is not None:
+            execution_layers_payload = text_layers_view.read()
+            raw_execution_layers = execution_layers_payload.get("texts")
+            if isinstance(raw_execution_layers, list):
+                execution_layers = [
+                    item for item in raw_execution_layers if isinstance(item, Mapping)
+                ]
+        rejected_owner_ids = _derived_rejected_owner_ids(
+            execution_layers,
+            graph_snapshot.read().owners,
+        )
         execution_bindings = tuple(
-            item for item in bindings if not item.preserves_original_pixels
+            item
+            for item in bindings
+            if not item.preserves_original_pixels and item.owner_id not in rejected_owner_ids
         )
         if bound_commits:
             ordered_bindings = tuple(
@@ -982,21 +1030,32 @@ class PageExecutionResult:
             layers_payload = text_layers_view.read()
             layers = layers_payload.get("texts")
             ordered_all_bindings = tuple(sorted(bindings, key=lambda item: item.owner_id))
-            if not isinstance(layers, list) or len(layers) != len(ordered_all_bindings):
-                raise PagePipelineIdentityError("text layer cardinality differs from bindings")
+            if not isinstance(layers, list) or len(layers) < len(ordered_all_bindings):
+                raise PagePipelineIdentityError("text layer cardinality is smaller than bindings")
             layer_by_owner = {
                 str(layer.get("owner_id") or ""): layer
                 for layer in layers if isinstance(layer, dict)
             }
             if len(layer_by_owner) != len(layers):
                 raise PagePipelineIdentityError("text layers contain duplicate or invalid owners")
+            binding_owner_ids = {binding.owner_id for binding in ordered_all_bindings}
+            unresolved_owned_owner_ids = {
+                str(getattr(owner, "owner_id", ""))
+                for owner in graph_snapshot.read().owners
+                if str(getattr(owner, "disposition", "")) == "owned"
+                and str(getattr(owner, "owner_id", "")) not in binding_owner_ids
+            }
+            if not unresolved_owned_owner_ids.issubset(rejected_owner_ids):
+                raise PagePipelineIdentityError(
+                    "unbound owner lacks fail-closed translation rejection evidence"
+                )
             authoritative_layer_owner_ids = {
                 str(getattr(item, "owner_id", "")) for item in bound_commits
             } | {
                 binding.owner_id
                 for binding in bindings
                 if binding.preserves_original_pixels
-            }
+            } | rejected_owner_ids
             for binding in ordered_all_bindings:
                 layer = layer_by_owner.get(binding.owner_id)
                 target = str((layer or {}).get("translated") or "")
@@ -1054,11 +1113,10 @@ class PageExecutionResult:
                 or replacement_verification_policy_sha256
             )
             if strict_terminal_journal:
-                replacement_owner_ids = {
-                    owner_id
-                    for owner_id, binding in binding_by_owner.items()
-                    if not binding.preserves_original_pixels
-                }
+                replacement_owner_ids = _terminal_visual_replacement_owner_ids(
+                    bindings,
+                    bound_commits,
+                )
                 if set(verdict_by_owner) != replacement_owner_ids:
                     raise PagePipelineStateError(
                         "final result requires exactly one verdict per visual replacement binding"
@@ -1083,17 +1141,23 @@ class PageExecutionResult:
                 or final_pixel_sha != getattr(terminal_proof, "fresh_ocr_root_input_pixel_sha256", None)
             ):
                 raise PagePipelineIdentityError("terminal proof is not linked to final pixels")
+            terminal_bindings = tuple(
+                sorted(
+                    _terminal_proof_bindings(bindings, bound_commits),
+                    key=lambda item: item.owner_id,
+                )
+            )
             if tuple(getattr(terminal_proof, "translation_binding_sha256s", ())) != tuple(
                 item.translation_binding_sha256
-                for item in sorted(bindings, key=lambda item: item.owner_id)
+                for item in terminal_bindings
             ):
                 raise PagePipelineIdentityError("terminal proof translation binding chain mismatch")
             if tuple(getattr(terminal_proof, "source_payload_sha256s", ())) != tuple(
                 item.source_payload_sha256
-                for item in sorted(bindings, key=lambda item: item.owner_id)
+                for item in terminal_bindings
             ) or tuple(getattr(terminal_proof, "target_payload_sha256s", ())) != tuple(
                 item.target_payload_sha256
-                for item in sorted(bindings, key=lambda item: item.owner_id)
+                for item in terminal_bindings
             ):
                 raise PagePipelineIdentityError("terminal proof payload chain mismatch")
             if repair_budget_policy_sha256 is not None and (
@@ -1284,6 +1348,14 @@ class PagePipelineServices:
     translation_attempt_controls: tuple[Any, ...] = ()
     translation_attempt_kwargs: Any | None = None
     execution_fn: Callable[[PagePipelineRequest, OwnerGraph, OwnerPageTranslationResult], Sequence[Any]] | None = None
+    performance_recorder: Any | None = None
+
+
+def _service_timing(services: PagePipelineServices, stage: str):
+    recorder = services.performance_recorder
+    if recorder is None or not callable(getattr(recorder, "measure", None)):
+        return nullcontext()
+    return recorder.measure(stage)
 
 
 def _write_stage_rgb(
@@ -1457,6 +1529,110 @@ def _terminal_source_support_mask(mutation: Any) -> np.ndarray:
     return measured
 
 
+def _terminal_physical_residual_owner_ids(
+    original_pixels: np.ndarray,
+    cleanup_pixels: np.ndarray,
+    commits: Sequence[Any],
+    *,
+    page_surface_geometry: Any = None,
+) -> set[str]:
+    """Identify commits whose exact source support still has material pixels."""
+
+    rejected: set[str] = set()
+    for commit in commits:
+        owner_id = str(getattr(commit, "owner_id", ""))
+        mutation = getattr(commit, "mutation", None)
+        if not owner_id or mutation is None:
+            continue
+        source_support_mask = _terminal_source_support_mask(mutation)
+        residual = _material_post_cleanup_residual_mask(
+            original_pixels,
+            cleanup_pixels,
+            source_support_mask,
+            page_surface_geometry=page_surface_geometry,
+        )
+        if np.any(residual > 0):
+            rejected.add(owner_id)
+    return rejected
+
+
+def _compose_owner_cleanup_pixels(
+    original_pixels: np.ndarray,
+    commits: Sequence[Any],
+) -> np.ndarray:
+    """Rebuild the cleanup stage using only still-authoritative commits."""
+
+    cleanup = np.ascontiguousarray(original_pixels).copy()
+    for commit in sorted(
+        commits,
+        key=lambda item: (str(getattr(item, "owner_id", "")), str(getattr(item, "commit_id", ""))),
+    ):
+        if not bool(getattr(commit, "committed", False)):
+            raise PagePipelineStateError("terminal cleanup rejects uncommitted owner")
+        mutation = getattr(commit, "mutation", None)
+        action = np.asarray(getattr(mutation, "action_mask", None))
+        result_rgb = np.asarray(getattr(mutation, "result_rgb", None))
+        if action.shape != cleanup.shape[:2] or result_rgb.shape != cleanup.shape:
+            raise PagePipelineStateError("terminal cleanup owner raster shape mismatch")
+        cleanup[action > 0] = result_rgb[action > 0]
+    return np.ascontiguousarray(cleanup)
+
+
+def _mark_terminal_residual_rejections(
+    layers: Sequence[Mapping[str, Any]],
+    owner_ids: set[str],
+) -> list[dict[str, Any]]:
+    marked: list[dict[str, Any]] = []
+    for source_layer in layers:
+        layer = copy.deepcopy(dict(source_layer))
+        if str(layer.get("owner_id") or "") in owner_ids:
+            layer.update(
+                {
+                    "execution_rejected": True,
+                    "derived_qa_status": "review_required",
+                    "write_authority": "revoked",
+                    "owner_execution_rejection_reason": "terminal_source_residual",
+                    "source_pixels_preserved": True,
+                    "committed": False,
+                    "blocking": True,
+                    "qa_action": "BLOCK",
+                    "visible": False,
+                    "action_mask_ref": None,
+                    "render_policy": "review_required",
+                }
+            )
+        marked.append(layer)
+    return marked
+
+
+def _terminal_visual_replacement_owner_ids(
+    bindings: Sequence[Any],
+    commits: Sequence[Any],
+) -> set[str]:
+    binding_by_owner = {
+        str(item.owner_id): item for item in bindings
+    }
+    return {
+        str(getattr(commit, "owner_id", ""))
+        for commit in commits
+        if str(getattr(commit, "owner_id", "")) in binding_by_owner
+        and not binding_by_owner[str(getattr(commit, "owner_id", ""))].preserves_original_pixels
+    }
+
+
+def _terminal_proof_bindings(
+    bindings: Sequence[Any],
+    commits: Sequence[Any],
+) -> tuple[Any, ...]:
+    committed_owner_ids = {
+        str(getattr(item, "owner_id", "")) for item in commits
+    }
+    return tuple(
+        item for item in bindings
+        if item.preserves_original_pixels or item.owner_id in committed_owner_ids
+    )
+
+
 def finalize_and_persist_page_result(
     result: PageExecutionResult,
     *,
@@ -1475,6 +1651,7 @@ def finalize_and_persist_page_result(
 
     from ownership.execution import (
         ArtifactGenerationMarker,
+        FrozenJSONSnapshot,
         PageCandidateTransaction,
         PageCompositionSnapshot,
         TerminalPixelProof,
@@ -1598,10 +1775,133 @@ def finalize_and_persist_page_result(
         generation_root=root,
         issues=issues,
     )
-    if any(item.repair_required for item in issues):
-        raise PagePipelineStateError(
-            "terminal source residual requires bounded owner repair before publication"
+    residual_owner_ids = {
+        str(item.owner_id) for item in issues
+        if item.repair_required and str(item.owner_id or "")
+    }
+    residual_owner_ids.update(
+        _terminal_physical_residual_owner_ids(
+            result.request.original_page.read_only_rgb(),
+            cleanup_pixels,
+            ordered_commits,
+            page_surface_geometry=page_surface_geometry,
         )
+    )
+    if residual_owner_ids:
+        safe_commits = tuple(
+            item for item in ordered_commits
+            if str(getattr(item, "owner_id", "")) not in residual_owner_ids
+        )
+        safe_materializations = tuple(
+            item for item in ordered_materializations
+            if str(getattr(item, "owner_id", "")) not in residual_owner_ids
+        )
+        recomposed = PageCandidateTransaction.from_original(
+            original_pixels,
+            commits=safe_commits,
+        ).compose()
+        candidate = transaction.persist_candidate(
+            recomposed.final_page,
+            attempt_id="terminal-r1-preserve-residual",
+        )
+        candidate_path = root.joinpath(*Path(candidate.artifact_ref.relative_path).parts)
+
+        graph = result.owner_graph.read()
+        for owner in graph.owners:
+            if owner.owner_id in residual_owner_ids:
+                owner.state = "target_ready"
+                owner.action_mask_ref = None
+        graph.require_valid(mode="enforce")
+        raw_layers = (
+            (result.text_layers_view.read().get("texts") or [])
+            if result.text_layers_view is not None
+            else []
+        )
+        marked_layers = _mark_terminal_residual_rejections(
+            [item for item in raw_layers if isinstance(item, Mapping)],
+            residual_owner_ids,
+        )
+        safe_composition = PageCompositionSnapshot.build(
+            run_id=result.request.run_id,
+            execution_id=result.request.execution_id,
+            page_id=result.page_id,
+            page_source_sha256=result.request.page_source_sha256,
+            base_pixel_sha256=recomposed.base_pixel_sha256,
+            final_pixel_sha256=recomposed.final_pixel_sha256,
+            commits=safe_commits,
+            materializations=safe_materializations,
+        )
+        result = PageExecutionResult.build_from(
+            result,
+            owner_graph=OwnerGraphSnapshot.build(graph),
+            page_commits=safe_commits,
+            owner_target_materializations=safe_materializations,
+            text_layers_view=FrozenJSONSnapshot.build({"texts": marked_layers}),
+            page_composition=safe_composition,
+        )
+        ordered_commits = safe_commits
+        ordered_materializations = safe_materializations
+
+        observation = observer.observe(
+            candidate_path,
+            source_language=source_language,
+            page_id=result.page_id,
+            page_number=page_number,
+            source_challenges=source_challenges,
+            page_surface_geometry=page_surface_geometry,
+            run_id=result.request.run_id,
+            execution_id=result.request.execution_id,
+            page_source_sha256=result.request.page_source_sha256,
+        )
+        fresh_ocr = observation.ocr_invocation
+        if fresh_ocr is None or observation.ocr_request is None:
+            raise PagePipelineStateError(
+                "terminal preservation observer did not return request-scoped OCR"
+            )
+        safe_owner_ids = {
+            str(getattr(item, "owner_id", "")) for item in safe_commits
+        }
+        issues = []
+        for binding in result.translations:
+            if binding.owner_id not in safe_owner_ids:
+                continue
+            owner_bbox = _owner_bbox(graph, binding.owner_id)
+            if owner_bbox is None:
+                continue
+            for record in observation.ocr_records:
+                bbox = record.get("bbox")
+                if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                    continue
+                if _bbox_overlap(owner_bbox, bbox) <= 0:
+                    continue
+                region = ResidualRegion(
+                    run_id=result.request.run_id,
+                    execution_id=result.request.execution_id,
+                    page_id=result.page_id,
+                    page_source_sha256=result.request.page_source_sha256,
+                    page_output_pixel_sha256=candidate.page_output_pixel_sha256,
+                    bbox_page=tuple(int(value) for value in bbox),
+                    owner_id=binding.owner_id,
+                    invocation_ids=(fresh_ocr.invocation_id,),
+                )
+                issues.extend(
+                    classify_language_residual(
+                        observed=str(record.get("text") or ""),
+                        binding=binding,
+                        region=region,
+                    )
+                )
+        issues = list(deduplicate_language_issues(issues))
+        probe = build_final_qa_probe(
+            candidate,
+            fresh_ocr,
+            generation_root=root,
+            issues=issues,
+        )
+        if any(item.repair_required for item in issues):
+            raise PagePipelineStateError(
+                "terminal source residual remains after bounded owner preservation"
+            )
 
     replacement_policy_sha = canonical_json_sha256(
         {
@@ -1613,6 +1913,8 @@ def finalize_and_persist_page_result(
     materialization_by_owner = {
         item.owner_id: item for item in ordered_materializations
     }
+    cleanup_pixels = _compose_owner_cleanup_pixels(original_pixels, ordered_commits)
+    candidate_pixels = candidate.artifact_ref.load_verified(root)
     verdicts = []
     for commit in ordered_commits:
         binding = binding_by_owner.get(commit.owner_id)
@@ -1644,11 +1946,10 @@ def finalize_and_persist_page_result(
                 replacement_verification_policy_sha256=replacement_policy_sha,
             )
         )
-    replacement_owner_ids = {
-        owner_id
-        for owner_id, binding in binding_by_owner.items()
-        if not binding.preserves_original_pixels
-    }
+    replacement_owner_ids = _terminal_visual_replacement_owner_ids(
+        result.translations,
+        ordered_commits,
+    )
     if replacement_owner_ids != {item.owner_id for item in verdicts}:
         raise PagePipelineStateError(
             "terminal replacement verdict cardinality differs from visual replacements"
@@ -1679,7 +1980,7 @@ def finalize_and_persist_page_result(
         generation_root=root,
         cleanup_base_sha256=canonical_page_sha256(cleanup_pixels),
         composition_sha256=composition.sha256,
-        bindings=result.translations,
+        bindings=_terminal_proof_bindings(result.translations, ordered_commits),
         materializations=ordered_materializations,
         verdicts=tuple(verdicts),
         repair_budget_policy_sha256=repair_policy_sha,
@@ -1767,40 +2068,52 @@ def run_page_owner_pipeline(
 ) -> PageExecutionResult:
     """Run coverage, ownership and validated translation in canonical page space."""
 
-    coverage = services.coverage_fn(request)
-    coverage.require_ready_for_ownership()
-    graph = copy.deepcopy(services.graph_fn(coverage))
-    component_by_id = {item.component_id: item for item in graph.components}
-    for owner in graph.owners:
-        if owner.disposition == "owned" and owner.state == "observed":
-            owner.state = "owned"
-        if owner.disposition != "owned":
-            continue
-        components = [component_by_id[item] for item in owner.component_ids if item in component_by_id]
-        if not components:
-            continue
-        bbox = (
-            min(item.bbox_page[0] for item in components),
-            min(item.bbox_page[1] for item in components),
-            max(item.bbox_page[2] for item in components),
-            max(item.bbox_page[3] for item in components),
-        )
-        tile_id = f"{request.page_id}:page_executor:{owner.owner_id}"
-        owner.execution_tile_id = tile_id
-        graph.projections = [
-            projection for projection in graph.projections if projection.owner_id != owner.owner_id
-        ]
-        graph.projections.append(
-            OwnerProjection(
-                owner_id=owner.owner_id,
-                tile_id=tile_id,
-                role="executor",
-                bbox_page=bbox,
-                bbox_tile=bbox,
-                offset_xy=(0, 0),
+    with _service_timing(services, "coverage_build"):
+        coverage = services.coverage_fn(request)
+        coverage.require_ready_for_ownership()
+    recorder = services.performance_recorder
+    if recorder is not None:
+        if callable(getattr(recorder, "record_page", None)):
+            recorder.record_page(request.page_id, status="running")
+        if callable(getattr(recorder, "increment_counter", None)):
+            recorder.increment_counter("coverage_components", len(coverage.components))
+            recorder.increment_counter("ocr_observations", len(coverage.observations))
+    with _service_timing(services, "owner_graph_build"):
+        graph = copy.deepcopy(services.graph_fn(coverage))
+        component_by_id = {item.component_id: item for item in graph.components}
+        for owner in graph.owners:
+            if owner.disposition == "owned" and owner.state == "observed":
+                owner.state = "owned"
+            if owner.disposition != "owned":
+                continue
+            components = [component_by_id[item] for item in owner.component_ids if item in component_by_id]
+            if not components:
+                continue
+            bbox = (
+                min(item.bbox_page[0] for item in components),
+                min(item.bbox_page[1] for item in components),
+                max(item.bbox_page[2] for item in components),
+                max(item.bbox_page[3] for item in components),
             )
-        )
-    graph.require_valid(mode="enforce")
+            tile_id = f"{request.page_id}:page_executor:{owner.owner_id}"
+            owner.execution_tile_id = tile_id
+            graph.projections = [
+                projection for projection in graph.projections if projection.owner_id != owner.owner_id
+            ]
+            graph.projections.append(
+                OwnerProjection(
+                    owner_id=owner.owner_id,
+                    tile_id=tile_id,
+                    role="executor",
+                    bbox_page=bbox,
+                    bbox_tile=bbox,
+                    offset_xy=(0, 0),
+                )
+            )
+    with _service_timing(services, "owner_graph_validation"):
+        graph.require_valid(mode="enforce")
+    if recorder is not None and callable(getattr(recorder, "increment_counter", None)):
+        recorder.increment_counter("owners", len(graph.owners))
     requests = tuple(
         OwnerTranslationRequest.from_graph(graph, owner.owner_id)
         for owner in sorted(graph.owners, key=lambda item: item.owner_id)
@@ -1808,6 +2121,10 @@ def run_page_owner_pipeline(
         and owner.route_action in TRANSLATION_ROUTE_ACTIONS
     )
     if requests:
+        if recorder is not None and callable(getattr(recorder, "increment_counter", None)):
+            recorder.increment_counter("translation_calls", len(requests))
+        if recorder is not None and callable(getattr(recorder, "ensure_counter", None)):
+            recorder.ensure_counter("translation_failures", 0)
         language_evidence_by_owner = {
             owner_request.owner_id: build_page_language_evidence(
                 texts=(owner_request.source_text,),
@@ -1815,24 +2132,45 @@ def run_page_owner_pipeline(
             )
             for owner_request in requests
         }
-        translation_result = translate_owner_page(
-            requests,
-            backends=services.translation_backends,
-            attempt_fn=services.translation_attempt_fn,
-            attempt_controls=services.translation_attempt_controls,
-            attempt_kwargs=services.translation_attempt_kwargs,
-            page_language_evidence_by_owner=language_evidence_by_owner,
-            repaint_already_target_pixels=True,
-        )
-        translated_graph = apply_owner_translation_result(graph, translation_result)
+        try:
+            with _service_timing(services, "translation"):
+                translation_result = translate_owner_page(
+                    requests,
+                    backends=services.translation_backends,
+                    attempt_fn=services.translation_attempt_fn,
+                    attempt_controls=services.translation_attempt_controls,
+                    attempt_kwargs=services.translation_attempt_kwargs,
+                    page_language_evidence_by_owner=language_evidence_by_owner,
+                    repaint_already_target_pixels=True,
+                    performance_recorder=services.performance_recorder,
+                )
+                bound_owner_ids = {
+                    binding.owner_id for binding in translation_result.bindings
+                }
+                failed_owner_count = sum(
+                    1 for owner_request in requests
+                    if owner_request.owner_id not in bound_owner_ids
+                )
+                if failed_owner_count and recorder is not None and callable(
+                    getattr(recorder, "increment_counter", None)
+                ):
+                    recorder.increment_counter(
+                        "translation_failures", failed_owner_count
+                    )
+                translated_graph = apply_owner_translation_result(graph, translation_result)
+        except Exception:
+            if recorder is not None and callable(getattr(recorder, "increment_counter", None)):
+                recorder.increment_counter("translation_failures", len(requests))
+            raise
     else:
         translation_result = None
         translated_graph = graph
-    execution_output = (
-        services.execution_fn(request, translated_graph, translation_result)
-        if services.execution_fn is not None
-        else ()
-    )
+    with _service_timing(services, "owner_execution"):
+        execution_output = (
+            services.execution_fn(request, translated_graph, translation_result)
+            if services.execution_fn is not None
+            else ()
+        )
     repair_requests = ()
     repair_history = ()
     repair_budget_policy_sha256 = None
@@ -1883,7 +2221,7 @@ def run_page_owner_pipeline(
     else:
         commits = tuple(execution_output)
     result_graph = _owner_graph_after_execution(translated_graph, execution_output)
-    return PageExecutionResult.build(
+    result = PageExecutionResult.build(
         request=request,
         coverage=coverage,
         owner_graph=result_graph,
@@ -1898,6 +2236,9 @@ def run_page_owner_pipeline(
         page_composition=page_composition,
         status="candidate_ready",
     )
+    if recorder is not None and callable(getattr(recorder, "record_page", None)):
+        recorder.record_page(request.page_id, status=result.status)
+    return result
 
 
 def adapt_page_execution_result_to_output_page(

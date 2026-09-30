@@ -5,6 +5,9 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
+const MAX_IMAGE_DIMENSION: u32 = 65_535;
+const MAX_IMAGE_PIXELS: u64 = 64_000_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportedPage {
@@ -102,12 +105,7 @@ fn prepare_manual_chapter_from_paths(
                 file.relative_path.display()
             )
         })?;
-        if width == 0 || height == 0 {
-            return Err(format!(
-                "Imagem sem dimensões válidas: {}",
-                file.relative_path.display()
-            ));
-        }
+        validate_image_dimensions(width, height, &file.relative_path)?;
         pages.push(ImportedPage {
             number: index as u32 + 1,
             relative_path: format!("original/{}", portable_path(&file.relative_path)),
@@ -120,6 +118,71 @@ fn prepare_manual_chapter_from_paths(
         .map_err(|error| format!("Não foi possível promover a importação validada: {error}"))?;
     staging.commit();
     Ok(pages)
+}
+
+pub(crate) fn prepare_source_runtime_chapter(
+    staging_path: &Path,
+    project_json_path: &Path,
+) -> Result<Vec<ImportedPage>, String> {
+    if let Some(project_dir) = project_json_path.parent() {
+        let original = project_dir.join("original");
+        if original.is_dir() && !project_json_path.is_file() {
+            let canonical = original.canonicalize().map_err(|error| {
+                format!("Não foi possível validar a importação anterior: {error}")
+            })?;
+            let mut candidates = Vec::new();
+            collect_directory_images(&canonical, &canonical, &mut candidates)?;
+            validate_candidate_sizes(
+                candidates.iter().map(|(_, size)| *size),
+                candidates.len(),
+                ImportLimits::default(),
+            )?;
+            candidates.sort_by(|left, right| natural_path_cmp(&left.0, &right.0));
+            return candidates
+                .into_iter()
+                .enumerate()
+                .map(|(index, (relative, _))| {
+                    let (width, height) = image::ImageReader::open(canonical.join(&relative))
+                        .map_err(|error| {
+                            format!("Não foi possível reabrir {}: {error}", relative.display())
+                        })?
+                        .with_guessed_format()
+                        .map_err(|error| format!("Imagem inválida: {error}"))?
+                        .into_dimensions()
+                        .map_err(|error| format!("Imagem inválida: {error}"))?;
+                    validate_image_dimensions(width, height, &relative)?;
+                    Ok(ImportedPage {
+                        number: index as u32 + 1,
+                        relative_path: format!("original/{}", portable_path(&relative)),
+                        width,
+                        height,
+                    })
+                })
+                .collect();
+        }
+    }
+    prepare_manual_chapter_from_paths(staging_path, project_json_path, ImportLimits::default())
+}
+
+fn validate_image_dimensions(width: u32, height: u32, relative_path: &Path) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "Imagem sem dimensões válidas: {}",
+            relative_path.display()
+        ));
+    }
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(|| format!("Dimensões de imagem inválidas: {}", relative_path.display()))?;
+    if width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION || pixels > MAX_IMAGE_PIXELS {
+        return Err(format!(
+            "A imagem {} excede o limite seguro de dimensões ({} px por lado e {} pixels).",
+            relative_path.display(),
+            MAX_IMAGE_DIMENSION,
+            MAX_IMAGE_PIXELS
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -665,6 +728,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_or_excessive_image_dimensions_before_promotion() {
+        assert!(validate_image_dimensions(0, 10, Path::new("zero.png")).is_err());
+        assert!(validate_image_dimensions(65_536, 10, Path::new("wide.png")).is_err());
+        assert!(validate_image_dimensions(20_000, 20_000, Path::new("bomb.png")).is_err());
+        assert!(validate_image_dimensions(1_200, 30_000, Path::new("long-strip.png")).is_ok());
+    }
+
+    #[test]
     fn enforces_individual_total_and_archive_entry_limits() {
         let file_limit_temp = tempfile::tempdir().unwrap();
         let file_source = file_limit_temp.path().join("source");
@@ -750,6 +821,20 @@ mod tests {
             fs::read_to_string(original.join("keep.txt")).unwrap(),
             "preservar"
         );
+    }
+
+    #[test]
+    fn source_runtime_retry_reuses_validated_original_before_project_is_saved() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        write_image(&source.join("1.png"), 4, 5, ImageFormat::Png);
+        let project = project_path(temp.path());
+
+        let first = prepare_source_runtime_chapter(&source, &project).unwrap();
+        let retry = prepare_source_runtime_chapter(&source, &project).unwrap();
+
+        assert_eq!(first, retry);
+        expect_paths(&retry, &["original/1.png"]);
     }
 
     fn expect_paths(pages: &[ImportedPage], expected: &[&str]) {

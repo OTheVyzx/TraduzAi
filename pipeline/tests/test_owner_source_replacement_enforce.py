@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from hashlib import sha256
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -70,6 +72,15 @@ def test_rendered_owner_record_binding_fields_preserve_translation_identity():
         "target_payload_sha256": binding.target_payload_sha256,
     }
 
+
+def test_fragmented_multiline_owner_starts_repair_at_text_region_rebuild():
+    from strip.process_bands import _owner_repair_start_strategy
+
+    multiline = SimpleNamespace(component_ids=("line-a", "line-b", "line-c"))
+    single_line = SimpleNamespace(component_ids=("line-a",))
+
+    assert _owner_repair_start_strategy(multiline) == "R2"
+    assert _owner_repair_start_strategy(single_line) == "R0"
 
 def test_cleanup_and_pt_br_render_commit_as_one_hash_chain():
     original, mutation, tx = _transaction()

@@ -164,6 +164,67 @@ def test_page_without_bands_never_builds_empty_observation_placeholder() -> None
     assert graph.owners
 
 
+def test_coverage_debug_artifacts_publish_before_owner_graph_exists(monkeypatch) -> None:
+    from strip import run
+    import ownership.artifacts as artifacts
+
+    coverage = object()
+    captured: dict[str, object] = {}
+
+    class Publisher:
+        def __init__(self, recorder) -> None:
+            captured["recorder"] = recorder
+
+        def publish(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    recorder = object()
+    monkeypatch.setattr(run, "_get_debug_recorder", lambda: recorder)
+    monkeypatch.setattr(artifacts, "OwnerArtifactPublisher", Publisher)
+
+    run._write_owner_coverage_debug_artifacts({"page_001": coverage})
+
+    assert captured["recorder"] is recorder
+    assert captured["coverages"] == {"page_001": coverage}
+
+
+def test_enforce_validation_publishes_rejected_graph_before_reraising(monkeypatch) -> None:
+    from strip import run
+    import ownership.artifacts as artifacts
+
+    violation = OwnerViolation(
+        code="owner_state_legacy_in_enforce",
+        severity="critical",
+        message="legacy state leaked",
+        offenders=("owner_a",),
+    )
+    graph = MagicMock()
+    graph.require_valid.side_effect = OwnerGraphValidationError((violation,))
+    captured: dict[str, object] = {}
+
+    class Publisher:
+        def __init__(self, recorder) -> None:
+            captured["recorder"] = recorder
+
+        def publish_enforce_failure(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    recorder = object()
+    monkeypatch.setattr(run, "_get_debug_recorder", lambda: recorder)
+    monkeypatch.setattr(artifacts, "OwnerArtifactPublisher", Publisher)
+
+    with pytest.raises(OwnerGraphValidationError):
+        run._require_enforce_graph_with_debug(
+            graph,
+            boundary="execute_page_before_result_build",
+        )
+
+    graph.require_valid.assert_called_once_with(mode="enforce")
+    assert captured["graph"] is graph
+    assert captured["violations"] == (violation,)
+    assert captured["boundary"] == "execute_page_before_result_build"
+
+
 def _detector_with_two_separate_balloons() -> MagicMock:
     detector = MagicMock()
     first = SimpleNamespace(x1=10.0, y1=20.0, x2=180.0, y2=70.0, confidence=0.9)
@@ -487,6 +548,62 @@ def test_collect_band_evidence_is_read_only_and_disables_mutating_stages() -> No
     assert band.rendered_slice is rendered_before
     assert evidence.band.cleaned_slice is cleaned_before
     assert evidence.band.rendered_slice is rendered_before
+
+
+def test_manifest_rehydration_rejects_bbox_outside_authoritative_page() -> None:
+    from strip.process_bands import _observation_from_manifest_row
+
+    projection = TileProjection(
+        page_id="page_017",
+        tile_id="tile_strip_017",
+        offset_xy=(-52, 0),
+        page_size=(493, 375),
+        tile_size=(597, 375),
+    )
+    observation = _observation_from_manifest_row(
+        {
+            "observation_id": "observation_cached_outside_page",
+            "page_id": "page_017",
+            "text": "SOURCE TEXT",
+            "confidence": 0.84,
+            "provider": "paddle_full_page_raw_line",
+            "bbox_page": [-22, 46, 140, 61],
+            "source_bbox_page": [-22, 46, 140, 61],
+            "text_pixel_bbox_page": [-22, 46, 137, 61],
+            "rejection_reason": None,
+        },
+        projection,
+    )
+
+    assert observation.rejection_reason == "bbox_outside_page"
+
+
+def test_manifest_rehydration_drops_layout_bbox_outside_authoritative_page() -> None:
+    from strip.process_bands import _observation_from_manifest_row
+
+    projection = TileProjection(
+        page_id="page_005",
+        tile_id="tile_strip_005",
+        offset_xy=(-117, 0),
+        page_size=(363, 303),
+        tile_size=(597, 303),
+    )
+    observation = _observation_from_manifest_row(
+        {
+            "observation_id": "observation_cached_valid_text",
+            "page_id": "page_005",
+            "text": "SOURCE TEXT",
+            "confidence": 0.91,
+            "provider": "legacy_selected",
+            "bbox_page": [20, 40, 180, 90],
+            "layout_bbox_page": [-96, 0, 501, 303],
+            "rejection_reason": None,
+        },
+        projection,
+    )
+
+    assert observation.rejection_reason is None
+    assert observation.layout_bbox_page is None
 
 
 def test_repeated_observation_id_merges_provenance_exactly_once() -> None:
@@ -1019,6 +1136,11 @@ def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode(
     band = Band(y_top=0, y_bottom=32)
     page_sha256 = canonical_page_sha256(np.full((32, 40, 3), 235, dtype=np.uint8))
     legacy_process = MagicMock(side_effect=AssertionError("legacy band execution called"))
+    monkeypatch.setattr(
+        run,
+        "build_strip",
+        MagicMock(side_effect=AssertionError("physical strip builder called")),
+    )
     monkeypatch.setattr(run, "detect_strip_balloons", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(run, "group_balloons_into_bands", lambda *_args, **_kwargs: [band])
     empty_graph = OwnerGraph(
@@ -1060,29 +1182,32 @@ def test_run_chapter_cannot_execute_legacy_pixels_under_enforce_mode(
             page_surface_geometry,
             request_scoped=False,
             root_input_pixel_sha256="",
+            ocr_request=None,
         ):
             del detected_blocks, source_challenges, page_id, page_number
             del source_language, page_surface_geometry
-            from ownership.ocr_contract import OCRTransformOperation, OCRTransformSpec
+            from vision_stack.ocr import OCREngine
 
-            transform = OCRTransformSpec.build((OCRTransformOperation(kind="identity"),))
+            class EmptyModel:
+                def ocr(self, image, det=True, rec=True, cls=False):
+                    del image, det, rec, cls
+                    return [[]]
+
+            engine = OCREngine.__new__(OCREngine)
+            engine._backend = "paddleocr"
+            engine._model = EmptyModel()
+            invocation = engine.recognize_page_with_evidence(
+                pixels,
+                [],
+                request=ocr_request,
+            )
             return {
                 "raw_ocr_records": [],
-                "ocr_attempts": [{
-                    "variant_id": "full_page",
-                    "root_input_pixel_sha256": root_input_pixel_sha256,
-                    "input_pixel_sha256": root_input_pixel_sha256,
-                    "parent_input_pixel_sha256": root_input_pixel_sha256,
-                    "provider_called": True,
-                    "cache_hit": False,
-                    "input_width": int(pixels.shape[1]),
-                    "input_height": int(pixels.shape[0]),
-                    "transform_spec_canonical_json": transform.canonical_json_bytes.decode("utf-8"),
-                    "transform_spec_sha256": transform.sha256,
-                }],
+                "ocr_attempts": [attempt.to_json() for attempt in invocation.attempts],
                 "coverage_failures": [],
                 "request_scoped": bool(request_scoped),
                 "root_input_pixel_sha256": root_input_pixel_sha256,
+                "ocr_invocation": invocation,
             }
 
     pages = run.run_chapter(

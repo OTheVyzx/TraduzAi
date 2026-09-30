@@ -148,7 +148,7 @@ export class MemoryStudioEditorBackend implements StudioEditorBackend {
     layer_id: string;
     patch: Record<string, unknown>;
   }): Promise<StudioTextLayer> {
-    const { result } = await this.mutateProject({
+    const { project } = await this.mutateProject({
       project_path: config.project_path,
       mutate: (project) => {
         const page = pageAt(project, config.page_index);
@@ -158,8 +158,17 @@ export class MemoryStudioEditorBackend implements StudioEditorBackend {
           ...page.text_layers[index],
           ...config.patch,
         } as StudioTextLayer;
-        if (typeof next.translated === "string" || typeof next.traduzido === "string") {
-          const translated = next.translated ?? next.traduzido ?? "";
+        if (typeof config.patch.original === "string" || typeof config.patch.texto === "string") {
+          const original = typeof config.patch.original === "string"
+            ? config.patch.original
+            : config.patch.texto as string;
+          next.original = original;
+          next.texto = original;
+        }
+        if (typeof config.patch.translated === "string" || typeof config.patch.traduzido === "string") {
+          const translated = typeof config.patch.translated === "string"
+            ? config.patch.translated
+            : config.patch.traduzido as string;
           next.translated = translated;
           next.traduzido = translated;
         }
@@ -173,7 +182,9 @@ export class MemoryStudioEditorBackend implements StudioEditorBackend {
         return cloneValue(next);
       },
     });
-    return result;
+    const persisted = pageAt(project, config.page_index).text_layers.find((layer) => layer.id === config.layer_id);
+    if (!persisted) throw new Error(`Camada nao encontrada apos patch: ${config.layer_id}`);
+    return cloneValue(persisted);
   }
 
   async deleteEditorTextLayer(config: { project_path: string; page_index: number; layer_id: string }): Promise<void> {

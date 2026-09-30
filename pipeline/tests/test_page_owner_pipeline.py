@@ -31,6 +31,11 @@ from strip.page_pipeline import (
     PagePipelineIdentityError,
     PagePipelineStateError,
     _material_post_cleanup_residual_mask,
+    _mark_terminal_residual_rejections,
+    _compose_owner_cleanup_pixels,
+    _terminal_physical_residual_owner_ids,
+    _terminal_visual_replacement_owner_ids,
+    _terminal_proof_bindings,
     _terminal_source_support_mask,
     run_page_owner_pipeline,
 )
@@ -52,6 +57,116 @@ def test_terminal_replacement_verdict_uses_measured_post_cleanup_residual_mask()
     residual = _material_post_cleanup_residual_mask(original, cleanup, action)
 
     assert np.count_nonzero(residual[35:45, 55:85]) > 0
+
+
+def test_terminal_residual_revokes_write_authority_and_preserves_source_pixels() -> None:
+    layers = [
+        {
+            "owner_id": "owner_bad",
+            "state": "rendered",
+            "visible": True,
+            "action_mask_ref": "mask:bad",
+        },
+        {"owner_id": "owner_other", "state": "rendered", "visible": True},
+    ]
+
+    marked = _mark_terminal_residual_rejections(layers, {"owner_bad"})
+
+    bad = marked[0]
+    assert bad["execution_rejected"] is True
+    assert bad["owner_execution_rejection_reason"] == "terminal_source_residual"
+    assert bad["source_pixels_preserved"] is True
+    assert bad["committed"] is False
+    assert bad["write_authority"] == "revoked"
+    assert bad["action_mask_ref"] is None
+    assert bad["visible"] is False
+    assert marked[1] == layers[1]
+
+
+def test_terminal_physical_residual_identifies_only_owner_that_must_be_revoked() -> None:
+    original = _page()
+    cleanup = original.copy()
+    bad_support = np.zeros(original.shape[:2], dtype=np.uint8)
+    bad_support[20:60, 20:120] = 255
+    safe_support = np.zeros(original.shape[:2], dtype=np.uint8)
+    safe_support[5:15, 5:15] = 255
+    cleanup[35:45, 55:85] = 20
+    commits = (
+        SimpleNamespace(
+            owner_id="owner_bad",
+            mutation=SimpleNamespace(
+                action_mask=bad_support,
+                source_support_mask=bad_support,
+            ),
+        ),
+        SimpleNamespace(
+            owner_id="owner_safe",
+            mutation=SimpleNamespace(
+                action_mask=safe_support,
+                source_support_mask=safe_support,
+            ),
+        ),
+    )
+
+    rejected = _terminal_physical_residual_owner_ids(
+        original,
+        cleanup,
+        commits,
+    )
+
+    assert rejected == {"owner_bad"}
+
+
+def test_terminal_cleanup_stage_is_rebuilt_from_remaining_commits() -> None:
+    original = _page()
+    safe_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    safe_mask[5:15, 5:15] = 255
+    safe_result = original.copy()
+    safe_result[5:15, 5:15] = 200
+    rejected_mask = np.zeros(original.shape[:2], dtype=np.uint8)
+    rejected_mask[30:40, 30:40] = 255
+    rejected_result = original.copy()
+    rejected_result[30:40, 30:40] = 20
+    safe_commit = SimpleNamespace(
+        owner_id="owner_safe",
+        committed=True,
+        mutation=SimpleNamespace(action_mask=safe_mask, result_rgb=safe_result),
+    )
+    rejected_commit = SimpleNamespace(
+        owner_id="owner_rejected",
+        committed=True,
+        mutation=SimpleNamespace(action_mask=rejected_mask, result_rgb=rejected_result),
+    )
+
+    cleanup = _compose_owner_cleanup_pixels(original, (safe_commit,))
+
+    assert np.all(cleanup[5:15, 5:15] == 200)
+    assert np.array_equal(cleanup[30:40, 30:40], original[30:40, 30:40])
+
+
+def test_terminal_verdict_cardinality_uses_remaining_authoritative_commits() -> None:
+    bindings = (
+        SimpleNamespace(owner_id="owner_safe", preserves_original_pixels=False),
+        SimpleNamespace(owner_id="owner_revoked", preserves_original_pixels=False),
+    )
+    commits = (SimpleNamespace(owner_id="owner_safe"),)
+
+    assert _terminal_visual_replacement_owner_ids(bindings, commits) == {
+        "owner_safe"
+    }
+
+
+def test_terminal_proof_excludes_revoked_nonmaterialized_binding() -> None:
+    safe = SimpleNamespace(owner_id="owner_safe", preserves_original_pixels=False)
+    revoked = SimpleNamespace(owner_id="owner_revoked", preserves_original_pixels=False)
+    noop = SimpleNamespace(owner_id="owner_noop", preserves_original_pixels=True)
+
+    selected = _terminal_proof_bindings(
+        (safe, revoked, noop),
+        (SimpleNamespace(owner_id="owner_safe"),),
+    )
+
+    assert selected == (safe, noop)
 
 
 def test_terminal_replacement_verdict_ignores_submaterial_detector_noise() -> None:
@@ -274,6 +389,35 @@ def test_enforce_mode_processes_page_without_creating_band_placeholder():
     assert result.final_page is None
 
 
+def test_page_pipeline_records_distinct_owner_stages(tmp_path):
+    from main import _PipelineTiming
+
+    recorder = _PipelineTiming(work_dir=tmp_path, run_id="page-stage-timing")
+    services = replace(_services(), performance_recorder=recorder)
+
+    run_page_owner_pipeline(_request(), services)
+    payload = recorder.finalize()
+
+    for stage in (
+        "coverage_build",
+        "owner_graph_build",
+        "owner_graph_validation",
+        "translation",
+        "translation_validation",
+        "owner_execution",
+    ):
+        assert payload["stages"][stage]["status"] == "completed"
+    assert payload["pages"]["page_001"]["status"] == "candidate_ready"
+    assert payload["counters"] == {
+        "coverage_components": 1,
+        "ocr_observations": 1,
+        "owners": 1,
+        "pages": 1,
+        "translation_calls": 1,
+        "translation_failures": 0,
+    }
+
+
 def test_page_pipeline_passes_fresh_complete_language_evidence(monkeypatch):
     import strip.page_pipeline as page_pipeline
 
@@ -490,6 +634,44 @@ def test_page_result_selects_post_execution_owner_graph():
 
     assert selected.owners[0].state == "rendered"
     assert translated_graph.owners[0].state != "rendered"
+
+
+def test_only_explicit_fail_closed_qa_layers_exempt_binding_from_commit_cardinality():
+    from strip.page_pipeline import _derived_rejected_owner_ids
+
+    owner = SimpleNamespace(
+        owner_id="owner_rejected",
+        disposition="owned",
+        state="target_ready",
+        route_action="translate_inpaint_render",
+    )
+    valid = {
+        "owner_id": owner.owner_id,
+        "visible": False,
+        "action_mask_ref": None,
+        "render_policy": "review_required",
+        "derived_qa_status": "review_required",
+        "execution_rejected": True,
+        "write_authority": "revoked",
+        "owner_execution_rejection_reason": "foreign geometry overlap",
+    }
+
+    assert _derived_rejected_owner_ids([valid], [owner]) == {owner.owner_id}
+    assert _derived_rejected_owner_ids(
+        [{**valid, "write_authority": "granted"}],
+        [owner],
+    ) == set()
+    assert _derived_rejected_owner_ids(
+        [valid],
+        [
+            SimpleNamespace(
+                owner_id=owner.owner_id,
+                disposition="review",
+                state="review_required",
+                route_action="review_required",
+            )
+        ],
+    ) == set()
 
 
 def test_page_result_rejects_graph_binding_or_commit_from_another_identity():

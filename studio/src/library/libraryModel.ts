@@ -28,6 +28,16 @@ export interface ExternalWorkLink {
   canonicalUrl?: string;
   manualStatusOverride?: PublicationStatus | null;
   tracking?: WorkTrackingCache;
+  contentOrigin?: ExtensionContentOrigin;
+}
+
+export interface ExtensionContentOrigin {
+  kind: "mihon-extension";
+  runtimeRecordId: string;
+  extensionPackage: string;
+  sourceId: string;
+  sourceName: string;
+  canonicalUrl?: string;
 }
 
 export interface ExternalTrackingSnapshot {
@@ -54,6 +64,10 @@ export interface LibraryWork {
   title: string;
   aliases: string[];
   coverPath?: string | null;
+  description?: string;
+  genres?: string[];
+  sourceLanguage?: string;
+  targetLanguage?: string;
   publicationStatus: PublicationStatus;
   external: ExternalWorkLink;
   chapters: LibraryChapter[];
@@ -129,6 +143,7 @@ function normalizeExternalLink(value: unknown): ExternalWorkLink {
         ? (override as PublicationStatus)
         : undefined;
   const tracking = normalizeTrackingCache(value.tracking);
+  const contentOrigin = normalizeContentOrigin(value.contentOrigin);
 
   return {
     ...(anilistId === undefined ? {} : { anilistId }),
@@ -136,7 +151,19 @@ function normalizeExternalLink(value: unknown): ExternalWorkLink {
     ...(canonicalUrl === undefined ? {} : { canonicalUrl }),
     ...(manualStatusOverride === undefined ? {} : { manualStatusOverride }),
     ...(tracking === undefined ? {} : { tracking }),
+    ...(contentOrigin === undefined ? {} : { contentOrigin }),
   };
+}
+
+function normalizeContentOrigin(value: unknown): ExtensionContentOrigin | undefined {
+  if (!isRecord(value) || value.kind !== "mihon-extension") return undefined;
+  const runtimeRecordId = asOptionalString(value.runtimeRecordId);
+  const extensionPackage = asOptionalString(value.extensionPackage);
+  const sourceId = asOptionalString(value.sourceId);
+  const sourceName = asOptionalString(value.sourceName);
+  if (!runtimeRecordId || !extensionPackage || !sourceId || !sourceName) return undefined;
+  const canonicalUrl = asOptionalString(value.canonicalUrl);
+  return { kind: "mihon-extension", runtimeRecordId, extensionPackage, sourceId, sourceName, ...(canonicalUrl ? { canonicalUrl } : {}) };
 }
 
 function normalizeNullableString(value: unknown): string | null {
@@ -233,6 +260,12 @@ function normalizeWork(value: unknown, index: number): LibraryWork | null {
       ? value.aliases.map((alias) => asOptionalString(alias)).filter((alias): alias is string => Boolean(alias))
       : [],
     ...(value.coverPath === null ? { coverPath: null } : asOptionalString(value.coverPath) ? { coverPath: asOptionalString(value.coverPath) } : {}),
+    ...(asOptionalString(value.description) ? { description: asOptionalString(value.description) } : {}),
+    ...(Array.isArray(value.genres)
+      ? { genres: value.genres.map((genre) => asOptionalString(genre)).filter((genre): genre is string => Boolean(genre)) }
+      : {}),
+    ...(asOptionalString(value.sourceLanguage) ? { sourceLanguage: asOptionalString(value.sourceLanguage) } : {}),
+    ...(asOptionalString(value.targetLanguage) ? { targetLanguage: asOptionalString(value.targetLanguage) } : {}),
     publicationStatus: normalizePublicationStatus(value.publicationStatus),
     external: normalizeExternalLink(value.external),
     chapters: sortChapterEntries(chapters),
@@ -245,7 +278,7 @@ export function createEmptyLibrary(): StudioLibrary {
     selectedWorkId: null,
     works: [],
     preferences: {
-      chapterView: "grid",
+      chapterView: "list",
       thumbnailSize: DEFAULT_THUMBNAIL_SIZE,
       trackingLanguage: "en",
     },
@@ -272,7 +305,7 @@ export function normalizeLibrary(value: unknown): StudioLibrary {
     selectedWorkId,
     works,
     preferences: {
-      chapterView: preferences.chapterView === "list" ? "list" : "grid",
+      chapterView: preferences.chapterView === "grid" ? "grid" : "list",
       thumbnailSize: Math.min(MAX_THUMBNAIL_SIZE, Math.max(MIN_THUMBNAIL_SIZE, rawThumbnailSize)),
       trackingLanguage: asOptionalString(preferences.trackingLanguage) ?? "en",
     },

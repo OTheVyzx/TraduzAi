@@ -80,7 +80,7 @@ export function AttachProjectDialog({
   };
 
   return (
-    <div className="studio-dialog-backdrop" role="presentation">
+    <div className="studio-dialog-backdrop studio-floating-layer" role="presentation">
       <section className="studio-dialog studio-attach-dialog" role="dialog" aria-modal="true" aria-labelledby="studio-attach-title">
         <header>
           <div><small>{work.title}</small><h2 id="studio-attach-title">Anexar projeto existente</h2></div>

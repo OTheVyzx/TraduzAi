@@ -398,6 +398,37 @@ def test_adjacent_containers_remain_separate_owners() -> None:
     assert {owner.source_payload for owner in graph.owners} == {"FIRST", "SECOND"}
 
 
+def test_weak_recovered_container_cannot_join_distant_balloon_text() -> None:
+    coverage = _coverage(
+        (
+            ("upper-envelope", "WAIT WHAT", (20, 20, 160, 90)),
+            ("upper-text", "WAIT WHAT", (35, 30, 145, 55)),
+            ("lower-text", "DO YOU AGREE", (30, 180, 170, 230)),
+        ),
+        containers=("full_page_visual_container_group:shared",) * 3,
+    )
+
+    graph = build_owner_page_graph_from_coverage(coverage)
+
+    assert len(graph.owners) == 2
+    assert {tuple(owner.component_ids) for owner in graph.owners} == {
+        ("upper-envelope", "upper-text"), ("lower-text",),
+    }
+
+
+def test_conflicting_block_and_lines_fail_closed_before_translation() -> None:
+    coverage = _coverage(
+        (
+            ("block", "SOMETHING ELSE", (10, 10, 180, 90)),
+            ("line-1", "WAIT WHAT", (20, 20, 165, 40)),
+            ("line-2", "DO YOU", (20, 55, 165, 75)),
+        ),
+        containers=("full_page_visual_container:local",) * 3,
+    )
+    with pytest.raises(CoverageInvariantError, match="competing_ocr_readings_require_review"):
+        build_owner_page_graph_from_coverage(coverage)
+
+
 def test_short_english_word_inside_balloon_defaults_to_dialogue_not_sfx() -> None:
     graph = build_owner_page_graph_from_coverage(
         _coverage(
@@ -520,6 +551,40 @@ def test_ocr_empty_uncorroborated_glyph_scan_policy_roundtrips_as_preserve() -> 
     assert disposition.policy_evidence_ids == entry.ocr_attempt_ids
 
 
+@pytest.mark.parametrize(
+    ("policy_id", "semantic_role"),
+    [
+        ("scanlation_credit_art", "visual_non_text"),
+        ("ocr_empty_small_corroborated_sfx", "sfx"),
+    ],
+)
+def test_new_audited_ocr_empty_policies_roundtrip_as_preserve(
+    policy_id: str,
+    semantic_role: str,
+) -> None:
+    coverage = _coverage(
+        (("component-audited-preserve", "", (20, 20, 120, 50)),),
+        containers=(None,),
+        preserve_policy=f"policy:{policy_id}",
+        semantic_role=semantic_role,
+    )
+    entry = replace(
+        coverage.entries[0],
+        materiality="non_text",
+        observation_ids=(),
+    )
+
+    graph = build_owner_page_graph_from_coverage(
+        _replace_entries(coverage, (entry,), observations=())
+    )
+
+    disposition = graph.component_dispositions[0]
+    assert graph.owners == []
+    assert disposition.decision == "preserve"
+    assert disposition.policy_id == policy_id
+    assert disposition.policy_evidence_ids == entry.ocr_attempt_ids
+
+
 def test_unknown_preserve_policy_is_rejected() -> None:
     coverage = _coverage(
         (("component-a", "TEXT", (20, 20, 120, 50)),),
@@ -567,3 +632,56 @@ def test_graph_never_loses_a_material_component() -> None:
     assert {item.component_id for item in graph.component_dispositions} == set(
         coverage.ledger.expected_component_ids
     )
+
+
+def test_scanlation_credit_page_is_preserved_without_translation_owners() -> None:
+    coverage = _coverage(
+        (
+            (
+                "credit-body",
+                "HELLO EVERYBODY JOIN OUR DISCORD WE NOW HAVE A PATREON "
+                "YOU CAN DONATE TO US TO SUPPORT OUR WORK",
+                (20, 20, 380, 100),
+            ),
+            ("credit-title", "SERIES WE SCANLATE", (80, 130, 320, 165)),
+            ("promo-title", "THE STRONGEST GOD KING", (40, 190, 220, 225)),
+        ),
+        containers=("credit-body", "credit-title", "promo-title"),
+    )
+
+    graph = build_owner_page_graph_from_coverage(coverage)
+
+    assert graph.owners == []
+    assert {item.decision for item in graph.component_dispositions} == {"preserve"}
+    assert {item.policy_id for item in graph.component_dispositions} == {
+        "scanlation_apparatus"
+    }
+
+
+def test_story_dialogue_with_single_discord_mention_is_not_a_credit_page() -> None:
+    coverage = _coverage(
+        (("dialogue", "I WILL MESSAGE YOU ON DISCORD LATER", (20, 20, 260, 70)),),
+        containers=("dialogue-balloon",),
+    )
+
+    graph = build_owner_page_graph_from_coverage(coverage)
+
+    assert len(graph.owners) == 1
+    assert graph.component_dispositions[0].decision == "owned"
+
+
+def test_explicit_scans_presents_page_is_preserved_without_contact_markers() -> None:
+    coverage = _coverage(
+        (
+            ("scan-brand", "NON-STOP SCANS PRESENTS", (20, 20, 360, 60)),
+            ("work-title", "ONE SECOND", (100, 100, 300, 150)),
+        ),
+        containers=("scan-brand", "work-title"),
+    )
+
+    graph = build_owner_page_graph_from_coverage(coverage)
+
+    assert graph.owners == []
+    assert {item.policy_id for item in graph.component_dispositions} == {
+        "scanlation_apparatus"
+    }

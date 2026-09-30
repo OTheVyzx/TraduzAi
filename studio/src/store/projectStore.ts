@@ -20,6 +20,7 @@ import type { ImageLayerKey, ProjectImportResult, StudioProject, StudioTextLayer
 
 const DEFAULT_PROJECT_PATH = "memory://current";
 const MAX_CHAPTER_HISTORY = 30;
+let activeProjectRequest = 0;
 
 async function refreshRecoverySnapshot(projectPath: string, project: StudioProject) {
   try {
@@ -77,10 +78,15 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
   recoverySnapshot: null,
 
   importProjectJson: async (jsonText, projectPath = DEFAULT_PROJECT_PATH) => {
+    const request = ++activeProjectRequest;
     try {
       const payload = JSON.parse(jsonText) as unknown;
       const result = importStudioProject(payload);
-      studioBackend.putProject(projectPath, result.project);
+      await getStudioEditorBackend().saveProjectJson({
+        project_path: projectPath,
+        project_json: result.project,
+      });
+      if (request !== activeProjectRequest) return;
       set({
         project: result.project,
         projectPath,
@@ -94,20 +100,25 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
         recoverySnapshot: null,
       });
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
+      if (request === activeProjectRequest) {
+        set({ error: error instanceof Error ? error.message : String(error) });
+      }
     }
   },
 
   loadProject: async (projectPath) => {
+    const request = ++activeProjectRequest;
     try {
       const backend = getStudioEditorBackend();
       const project = await backend.loadProject({ project_path: projectPath });
+      if (request !== activeProjectRequest) return;
       let snapshot: StudioRecoverySnapshot | null = null;
       try {
         snapshot = await backend.loadRecoverySnapshot({ project_path: projectPath });
       } catch (error) {
         console.warn("Projeto aberto sem acesso aos snapshots de recuperacao:", error);
       }
+      if (request !== activeProjectRequest) return;
       set({
         project,
         projectPath,
@@ -120,11 +131,14 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
         recoverySnapshot: isRecoveryCandidate(snapshot, project, projectPath) ? snapshot : null,
       });
     } catch (error) {
+      if (request !== activeProjectRequest) return;
       const message = error instanceof Error ? error.message : String(error);
       try {
         const snapshot = await getStudioEditorBackend().loadRecoverySnapshot({ project_path: projectPath });
+        if (request !== activeProjectRequest) return;
         set({ projectPath, recoverySnapshot: snapshot, error: message });
       } catch {
+        if (request !== activeProjectRequest) return;
         set({ projectPath, recoverySnapshot: null, error: message });
       }
     }
@@ -145,6 +159,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
       set({ error: "Há alterações não salvas. Salve o capítulo ou confirme o descarte antes de fechar." });
       return false;
     }
+    activeProjectRequest += 1;
     set({
       project: null,
       projectPath: null,
@@ -163,13 +178,18 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
   saveProject: async () => {
     const { project, projectPath } = get();
     if (!project || !projectPath) return;
+    const request = activeProjectRequest;
     try {
       const compatProject = importStudioProject(toTraduzAiV2Compat(project)).project;
       await getStudioEditorBackend().saveProjectJson({ project_path: projectPath, project_json: compatProject });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       const savedProject = await getStudioEditorBackend().loadProject({ project_path: projectPath });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       await refreshRecoverySnapshot(projectPath, savedProject);
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       set({ project: savedProject, error: null, hasUnsavedChanges: false });
     } catch (error) {
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       set({ error: error instanceof Error ? error.message : String(error), hasUnsavedChanges: true });
     }
   },
@@ -202,6 +222,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
   patchCurrentTextLayer: async (layerId, patch) => {
     const { projectPath, currentPageIndex } = get();
     if (!projectPath) return;
+    const request = activeProjectRequest;
     try {
       const backend = getStudioEditorBackend();
       const compat = createLegacyEditorBackendAdapter(backend);
@@ -211,10 +232,14 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
         layer_id: layerId,
         patch,
       });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       const project = await backend.loadProject({ project_path: projectPath });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       await refreshRecoverySnapshot(projectPath, project);
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       set({ project, error: null, hasUnsavedChanges: false });
     } catch (error) {
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       set({ error: error instanceof Error ? error.message : String(error), hasUnsavedChanges: true });
     }
   },
@@ -222,6 +247,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
   setCurrentTextLayerVisibility: async (layerId, visible) => {
     const { projectPath, currentPageIndex } = get();
     if (!projectPath) return;
+    const request = activeProjectRequest;
     try {
       const backend = getStudioEditorBackend();
       const compat = createLegacyEditorBackendAdapter(backend);
@@ -232,10 +258,14 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
         layer_id: layerId,
         visible,
       });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       const project = await backend.loadProject({ project_path: projectPath });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       await refreshRecoverySnapshot(projectPath, project);
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       set({ project, error: null, hasUnsavedChanges: false });
     } catch (error) {
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       set({ error: error instanceof Error ? error.message : String(error), hasUnsavedChanges: true });
     }
   },
@@ -243,6 +273,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
   setCurrentImageLayerVisibility: async (layerKey, visible) => {
     const { projectPath, currentPageIndex } = get();
     if (!projectPath) return;
+    const request = activeProjectRequest;
     try {
       const backend = getStudioEditorBackend();
       const compat = createLegacyEditorBackendAdapter(backend);
@@ -253,10 +284,14 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
         layer_key: layerKey,
         visible,
       });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       const project = await backend.loadProject({ project_path: projectPath });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       await refreshRecoverySnapshot(projectPath, project);
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       set({ project, error: null, hasUnsavedChanges: false });
     } catch (error) {
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       set({ error: error instanceof Error ? error.message : String(error), hasUnsavedChanges: true });
     }
   },
@@ -264,6 +299,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
   executeChapterCommand: async (command) => {
     const { projectPath, chapterHistory, chapterHistoryIndex, isProjectSaving } = get();
     if (!projectPath || isProjectSaving) return false;
+    const request = activeProjectRequest;
     set({ isProjectSaving: true, error: null });
     try {
       const backend = getStudioEditorBackend();
@@ -279,7 +315,9 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
           applyChapterHistoryEntry(latest, historyEntry, "redo"),
         ),
       });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return false;
       await refreshRecoverySnapshot(projectPath, savedProject);
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return false;
       let history = [
         ...chapterHistory.slice(0, chapterHistoryIndex),
         historyEntry,
@@ -295,6 +333,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
       });
       return true;
     } catch (error) {
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return false;
       set({
         isProjectSaving: false,
         hasUnsavedChanges: true,
@@ -307,6 +346,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
   undoChapterCommand: async () => {
     const { projectPath, chapterHistory, chapterHistoryIndex, isProjectSaving } = get();
     if (!projectPath || isProjectSaving || chapterHistoryIndex <= 0) return false;
+    const request = activeProjectRequest;
     const command = chapterHistory[chapterHistoryIndex - 1];
     set({ isProjectSaving: true, error: null });
     try {
@@ -318,7 +358,9 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
           applyChapterHistoryEntry(latest, command, "undo"),
         ),
       });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return false;
       await refreshRecoverySnapshot(projectPath, savedProject);
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return false;
       set({
         project: savedProject,
         chapterHistoryIndex: chapterHistoryIndex - 1,
@@ -328,6 +370,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
       });
       return true;
     } catch (error) {
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return false;
       set({
         isProjectSaving: false,
         hasUnsavedChanges: true,
@@ -340,6 +383,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
   redoChapterCommand: async () => {
     const { projectPath, chapterHistory, chapterHistoryIndex, isProjectSaving } = get();
     if (!projectPath || isProjectSaving || chapterHistoryIndex >= chapterHistory.length) return false;
+    const request = activeProjectRequest;
     const command = chapterHistory[chapterHistoryIndex];
     set({ isProjectSaving: true, error: null });
     try {
@@ -351,7 +395,9 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
           applyChapterHistoryEntry(latest, command, "redo"),
         ),
       });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return false;
       await refreshRecoverySnapshot(projectPath, savedProject);
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return false;
       set({
         project: savedProject,
         chapterHistoryIndex: chapterHistoryIndex + 1,
@@ -361,6 +407,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
       });
       return true;
     } catch (error) {
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return false;
       set({
         isProjectSaving: false,
         hasUnsavedChanges: true,
@@ -373,9 +420,11 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
   restoreRecovery: async () => {
     const { projectPath, recoverySnapshot, isProjectSaving } = get();
     if (!projectPath || !recoverySnapshot || isProjectSaving) return false;
+    const request = activeProjectRequest;
     set({ isProjectSaving: true, error: null });
     try {
       const project = await recoverStudioProject(getStudioEditorBackend(), projectPath);
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return false;
       if (!project) {
         set({ isProjectSaving: false, recoverySnapshot: null });
         return false;
@@ -391,6 +440,7 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
       });
       return true;
     } catch (error) {
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return false;
       set({
         isProjectSaving: false,
         hasUnsavedChanges: true,
@@ -403,10 +453,13 @@ export const useStudioProjectStore = create<StudioProjectState>((set, get) => ({
   dismissRecovery: async () => {
     const { projectPath } = get();
     if (!projectPath) return;
+    const request = activeProjectRequest;
     try {
       await getStudioEditorBackend().clearRecoverySnapshot({ project_path: projectPath });
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       set({ recoverySnapshot: null, error: null });
     } catch (error) {
+      if (request !== activeProjectRequest || get().projectPath !== projectPath) return;
       set({ error: error instanceof Error ? error.message : String(error) });
     }
   },

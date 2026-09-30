@@ -11,6 +11,65 @@ def test_unowned_external_english_is_classified_without_stored_binding():
     assert auditor._looks_like_probable_source("A ARENA VAI COMEÇAR", "en") is False
 
 
+def test_bound_source_matching_is_accent_insensitive_for_shared_target_tokens():
+    bindings = (
+        SimpleNamespace(
+            owner_id="owner-1",
+            source_text="WELL, ACTUALLY I PLACED THE SAME BET COMO NOSSO JUNIOR",
+            target_text="BEM, NA VERDADE EU FIZ A MESMA APOSTA QUE NOSSO JÚNIOR",
+        ),
+    )
+
+    visible_target = "BEM, NA VERDADE EU FIZ A MESMA APOSTA QUE NOSSO JUNIOR"
+    visible_source = "ACTUALLY"
+
+    assert auditor._looks_like_bound_source(visible_target, bindings) == (False, None)
+    assert auditor._looks_like_bound_source(visible_source, bindings) == (True, "owner-1")
+
+
+def test_source_manifest_paths_use_canonical_relative_source_path(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    page = source / "001.png"
+    page.write_bytes(b"source-page")
+    manifest = SimpleNamespace(
+        pages=(SimpleNamespace(relative_source_path="001.png"),),
+    )
+
+    assert auditor._resolve_source_manifest_paths(source, manifest) == (page.resolve(),)
+
+
+def test_external_ocr_stdout_ignores_provider_logs_before_json():
+    payload = auditor._parse_external_ocr_stdout(
+        "[paddle] provider warning\n"
+        '{"auditor_execution_id":"external-execution:1","observations":[]}\n'
+    )
+
+    assert payload["auditor_execution_id"] == "external-execution:1"
+
+
+def test_external_page_audit_serializes_observation_tuples_as_json_lists():
+    values = {
+        field: (
+            ({"text": "THE ARENA"},)
+            if field in {"observations", "source_only_residuals", "unowned_source_residuals"}
+            else 0
+            if field in {"auditor_pid", "physical_inference_count", "cache_hits", "english_dialogue_residual_count"}
+            else "PASS"
+            if field in {"language_verdict", "status"}
+            else f"value:{field}"
+        )
+        for field in auditor.ExternalPageAudit.__dataclass_fields__
+        if field != "audit_sha256"
+    }
+
+    payload = auditor.ExternalPageAudit.build(**values).to_dict()
+
+    assert payload["observations"] == [{"text": "THE ARENA"}]
+    assert payload["source_only_residuals"] == [{"text": "THE ARENA"}]
+    assert payload["unowned_source_residuals"] == [{"text": "THE ARENA"}]
+
+
 def test_audit_cli_forwards_task20_paths_and_returns_gate_code(tmp_path, monkeypatch):
     calls = []
 

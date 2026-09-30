@@ -1,0 +1,32 @@
+{
+  "schema": "traduzai.renderer-preference-index.v1",
+  "fixture_kind": "synthetic_contract_test",
+  "human_preference": false,
+  "training_eligible": false,
+  "actor": {
+    "kind": "system",
+    "id": "test/synthetic"
+  },
+  "artifact_base": "N:/TraduzAI/.coordination/v1/outputs/renderer/preference-fixture-v1",
+  "lookup_contract": {
+    "key": "owner_id",
+    "pending_state": "pending",
+    "not_found": null,
+    "resolve_refs_relative_to": "directory containing comparison.json"
+  },
+  "owners": {
+    "fixture:renderer-preference:owner-001": {
+      "state": "pending",
+      "comparison_ref": {
+        "relative_path": "comparison.json",
+        "sha256": "641c4337691cd0afb73ed6c273206a5a0af5d3ae167a8592d94c5137b6e48ea1"
+      },
+      "comparison_sha256": "6d5b1f3d2c4371d570f1c0c31cdc965c91a6b76cac00f5bfef4cd7edd0d2135d"
+    }
+  },
+  "notes": [
+    "This fixture verifies the Studio A/B flow only.",
+    "Its candidates and labels are synthetic and must never count as human preference.",
+    "The two options share owner, exact target, source and style identities and carry complete PASS raster-safety receipts."
+  ]
+}

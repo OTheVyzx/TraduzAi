@@ -13,6 +13,7 @@ from hashlib import sha256
 from pathlib import Path
 import re
 import sys
+from types import SimpleNamespace
 import unicodedata
 
 import numpy as np
@@ -1069,6 +1070,91 @@ def test_edge_backed_dialogue_container_uses_central_safe_chord() -> None:
     ]
 
 
+def test_connected_protected_source_slot_keeps_atomic_chord_inside_paint_polygon() -> None:
+    from strip.process_bands import _owner_layout_regions
+
+    graph = _owner_graph([("owner_connected", "SOURCE BODY", "CORPO TRADUZIDO")])
+    owner = graph.owners[0]
+    first_component = replace(
+        graph.components[0],
+        bbox_page=(100, 100, 300, 150),
+        polygon_page=_polygon_for_bbox((100, 100, 300, 150)),
+    )
+    second_component = replace(
+        first_component,
+        component_id="component_001",
+        bbox_page=(120, 160, 320, 210),
+        polygon_page=_polygon_for_bbox((120, 160, 320, 210)),
+    )
+    first_observation = replace(
+        graph.observations[0],
+        component_ids=(first_component.component_id,),
+        bbox_page=first_component.bbox_page,
+        polygons_page=(first_component.polygon_page,),
+    )
+    second_observation = replace(
+        first_observation,
+        observation_id="observation_001",
+        component_ids=(second_component.component_id,),
+        bbox_page=second_component.bbox_page,
+        polygons_page=(second_component.polygon_page,),
+        invocation_id="invocation-owner-layout-001",
+        attempt_id="attempt-owner-layout-001",
+        input_pixel_sha256="2" * 64,
+    )
+    graph.components[:] = [first_component, second_component]
+    graph.observations[:] = [first_observation, second_observation]
+    owner.component_ids[:] = [first_component.component_id, second_component.component_id]
+    owner.observation_ids[:] = [
+        first_observation.observation_id,
+        second_observation.observation_id,
+    ]
+    owner.selected_observation_ids[:] = list(owner.observation_ids)
+    graph.projections[0] = replace(
+        graph.projections[0],
+        bbox_page=(100, 100, 320, 210),
+        bbox_tile=(100, 100, 320, 210),
+    )
+    graph.component_dispositions[:] = [
+        replace(
+            graph.component_dispositions[0],
+            component_id=first_component.component_id,
+        ),
+        replace(
+            graph.component_dispositions[0],
+            component_id=second_component.component_id,
+        ),
+    ]
+    graph.require_valid()
+    safe_polygon = ((80, 80), (339, 80), (339, 229), (80, 229))
+    geometry = SimpleNamespace(
+        owner_id=owner.owner_id,
+        page_id=graph.page_id,
+        page_width=PAGE_WIDTH,
+        page_height=PAGE_HEIGHT,
+        layout_container_bbox_page=(80, 80, 340, 230),
+        layout_container_polygon_page=safe_polygon,
+        source_replacement_bbox_page=(80, 80, 340, 230),
+        layout_container_source="full_page_visual_container:protected_mask_safe",
+        status="ready",
+        geometry_sha256="b" * 64,
+    )
+
+    regions = _owner_layout_regions(
+        graph,
+        page_width=PAGE_WIDTH,
+        page_height=PAGE_HEIGHT,
+        owner_render_geometry=geometry,
+    )
+
+    assert len(regions) == 1
+    assert regions[0]["layout_region_id"] == "owner_connected__shared_container"
+    assert regions[0]["safe_polygon_page"] == [list(point) for point in safe_polygon]
+    assert regions[0]["paint_safe_polygon_page"] == [
+        list(point) for point in safe_polygon
+    ]
+
+
 def test_visual_card_evidence_uses_full_capacity_without_changing_owner_role() -> None:
     from strip.process_bands import _owner_layout_regions
 
@@ -1241,7 +1327,6 @@ def test_font_size_stays_within_source_and_container_bounds() -> None:
     assert plan["_font_search_cap"] == 24
     assert 22 <= int(plan["target_size"]) <= 24
     assert 22 <= int(resolved["font_size"]) <= 24
-
 
 def test_text_is_centered_by_safe_polygon_not_ocr_bbox() -> None:
     safe_polygon = ((150, 60), (330, 60), (330, 220), (150, 220))

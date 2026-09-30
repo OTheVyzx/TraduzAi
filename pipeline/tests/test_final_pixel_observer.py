@@ -47,6 +47,7 @@ def _write_image(path: Path) -> bytes:
 
 def test_observer_receives_persisted_file_without_project_boxes(tmp_path):
     from qa.final_pixel_observer import DetectorOcrFinalPixelObserver
+    from ownership.ocr_contract import OCRRequest
 
     image_path = tmp_path / "final.png"
     _write_image(image_path)
@@ -54,7 +55,13 @@ def test_observer_receives_persisted_file_without_project_boxes(tmp_path):
     runtime = _Runtime()
     observer = DetectorOcrFinalPixelObserver(detector=detector, runtime=runtime)
 
-    observation = observer.observe(image_path, source_language="en")
+    observation = observer.observe(
+        image_path,
+        source_language="en",
+        page_id="page_001",
+        run_id="run-observer",
+        execution_id="execution-observer",
+    )
 
     assert observation.image_path == image_path
     assert observation.detected_blocks == (
@@ -63,6 +70,12 @@ def test_observer_receives_persisted_file_without_project_boxes(tmp_path):
     assert runtime.calls[0][1]["detected_blocks"] == list(observation.detected_blocks)
     assert "texts" not in runtime.calls[0][1]
     assert "project_boxes" not in runtime.calls[0][1]
+    request = runtime.calls[0][1]["ocr_request"]
+    assert isinstance(request, OCRRequest)
+    assert request.root_input_pixel_sha256 == observation.root_input_pixel_sha256
+    assert request.page_id == "page_001"
+    assert request.run_id == "run-observer"
+    assert request.origin_execution_id == "execution-observer"
 
 
 def test_default_observer_runs_fresh_detector_then_ocr_on_persisted_pixels(tmp_path):
@@ -245,7 +258,17 @@ def test_final_pixel_observer_transforms_logical_challenge_for_framed_crop(tmp_p
         frame_height=160,
         content_origin_xy=(5, 0),
     )
-    runtime = _Runtime()
+    class FramedRuntime(_Runtime):
+        def run_final_pixel_ocr_probe(self, image_rgb, **kwargs):
+            payload = super().run_final_pixel_ocr_probe(image_rgb, **kwargs)
+            payload["raw_ocr_records"] = [{
+                "text": "SOURCE BODY",
+                "bbox": [15, 98, 37, 111],
+                "confidence": 0.88,
+            }]
+            return payload
+
+    runtime = FramedRuntime()
 
     observation = DetectorOcrFinalPixelObserver(
         detector=type("EmptyDetector", (), {"detect": lambda self, image: []})(),
@@ -267,3 +290,6 @@ def test_final_pixel_observer_transforms_logical_challenge_for_framed_crop(tmp_p
     assert challenge["page_surface_geometry_sha256"] == geometry.geometry_sha256
     assert runtime.calls[0][1]["page_surface_geometry"]["geometry_sha256"] == geometry.geometry_sha256
     assert observation.page_surface_geometry_sha256 == geometry.geometry_sha256
+    assert observation.ocr_records[0]["artifact_bbox_frame"] == [15, 98, 37, 111]
+    assert observation.ocr_records[0]["bbox"] == [10, 98, 32, 111]
+    assert observation.ocr_records[0]["coordinate_space"] == "logical_page"

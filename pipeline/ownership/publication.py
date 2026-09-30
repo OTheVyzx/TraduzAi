@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import threading
+import time
 from typing import Any, Literal
 
 from .hash_contract import canonical_json_bytes, canonical_json_sha256
@@ -23,6 +24,26 @@ class PublicationRecoveryError(RuntimeError):
 
 _REGISTRY_GUARD = threading.Lock()
 _HELD_LOCKS: dict[str, list[str]] = {}
+
+
+def _replace_with_transient_retry(
+    source: str | Path,
+    target: str | Path,
+    *,
+    attempts: int = 10,
+) -> None:
+    """Preserve atomic replace semantics across short Windows scanner locks."""
+
+    if attempts < 1:
+        raise ValueError("publication replace attempts must be positive")
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(min(0.25, 0.02 * (1.6**attempt)))
 
 
 @dataclass
@@ -243,7 +264,7 @@ class PublicationTransaction:
                         operation["backup_intent"] = True
                         self._write_journal(journal)
                         self._fault_checkpoint(f"before_backup:{relative}")
-                        os.replace(target, backup)
+                        _replace_with_transient_retry(target, backup)
                         operation["backup_done"] = True
                         self._write_journal(journal)
                         self._fault_checkpoint(f"after_backup:{relative}")
@@ -254,7 +275,7 @@ class PublicationTransaction:
                         operation["promote_intent"] = True
                         self._write_journal(journal)
                         self._fault_checkpoint(f"before_promote:{relative}")
-                        os.replace(staged, target)
+                        _replace_with_transient_retry(staged, target)
                         operation["promote_done"] = True
                         self._write_journal(journal)
                         self._fault_checkpoint(f"after_promote:{relative}")
@@ -288,7 +309,7 @@ class PublicationTransaction:
                     target.unlink()
                 if operation.get("backup_done") and backup.is_file():
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(backup, target)
+                    _replace_with_transient_retry(backup, target)
             except OSError as exc:
                 failures.append(f"{relative}: {exc}")
         if failures:
@@ -304,7 +325,7 @@ class PublicationTransaction:
             handle.write(canonical_json_bytes(payload))
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, self.journal_path)
+        _replace_with_transient_retry(temporary, self.journal_path)
 
     def _discard_transaction_files(self) -> None:
         if self.journal_path.exists():

@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 import json
+import logging
+import re
 from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
 
 from .ocr_contract import (
@@ -26,6 +28,9 @@ if TYPE_CHECKING:
 from .hash_contract import canonical_json_bytes, canonical_json_sha256, sha256_bytes
 
 
+logger = logging.getLogger(__name__)
+
+
 BBox = tuple[int, int, int, int]
 Point = tuple[int, int]
 Polygon = tuple[Point, ...]
@@ -41,10 +46,11 @@ CoverageState = Literal[
     "rendered",
     "final_verified",
     "explicit_non_dialogue_preserve",
+    "review_required",
 ]
 CANONICAL_COVERAGE_STATES = frozenset(CoverageState.__args__)
 TERMINAL_COVERAGE_STATES = frozenset(
-    {"final_verified", "explicit_non_dialogue_preserve"}
+    {"final_verified", "explicit_non_dialogue_preserve", "review_required"}
 )
 RECOVERY_STATUSES = frozenset({"scheduled", "succeeded", "failed", "exhausted"})
 
@@ -342,7 +348,7 @@ class CoverageEntry:
     page_source_sha256: str
     bbox_page: BBox
     polygon_page: Polygon
-    materiality: Literal["material", "non_text"]
+    materiality: Literal["material", "non_text", "uncertain"]
     container_id: str | None = None
     ocr_attempt_ids: tuple[str, ...] = ()
     observation_ids: tuple[str, ...] = ()
@@ -521,7 +527,7 @@ class PageCoverageLedger:
 
 
 def _validate_complete_entry(entry: CoverageEntry) -> None:
-    if entry.materiality not in {"material", "non_text"}:
+    if entry.materiality not in {"material", "non_text", "uncertain"}:
         raise CoverageInvariantError(f"component materiality invalid: {entry.component_id}")
     if not entry.ocr_attempt_ids:
         raise CoverageInvariantError(f"component lacks OCR attempt: {entry.component_id}")
@@ -542,6 +548,17 @@ def _validate_complete_entry(entry: CoverageEntry) -> None:
     elif entry.materiality == "non_text":
         raise CoverageInvariantError(
             f"non-text component lacks explicit preserve disposition: {entry.component_id}"
+        )
+    elif entry.materiality == "uncertain" and (
+        entry.state != "review_required" or entry.owner_id is not None
+        or entry.observation_ids or entry.preserve_policy
+    ):
+        raise CoverageInvariantError(
+            f"uncertain component lacks review disposition: {entry.component_id}"
+        )
+    elif entry.materiality == "material" and entry.state == "review_required":
+        raise CoverageInvariantError(
+            f"material component cannot bypass ownership as review: {entry.component_id}"
         )
 
 
@@ -1428,6 +1445,17 @@ class PageCoverageResult:
                     f"observation references unknown component: {observation.observation_id}"
                 )
         for entry in self.entries:
+            if entry.materiality == "uncertain":
+                if (
+                    entry.state != "review_required"
+                    or not entry.ocr_attempt_ids
+                    or entry.observation_ids
+                    or entry.owner_id is not None
+                    or entry.preserve_policy is not None
+                ):
+                    raise CoverageInvariantError(
+                        f"uncertain component lacks auditable review state: {entry.component_id}"
+                    )
             if entry.materiality == "material" and not entry.ocr_attempt_ids:
                 raise CoverageInvariantError(f"component lacks OCR attempt: {entry.component_id}")
             if not set(entry.ocr_attempt_ids) <= attempt_ids:
@@ -1631,9 +1659,34 @@ def _bbox_overlap_fraction(left: BBox, right: BBox) -> float:
 CoverageOCRRunner = Callable[..., OCRInvocationResult]
 
 
+def classify_empty_primary_candidate(
+    component: "SourceTextComponent",
+    *,
+    has_coverage_observation: bool,
+    has_explicit_preserve_policy: bool,
+) -> bool:
+    """Return whether an unsupported primary hypothesis needs human review.
+
+    This does not assert non-text. A valid OCR observation, glyph/script support,
+    or an audited preservation policy takes precedence over the uncertainty rule.
+    Detector confidence remains evidence for diagnostics, but cannot establish
+    translatable materiality without independent semantic corroboration.
+    """
+
+    return (
+        not has_coverage_observation
+        and not has_explicit_preserve_policy
+        and frozenset(component.detector_sources)
+        == frozenset(("primary_region_detector",))
+        and not component.script_evidence
+    )
+
+
 def _ocr_empty_component_preserve_policy(
     page_rgb: "np.ndarray",
     component: "SourceTextComponent",
+    *,
+    page_observations: Sequence[Any] = (),
 ) -> tuple[str, str] | None:
     """Classify OCR-empty hypotheses that have no independent corroboration.
 
@@ -1644,10 +1697,74 @@ def _ocr_empty_component_preserve_policy(
     audit policy identifiers.
     """
 
+    import numpy as np
+
     detector_sources = frozenset(component.detector_sources)
     region_sources = frozenset(
-        ("primary_region_detector", "negative_region_detector")
+        (
+            "primary_region_detector",
+            "negative_region_detector",
+            "strip_region_detector",
+        )
     )
+    page_height, page_width = page_rgb.shape[:2]
+    x1, y1, x2, y2 = (int(value) for value in component.bbox_page)
+    box_width = max(0, x2 - x1)
+    box_height = max(0, y2 - y1)
+    normalized_page_text = " ".join(
+        re.sub(r"[^A-Z0-9]+", " ", str(getattr(item, "text", "")).upper()).strip()
+        for item in page_observations
+    )
+    credit_markers = {
+        marker
+        for marker in (
+            "RESET SCAN",
+            "TOON",
+            "FASTER UPDATE",
+            "PATREON",
+            "DISCORD",
+            "RECRUIT",
+            "TRANSLATOR",
+            "EDITOR",
+        )
+        if marker in normalized_page_text
+    }
+    corroborated_region = (
+        "glyph_scan" in detector_sources
+        and bool(detector_sources & region_sources)
+        and not component.script_evidence
+        and bool(component.evidence_ids)
+    )
+    regional_credit_candidate = (
+        bool(detector_sources & region_sources)
+        and not component.script_evidence
+        and bool(component.evidence_ids)
+    )
+    edge_credit_banner = (
+        regional_credit_candidate
+        and len(credit_markers) >= 2
+        and (
+            y2 <= page_height * 0.12
+            or y1 >= page_height * 0.96
+        )
+        and box_width >= page_width * 0.45
+        and box_height <= page_height * 0.04
+        and box_width >= 1.4 * max(1, box_height)
+    )
+    if edge_credit_banner or (corroborated_region and (
+        (
+            len(credit_markers) >= 2
+            and y2 <= page_height * 0.12
+            and box_width >= page_width * 0.30
+            and box_height <= page_height * 0.03
+            and box_width >= 3 * max(1, box_height)
+        )
+        or (
+            len(credit_markers) >= 3
+            and page_height <= page_width * 2.5
+        )
+    )):
+        return ("visual_non_text", "policy:scanlation_credit_art")
     if (
         detector_sources & region_sources
         and detector_sources <= region_sources | frozenset(("glyph_scan",))
@@ -1674,6 +1791,57 @@ def _ocr_empty_component_preserve_policy(
                 "sfx",
                 "policy:explicit_sfx_outside_translatable_container",
             )
+        if (
+            corroborated_region
+            and box_width <= page_width * 0.18
+            and box_height <= page_height * 0.025
+            and box_width * box_height <= page_width * page_height * 0.004
+        ):
+            return (
+                "sfx",
+                "policy:ocr_empty_small_corroborated_sfx",
+            )
+    if (
+        detector_sources
+        and detector_sources <= region_sources
+        and not component.script_evidence
+    ):
+        touches_horizontal_edge = (
+            y1 <= max(2, int(round(page_height * 0.005)))
+            or y2 >= page_height - max(2, int(round(page_height * 0.005)))
+        )
+        crop = page_rgb[y1:y2, x1:x2, :3]
+        repeated_edge_pattern = False
+        if crop.size:
+            rgb_i32 = crop.astype("int32", copy=False)
+            luminance = (
+                77 * rgb_i32[:, :, 0]
+                + 150 * rgb_i32[:, :, 1]
+                + 29 * rgb_i32[:, :, 2]
+                + 128
+            ) // 256
+            transition_counts = (
+                np.abs(np.diff(luminance, axis=1)) >= 48
+            ).sum(axis=1).astype("float64")
+            transition_mean = float(transition_counts.mean())
+            transition_cv = float(transition_counts.std()) / max(
+                1.0, transition_mean
+            )
+            repeated_edge_pattern = (
+                float(np.median(transition_counts)) >= 10.0
+                and transition_cv <= 0.45
+            )
+        if (
+            touches_horizontal_edge
+            and box_width >= page_width * 0.70
+            and box_height <= page_height * 0.10
+            and box_width >= 6 * max(1, box_height)
+            and repeated_edge_pattern
+        ):
+            return (
+                "visual_non_text",
+                "policy:explicit_visual_non_text",
+            )
     if detector_sources == frozenset(("dark_balloon_band_scan", "glyph_scan")):
         if component.script_evidence or not component.evidence_ids:
             return None
@@ -1683,9 +1851,6 @@ def _ocr_empty_component_preserve_policy(
     if component.script_evidence or component.evidence_ids:
         return None
     confidence = float(component.confidence)
-    x1, y1, x2, y2 = (int(value) for value in component.bbox_page)
-    box_width = max(0, x2 - x1)
-    box_height = max(0, y2 - y1)
     if (
         confidence <= 0.60
         and box_width <= 24
@@ -1774,11 +1939,58 @@ def complete_page_coverage(
     associated: dict[str, list[OCRObservationRecord]] = {
         component.component_id: [] for component in components
     }
+    redirected_observations: dict[str, set[str]] = {
+        component.component_id: set() for component in components
+    }
+    superseded_full_observations: dict[str, set[str]] = {
+        component.component_id: set() for component in components
+    }
     for record in full_records:
-        component_ids = tuple(
-            component.component_id
-            for component in components
-            if _bbox_overlap_fraction(record.bbox_page, component.bbox_page) >= 0.18
+        matches = []
+        for component in components:
+            observation_fraction = _bbox_overlap_fraction(
+                record.bbox_page, component.bbox_page
+            )
+            if observation_fraction < 0.18:
+                continue
+            component_fraction = _bbox_overlap_fraction(
+                component.bbox_page, record.bbox_page
+            )
+            component_area = max(
+                1,
+                (component.bbox_page[2] - component.bbox_page[0])
+                * (component.bbox_page[3] - component.bbox_page[1]),
+            )
+            matches.append(
+                (
+                    observation_fraction,
+                    component_fraction,
+                    component_area,
+                    component,
+                )
+            )
+        selected_component = None
+        if len(matches) == 1:
+            selected_component = matches[0][3]
+        elif len(matches) > 1:
+            containing = [item for item in matches if item[0] >= 0.85]
+            if containing:
+                containing.sort(
+                    key=lambda item: (item[2], -item[1], item[3].component_id)
+                )
+                best = containing[0]
+                runner_up_area = containing[1][2] if len(containing) > 1 else None
+                if runner_up_area is None or best[2] <= runner_up_area * 0.80:
+                    selected_component = best[3]
+                    for _obs_fraction, _comp_fraction, area, candidate in containing[1:]:
+                        if area >= best[2] * 1.25:
+                            superseded_full_observations[candidate.component_id].add(
+                                selected_component.component_id
+                            )
+        component_ids = (
+            (selected_component.component_id,)
+            if selected_component is not None
+            else ()
         )
         for component_id in component_ids:
             associated[component_id].append(record)
@@ -1805,8 +2017,39 @@ def complete_page_coverage(
         requests.append(request)
         invocations.append(invocation)
         for record in invocation.observations:
-            associated[component.component_id].append(record)
-            records.append((record, (component.component_id,)))
+            matches = []
+            for candidate in components:
+                observation_fraction = _bbox_overlap_fraction(
+                    record.bbox_page, candidate.bbox_page
+                )
+                component_fraction = _bbox_overlap_fraction(
+                    candidate.bbox_page, record.bbox_page
+                )
+                if max(observation_fraction, component_fraction) >= 0.55:
+                    matches.append(
+                        (
+                            min(observation_fraction, component_fraction),
+                            max(observation_fraction, component_fraction),
+                            candidate,
+                        )
+                    )
+            selected_component = component
+            if len(matches) > 1:
+                matches.sort(
+                    key=lambda item: (-item[0], -item[1], item[2].component_id)
+                )
+                best_score, _best_overlap, best_component = matches[0]
+                runner_up_score = matches[1][0]
+                if best_score >= 0.45 and best_score - runner_up_score >= 0.10:
+                    selected_component = best_component
+            elif len(matches) == 1:
+                selected_component = matches[0][2]
+            associated[selected_component.component_id].append(record)
+            records.append((record, (selected_component.component_id,)))
+            if selected_component.component_id != component.component_id:
+                redirected_observations[component.component_id].add(
+                    selected_component.component_id
+                )
 
     observations = tuple(
         TextObservation(
@@ -1845,7 +2088,31 @@ def complete_page_coverage(
         preserve = (
             None
             if component_observations
-            else _ocr_empty_component_preserve_policy(page_rgb, component)
+            else (
+                ("visual_non_text", "policy:explicit_visual_non_text")
+                if (
+                    redirected_observations[component.component_id]
+                    or superseded_full_observations[component.component_id]
+                )
+                and frozenset(component.detector_sources)
+                <= frozenset(
+                    (
+                        "primary_region_detector",
+                        "negative_region_detector",
+                        "strip_region_detector",
+                    )
+                )
+                else _ocr_empty_component_preserve_policy(
+                    page_rgb,
+                    component,
+                    page_observations=observations,
+                )
+            )
+        )
+        uncertain = classify_empty_primary_candidate(
+            component,
+            has_coverage_observation=bool(component_observations),
+            has_explicit_preserve_policy=preserve is not None,
         )
         entries.append(
             CoverageEntry(
@@ -1856,12 +2123,15 @@ def complete_page_coverage(
                 page_source_sha256=page_source_sha256,
                 bbox_page=component.bbox_page,
                 polygon_page=component.polygon_page,
-                materiality="non_text" if preserve else "material",
+                materiality=(
+                    "non_text" if preserve else "uncertain" if uncertain else "material"
+                ),
                 ocr_attempt_ids=tuple(dict.fromkeys((
                     *full_attempt_ids,
                     *attempts_by_invocation.get(
                         f"{page_id}:coverage:{component.component_id}", ()
                     ),
+                    *(item.attempt_id for item in component_observations),
                 ))),
                 observation_ids=tuple(
                     item.observation_id for item in component_observations
@@ -1872,10 +2142,39 @@ def complete_page_coverage(
                     if component_observations
                     else "explicit_non_dialogue_preserve"
                     if preserve
+                    else "review_required"
+                    if uncertain
                     else "challenged"
                 ),
                 preserve_policy=preserve[1] if preserve else None,
             )
+        )
+    for component, entry in zip(components, entries):
+        if entry.materiality != "material" or entry.observation_ids:
+            continue
+        nearby = sorted(
+            (
+                (
+                    max(
+                        _bbox_overlap_fraction(observation.bbox_page, component.bbox_page),
+                        _bbox_overlap_fraction(component.bbox_page, observation.bbox_page),
+                    ),
+                    observation.observation_id,
+                    tuple(observation.bbox_page),
+                    observation.text[:80],
+                )
+                for observation in observations
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )[:5]
+        logger.warning(
+            "owner coverage material component unresolved: page_id=%s component_id=%s "
+            "bbox=%s detector_sources=%s nearby_observations=%s",
+            page_id,
+            component.component_id,
+            tuple(component.bbox_page),
+            tuple(component.detector_sources),
+            nearby,
         )
     inventory = tuple(
         build_component_inventory_entry(
@@ -1914,7 +2213,10 @@ def complete_page_coverage(
 
 
 def recover_unassociated_observations(
-    page_rgb: "np.ndarray", coverage: PageCoverageResult
+    page_rgb: "np.ndarray",
+    coverage: PageCoverageResult,
+    *,
+    materialize_ambiguous: bool = False,
 ) -> PageCoverageResult:
     from .hash_contract import canonical_page_sha256
     from .model import SourceTextComponent
@@ -1929,9 +2231,15 @@ def recover_unassociated_observations(
     components = list(coverage.components)
     recovery_requests = list(coverage.recovery_requests)
     recovery_decisions = list(coverage.recovery_decisions)
+    recovery_request_ids = {item.request_id for item in recovery_requests}
     existing_recovery_observations = {
         observation_id
         for request in recovery_requests
+        for observation_id in request.observation_ids
+    }
+    pending_recovery_by_observation = {
+        observation_id: request
+        for request in coverage.pending_requests
         for observation_id in request.observation_ids
     }
 
@@ -1990,6 +2298,8 @@ def recover_unassociated_observations(
 
     changed_association = False
     materialize_observations: list["TextObservation"] = []
+    ambiguous_materialization_ids: set[str] = set()
+    materialization_requests: dict[str, CoverageRecoveryRequest] = {}
     for observation in unassociated:
         matches = matching_components(observation)
         index = observations.index(observation)
@@ -2000,6 +2310,57 @@ def recover_unassociated_observations(
             changed_association = True
             continue
         if len(matches) > 1:
+            def _match_score(component: "SourceTextComponent"):
+                observation_fraction = _bbox_overlap_fraction(
+                    observation.bbox_page, component.bbox_page
+                )
+                component_fraction = _bbox_overlap_fraction(
+                    component.bbox_page, observation.bbox_page
+                )
+                return (
+                    min(observation_fraction, component_fraction),
+                    max(observation_fraction, component_fraction),
+                    component,
+                )
+
+            scored_matches = sorted(
+                (_match_score(component) for component in matches),
+                key=lambda item: (-item[0], -item[1], item[2].component_id),
+            )
+            best_score, _best_overlap, best_component = scored_matches[0]
+            runner_up_score = scored_matches[1][0]
+            if best_score >= 0.45 and best_score - runner_up_score >= 0.10:
+                request = request_for(
+                    observation,
+                    attempt_kind="anchored_association_recovery",
+                )
+                decision = build_recovery_decision(
+                    decision_id=f"decision_{request.request_sha256[:20]}",
+                    request=request,
+                    materialized_component_id=None,
+                    attempt_id=observation.attempt_id,
+                    status="succeeded",
+                    reason="associated_to_decisive_geometry_match",
+                    evidence_ids=(observation.observation_id,),
+                    next_strategy=None,
+                )
+                recovery_requests.append(request)
+                recovery_decisions.append(decision)
+                observations[index] = replace(
+                    observation,
+                    component_ids=(best_component.component_id,),
+                )
+                changed_association = True
+                continue
+            if materialize_ambiguous:
+                materialize_observations.append(observation)
+                ambiguous_materialization_ids.add(observation.observation_id)
+                existing_request = pending_recovery_by_observation.get(
+                    observation.observation_id
+                )
+                if existing_request is not None:
+                    materialization_requests[observation.observation_id] = existing_request
+                continue
             if observation.observation_id not in existing_recovery_observations:
                 recovery_requests.append(
                     request_for(observation, attempt_kind="anchored_association_recovery")
@@ -2022,9 +2383,19 @@ def recover_unassociated_observations(
         )
         index = observations.index(observation)
 
-        request = request_for(
-            observation, attempt_kind="unassociated_observation_materialization"
+        is_ambiguous_materialization = (
+            observation.observation_id in ambiguous_materialization_ids
         )
+        request = materialization_requests.get(observation.observation_id)
+        if request is None:
+            request = request_for(
+                observation,
+                attempt_kind=(
+                    "ambiguous_observation_materialization"
+                    if is_ambiguous_materialization
+                    else "unassociated_observation_materialization"
+                ),
+            )
         polygon = polygon_for(observation)
         component_id = "component_" + canonical_json_sha256(
             {
@@ -2038,7 +2409,11 @@ def recover_unassociated_observations(
             materialized_component_id=component_id,
             attempt_id=observation.attempt_id,
             status="succeeded",
-            reason="materialized_from_full_page_observation",
+            reason=(
+                "materialized_from_ambiguous_full_page_observation"
+                if is_ambiguous_materialization
+                else "materialized_from_full_page_observation"
+            ),
             evidence_ids=(observation.observation_id,),
             next_strategy=None,
         )
@@ -2079,7 +2454,9 @@ def recover_unassociated_observations(
             protection_evidence_ids=(observation.observation_id,),
             state="observed",
         )
-        recovery_requests.append(request)
+        if request.request_id not in recovery_request_ids:
+            recovery_requests.append(request)
+            recovery_request_ids.add(request.request_id)
         recovery_decisions.append(decision)
         components.append(component)
         observations[index] = replace(
@@ -2124,27 +2501,68 @@ def recover_unassociated_observations(
 def complete_container_coverage(
     page_rgb: "np.ndarray", coverage: PageCoverageResult
 ) -> PageCoverageResult:
-    from .container_evidence import recover_component_visual_container
+    from .container_evidence import (
+        canonical_component_container_ids,
+        recover_component_visual_container,
+    )
     from .hash_contract import canonical_page_sha256
 
     if canonical_page_sha256(page_rgb) != coverage.page_source_sha256:
         raise CoverageIdentityError("container recovery received different page pixels")
     entries: list[CoverageEntry] = []
+    evidence_by_component: dict[str, dict[str, object]] = {}
+    observations_by_id = {
+        observation.observation_id: observation
+        for observation in coverage.observations
+    }
     changed = False
     for entry in coverage.entries:
-        if entry.container_id or not entry.ocr_attempt_ids:
+        if (
+            entry.container_id
+            or not entry.ocr_attempt_ids
+            or entry.state == "explicit_non_dialogue_preserve"
+        ):
             entries.append(entry)
             continue
+        component_observations = [
+            observations_by_id[observation_id]
+            for observation_id in entry.observation_ids
+            if observation_id in observations_by_id
+        ]
+        if component_observations:
+            semantic_bbox = (
+                min(item.bbox_page[0] for item in component_observations),
+                min(item.bbox_page[1] for item in component_observations),
+                max(item.bbox_page[2] for item in component_observations),
+                max(item.bbox_page[3] for item in component_observations),
+            )
+            semantic_polygon = (
+                (semantic_bbox[0], semantic_bbox[1]),
+                (semantic_bbox[2], semantic_bbox[1]),
+                (semantic_bbox[2], semantic_bbox[3]),
+                (semantic_bbox[0], semantic_bbox[3]),
+            )
+        else:
+            semantic_bbox = entry.bbox_page
+            semantic_polygon = entry.polygon_page
         evidence = recover_component_visual_container(
             page_rgb,
             component_id=entry.component_id,
-            glyph_bbox_page=entry.bbox_page,
-            glyph_polygon_page=entry.polygon_page,
+            glyph_bbox_page=semantic_bbox,
+            glyph_polygon_page=semantic_polygon,
         )
-        entries.append(replace(entry, container_id=evidence["evidence_id"]))
+        evidence_by_component[entry.component_id] = evidence
+        entries.append(entry)
         changed = True
     if not changed:
         return coverage
+    container_ids = canonical_component_container_ids(evidence_by_component)
+    entries = [
+        replace(entry, container_id=container_ids[entry.component_id])
+        if entry.component_id in container_ids
+        else entry
+        for entry in entries
+    ]
     ledger = build_page_coverage_ledger(
         run_id=coverage.run_id,
         origin_execution_id=coverage.origin_execution_id,

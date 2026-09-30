@@ -193,6 +193,37 @@ def _reasons(report):
     return {issue.reason for issue in report.issues}
 
 
+def test_uncertain_source_component_remains_a_terminal_qa_blocker():
+    from ownership.model import ComponentDisposition, SourceTextComponent
+
+    graph = _graph()
+    graph.components.append(
+        SourceTextComponent(
+            component_id="ambiguous_candidate",
+            page_id="page_001",
+            bbox_page=(31, 5, 39, 17),
+            polygon_page=((31, 5), (39, 5), (39, 17), (31, 17)),
+            detector_sources=("primary_region_detector",),
+            confidence=0.27,
+        )
+    )
+    graph.component_dispositions.append(
+        ComponentDisposition(
+            component_id="ambiguous_candidate",
+            decision="uncertain",
+            reason="coverage:empty_uncorroborated_primary_candidate",
+            policy_id="coverage_ambiguous_candidate",
+            policy_bbox_page=(31, 5, 39, 17),
+            policy_evidence_ids=("ocr_attempt",),
+            policy_reason="Human review required after empty Coverage OCR",
+        )
+    )
+
+    report = _evaluate(graph, _composition(), _observation())
+
+    assert "uncertain_source_component_requires_review" in _reasons(report)
+
+
 def test_final_pixel_qa_projects_logical_owner_geometry_to_frame_once():
     from ownership.model import PageCompositionResult
     from qa.final_pixel_observer import FinalPixelObservation

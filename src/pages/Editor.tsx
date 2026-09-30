@@ -499,7 +499,9 @@ export function Editor({
   const saveDisabled =
     !currentPage ||
     pagePipelineBusy ||
-    (pendingCount === 0 && renderPreviewState.status === "fresh");
+    (capabilities.renderPreviewOnSave
+      ? pendingCount === 0 && renderPreviewState.status === "fresh"
+      : pendingCount === 0);
   const runSelectionAwareAction = (action: Parameters<typeof runMaskedAction>[0]) =>
     activeLassoSelection ? runMaskedActionFromLasso(action) : runMaskedAction(action);
 
@@ -530,7 +532,9 @@ export function Editor({
   const saveAndRenderCurrentPage = async () => {
     const targetPageKey = currentPageKey();
     await commitEdits();
-    await renderPreviewPage(targetPageKey);
+    if (capabilities.renderPreviewOnSave) {
+      await renderPreviewPage(targetPageKey);
+    }
   };
   const requestPageChange = useCallback(async (pageIndex: number) => {
     if (onRequestPageChange) {
@@ -712,7 +716,7 @@ export function Editor({
 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* ── Row 1: Header ── */}
-        <div className="flex items-center gap-3 border-b border-border bg-bg-secondary/60 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-3 border-b border-border bg-bg-secondary/60 px-3 py-2">
           <button
             onClick={handleBack}
             className="rounded-lg p-1.5 text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary"
@@ -760,19 +764,28 @@ export function Editor({
           </div>
 
           {/* Undo/Redo + indicador "Não salvo" + Salvar manual + descartar */}
-          <div className="flex items-center gap-1.5">
+          <div className="ml-auto flex min-w-0 basis-full flex-wrap items-center justify-end gap-1.5">
             {workspaceSwitcher ? (
               <div data-editor-preserve-text-selection="true">{workspaceSwitcher}</div>
             ) : null}
             <UndoRedoControls />
             <AutoSaveIndicator />
-            <RenderStatusBadge />
-            {headerActions}
+            {capabilities.renderPreviewOnSave
+              ? <RenderStatusBadge />
+              : <span
+                  className="rounded-lg border border-border bg-bg-tertiary/40 px-2 py-1 text-[10px] text-text-muted"
+                  title="O render final será habilitado quando o renderer do pipeline estiver conectado."
+                >Final indisponível</span>}
+            {headerActions ? (
+              <div className="flex flex-wrap items-center justify-end gap-1.5">{headerActions}</div>
+            ) : null}
             <button
               onClick={() => void saveAndRenderCurrentPage()}
               disabled={saveDisabled}
               className="flex items-center gap-1 rounded-lg border border-status-success/30 bg-status-success/10 px-2.5 py-1 text-[11px] font-medium text-status-success transition-smooth hover:bg-status-success/15 disabled:opacity-30"
-              title="Salvar e renderizar preview final (Ctrl+S)"
+              title={capabilities.renderPreviewOnSave
+                ? "Salvar e renderizar preview final (Ctrl+S)"
+                : "Salvar alterações (Ctrl+S)"}
             >
               <Check size={12} />
               Salvar

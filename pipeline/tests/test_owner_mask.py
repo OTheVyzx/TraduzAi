@@ -145,6 +145,84 @@ def test_operational_owner_mask_requires_verified_component_geometry(tmp_path):
     assert mutation.component_geometry_sha256 == verified.component_geometry_sha256
 
 
+def test_dense_effect_envelope_authorizes_cleanup_without_becoming_text_evidence():
+    from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
+
+    image = np.full((40, 60, 3), 235, dtype=np.uint8)
+    core = np.zeros(image.shape[:2], dtype=np.uint8)
+    core[14:18, 16:20] = 255
+    core[14:18, 25:29] = 255
+    effect = np.zeros_like(core)
+    effect[9:23, 10:36] = 255
+
+    plan = build_owner_mask_plan(
+        image,
+        _single_component_owner(),
+        [
+            OwnerMaskEvidence(
+                evidence_id="outlined_text",
+                component_id="cmp_body_top",
+                glyph_mask=core,
+                effect_support_mask=effect,
+                observation_id="obs_body",
+                line_index=0,
+            )
+        ],
+        owner_component_bboxes_page={"cmp_body_top": (8, 7, 38, 25)},
+    )
+
+    assert np.all(plan.action_mask[effect > 0] > 0)
+    assert plan.coverage_complete is True
+
+
+def test_repair_mask_rebinds_identity_without_changing_component_authority():
+    from inpainter.owner_mask import (
+        OwnerMaskEvidence,
+        build_owner_mask_plan,
+        build_repair_owner_mask_plan,
+    )
+
+    image = np.full((40, 60, 3), 238, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    glyph[14:19, 18:34] = 255
+    owner = _single_component_owner(owner_id="owner_repair_mask")
+    plan = build_owner_mask_plan(
+        image,
+        owner,
+        [
+            OwnerMaskEvidence(
+                evidence_id="glyph_repair",
+                component_id="cmp_body_top",
+                glyph_mask=glyph,
+                observation_id="obs_body",
+                line_index=0,
+            )
+        ],
+        owner_component_bboxes_page={"cmp_body_top": (12, 10, 42, 26)},
+        expected_line_ids=(("obs_body", 0),),
+    )
+    expanded = cv2.dilate(
+        plan.action_mask,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 5)),
+        iterations=1,
+    )
+    expanded[:10, :] = 0
+    expanded[26:, :] = 0
+    expanded[:, :12] = 0
+    expanded[:, 42:] = 0
+
+    repaired = build_repair_owner_mask_plan(
+        plan,
+        expanded,
+        evidence_id="repair-attempt-r1",
+    )
+
+    assert repaired.action_mask_ref != plan.action_mask_ref
+    assert repaired.component_bboxes_page == plan.component_bboxes_page
+    assert repaired.component_geometry_sha256 == plan.component_geometry_sha256
+    np.testing.assert_array_equal(repaired.action_mask, expanded)
+
+
 def test_owner_action_mask_is_union_of_owned_glyph_and_line_evidence():
     from inpainter.owner_mask import OwnerMaskEvidence, build_owner_mask_plan
 
@@ -265,6 +343,89 @@ def test_connected_line_art_crossing_support_is_never_authorized():
     assert confidence < 1.0
     assert "connected_foreground_crosses_support" in provenance
     assert np.any((protected > 0) & (source_glyph > 0))
+
+
+def test_connected_art_overlap_is_revoked_while_independent_glyphs_remain() -> None:
+    process_bands = __import__(
+        "strip.process_bands",
+        fromlist=[
+            "_owner_positive_evidence_excluding_protected",
+            "_owner_protected_evidence",
+        ],
+    )
+    source = np.full((36, 64, 3), 245, dtype=np.uint8)
+    source[12:20, 8:14] = 12
+    source[12:20, 20:26] = 12
+    source[15:18, 26:58] = 12
+    source_glyph = np.zeros(source.shape[:2], dtype=np.uint8)
+    source_glyph[12:20, 8:14] = 255
+    source_glyph[12:20, 20:26] = 255
+
+    protected, _provenance, _confidence = process_bands._owner_protected_evidence(
+        source,
+        owner_component_ids={"cmp_text"},
+        source_glyph_mask=source_glyph,
+        component_bbox_page=(6, 8, 60, 24),
+        foreign_component_masks=(),
+        explicit_protected_masks=(),
+    )
+    safe = process_bands._owner_positive_evidence_excluding_protected(
+        source_glyph,
+        protected,
+    )
+
+    assert np.count_nonzero(safe[12:20, 8:14]) > 0
+    assert np.count_nonzero(safe[12:20, 20:26]) == 0
+    assert np.count_nonzero((safe > 0) & (protected > 0)) == 0
+
+
+def test_source_replacement_releases_only_prior_text_footprint_and_keeps_foreign() -> None:
+    process_bands = __import__(
+        "strip.process_bands",
+        fromlist=["_owner_protection_outside_source_replacement"],
+    )
+    protected = np.zeros((24, 36), dtype=np.uint8)
+    protected[4:20, 4:32] = 255
+    foreign = np.zeros_like(protected)
+    foreign[10:12, 16:19] = 255
+
+    result = process_bands._owner_protection_outside_source_replacement(
+        protected,
+        source_replacement_bbox=(10, 8, 26, 16),
+        foreign_component_masks=(("foreign_owner", foreign),),
+    )
+
+    assert np.count_nonzero(result[8:16, 10:26]) == np.count_nonzero(
+        foreign[8:16, 10:26]
+    )
+    assert np.all(result[4:8, 4:32] == 255)
+    assert np.all(result[10:12, 16:19] == 255)
+
+
+def test_connected_art_protection_is_confined_to_component_geometry():
+    source = np.full((80, 120, 3), 255, dtype=np.uint8)
+    source[36:40, 48:54] = 0
+    source[38:42, 54:116] = 0
+    source_glyph = np.zeros(source.shape[:2], dtype=np.uint8)
+    source_glyph[36:40, 48:54] = 255
+
+    protected, provenance, confidence = getattr(
+        __import__("strip.process_bands", fromlist=["_owner_protected_evidence"]),
+        "_owner_protected_evidence",
+    )(
+        source,
+        owner_component_ids={"cmp_text"},
+        source_glyph_mask=source_glyph,
+        component_bbox_page=(40, 28, 72, 52),
+        foreign_component_masks=(),
+        explicit_protected_masks=(),
+    )
+
+    outside = protected.copy()
+    outside[28:52, 40:72] = 0
+    assert np.count_nonzero(outside) == 0
+    assert "connected_foreground_crosses_support" in provenance
+    assert confidence == 0.0
 
 
 def test_changed_pixels_remain_subset_of_action_mask():
@@ -1560,6 +1721,55 @@ def test_owner_inpaint_rejects_color_outlier_on_uniform_context():
     assert mutation.engine == "aot_fixture+context_guard_median"
 
 
+def test_owner_inpaint_rejects_visible_brightness_seam_on_uniform_context():
+    from inpainter.owner_mask import (
+        OwnerMaskEvidence,
+        build_owner_mask_plan,
+        execute_owner_inpaint,
+    )
+
+    class MildWhiteSeamInpainter:
+        engine_name = "aot_fixture"
+
+        def inpaint(self, image, mask, **_kwargs):
+            result = image.copy()
+            result[mask > 0] = 239
+            return result
+
+    image = np.full((96, 180, 3), 220, dtype=np.uint8)
+    glyph = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.putText(
+        glyph,
+        "TITLE",
+        (35, 52),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.0,
+        255,
+        3,
+        cv2.LINE_AA,
+    )
+    image[glyph > 0] = 12
+    owner = _single_component_owner()
+    plan = build_owner_mask_plan(
+        image,
+        owner,
+        [
+            OwnerMaskEvidence(
+                evidence_id="uniform_title_glyph",
+                component_id="cmp_body_top",
+                glyph_mask=glyph,
+            )
+        ],
+        owner_component_bboxes_page={"cmp_body_top": (30, 24, 150, 60)},
+    )
+
+    mutation = execute_owner_inpaint(image, plan, MildWhiteSeamInpainter())
+
+    changed_pixels = mutation.result_rgb[mutation.action_mask > 0]
+    assert float(changed_pixels.mean()) == pytest.approx(220.0, abs=1.0)
+    assert mutation.engine == "aot_fixture+context_guard_median"
+
+
 def test_owner_inpaint_rejects_localized_color_artifact_on_uniform_dark_context():
     from inpainter.owner_mask import (
         OwnerMaskEvidence,
@@ -1783,6 +1993,52 @@ def test_noop_owner_inpaint_is_rejected_and_successful_mutation_is_immutable():
     assert not mutation.action_mask.flags.writeable
     assert not mutation.protected_art_mask.flags.writeable
     assert not mutation.changed_mask.flags.writeable
+
+
+def test_stroke_expansion_uses_glyph_scale_not_multiline_block_height():
+    from inpainter.owner_mask import _stroke_expansion_radii
+
+    mask = np.zeros((120, 220), dtype=np.uint8)
+    for line_y in (12, 38, 64, 90):
+        for glyph_x in (18, 48, 78, 108, 138):
+            mask[line_y : line_y + 15, glyph_x : glyph_x + 14] = 255
+
+    radii = _stroke_expansion_radii(mask)
+
+    assert 4 <= radii[0] <= 6
+
+
+def test_stroke_expansion_still_scales_for_one_large_display_glyph():
+    from inpainter.owner_mask import _stroke_expansion_radii
+
+    mask = np.zeros((90, 100), dtype=np.uint8)
+    mask[20:70, 30:70] = 255
+
+    assert _stroke_expansion_radii(mask)[0] == 15
+
+
+def test_stroke_expansion_clears_outline_fringe_around_thin_dialogue_glyphs():
+    from inpainter.owner_mask import _stroke_expansion_radii
+
+    mask = np.zeros((120, 220), dtype=np.uint8)
+    for baseline, text in (
+        (25, "LOOK AT THIS"),
+        (50, "ACTING BOTHERED"),
+        (75, "BEHIND MY BACK"),
+        (100, "EVERYTHING"),
+    ):
+        cv2.putText(
+            mask,
+            text,
+            (10, baseline),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            255,
+            1,
+            cv2.LINE_AA,
+        )
+
+    assert _stroke_expansion_radii(mask)[0] >= 5
 
 
 def test_mask_ready_owner_without_action_ref_is_invalid():

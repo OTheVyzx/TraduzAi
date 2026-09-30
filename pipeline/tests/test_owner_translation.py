@@ -169,7 +169,6 @@ def test_translator_receives_one_complete_payload_per_owner() -> None:
             ("b", "SECOND COMPLETE SOURCE BODY"),
         ]
     )
-
     translation_page = owners_to_translation_page(graph)
 
     assert translation_page["page_id"] == "page_001"
@@ -856,8 +855,8 @@ def test_structured_scan_identifier_is_a_verified_pixel_noop() -> None:
     assert binding.preserves_original_pixels
 
 
-def test_fresh_complete_owner_evidence_still_rejects_english_provider_noop() -> None:
-    from ownership.translation import TranslationValidationExhausted, translate_owner_page
+def test_fresh_complete_owner_evidence_preserves_unresolved_english_provider_noop() -> None:
+    from ownership.translation import translate_owner_page
     from translator.language_policy import PageLanguageEvidence
 
     request = _owner_request()
@@ -866,17 +865,20 @@ def test_fresh_complete_owner_evidence_still_rejects_english_provider_noop() -> 
         return owner_request.source_text
 
     unchanged.backend_name = "fixture"
-    with pytest.raises(TranslationValidationExhausted):
-        translate_owner_page(
-            (request,),
-            backends=(unchanged,),
-            page_language_evidence_by_owner={
-                request.owner_id: PageLanguageEvidence.build(
-                    coverage_complete=True,
-                    source_only_tokens=(),
-                )
-            },
-        )
+    result = translate_owner_page(
+        (request,),
+        backends=(unchanged,),
+        page_language_evidence_by_owner={
+            request.owner_id: PageLanguageEvidence.build(
+                coverage_complete=True,
+                source_only_tokens=(),
+            )
+        },
+    )
+
+    assert result.bindings == ()
+    assert result.attempts
+    assert all(attempt.status == "rejected" for attempt in result.attempts)
 
 
 def test_translation_binding_preserves_owner_and_hash_chain() -> None:
@@ -932,7 +934,9 @@ def test_every_declared_translation_route_receives_exactly_one_binding(
     assert [binding.owner_id for binding in result.bindings] == [request.owner_id]
 
 
-def test_invalid_english_targets_exhaust_without_binding() -> None:
+def test_invalid_english_targets_exhaust_without_binding(tmp_path: Path) -> None:
+    import json
+    import main
     from ownership.translation import TranslationValidationExhausted, translate_owner
 
     request = _owner_request()
@@ -941,11 +945,65 @@ def test_invalid_english_targets_exhaust_without_binding() -> None:
         return owner_request.source_text
 
     unchanged.backend_name = "fixture"
+    recorder = main._PipelineTiming(work_dir=tmp_path, run_id="translation-attempts")
     with pytest.raises(TranslationValidationExhausted) as exc:
-        translate_owner(request, backends=(unchanged,), max_attempts_per_backend=2)
+        translate_owner(
+            request,
+            backends=(unchanged,),
+            max_attempts_per_backend=2,
+            performance_recorder=recorder,
+        )
 
     assert len(exc.value.attempts) == 2
     assert all(attempt.status == "rejected" for attempt in exc.value.attempts)
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "translation_attempts.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert len(rows) == 2
+    assert {row["owner_id"] for row in rows} == {request.owner_id}
+    assert all(row["validation_result"] == "rejected" for row in rows)
+    assert all(row["validator_code"] for row in rows)
+    assert all(row["source_text_hash"] == request.source_payload_sha256 for row in rows)
+
+
+def test_one_exhausted_owner_does_not_discard_valid_owner_binding() -> None:
+    from ownership.translation import (
+        OwnerTranslationRequest,
+        apply_owner_translation_result,
+        translate_owner_page,
+    )
+
+    graph = _graph(
+        [
+            ("valid", "THE PLAYER HAS 10 KILLS"),
+            ("invalid", "THE ENEMY HAS 10 KILLS"),
+        ]
+    )
+    for owner in graph.owners:
+        owner.state = "owned"
+    requests = tuple(
+        OwnerTranslationRequest.from_graph(graph, owner.owner_id)
+        for owner in graph.owners
+    )
+
+    def backend(owner_request, _variant):
+        if owner_request.owner_id == "owner_valid":
+            return "O JOGADOR TEM 10 ABATES"
+        return owner_request.source_text
+
+    backend.backend_name = "fixture"
+    result = translate_owner_page(requests, backends=(backend,))
+    merged = apply_owner_translation_result(graph, result)
+
+    assert [binding.owner_id for binding in result.bindings] == ["owner_valid"]
+    owners = {owner.owner_id: owner for owner in merged.owners}
+    assert owners["owner_valid"].state == "target_ready"
+    assert owners["owner_invalid"].state == "owned"
+    assert owners["owner_invalid"].translated_payload is None
+    merged.require_valid(mode="enforce")
 
 
 def test_bulk_adapter_never_cross_assigns_owner_payloads() -> None:

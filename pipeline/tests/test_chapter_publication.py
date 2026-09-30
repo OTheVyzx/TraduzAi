@@ -33,6 +33,7 @@ from ownership.publication import (
 from strip.page_pipeline import (
     OriginalPageSnapshot,
     PageExecutionResult,
+    _terminal_proof_bindings,
     adapt_page_execution_result_to_output_page,
     run_page_owner_pipeline,
 )
@@ -187,6 +188,7 @@ def _verified_result(root: Path, marker: ArtifactGenerationMarker) -> PageExecut
     )
     final_page = FinalPageSnapshot.from_artifact(final_ref, root)
     bindings = candidate.translations
+    terminal_bindings = _terminal_proof_bindings(bindings, ())
     proof = TerminalPixelProof.build(
         run_id=request.run_id,
         execution_id=request.execution_id,
@@ -195,9 +197,15 @@ def _verified_result(root: Path, marker: ArtifactGenerationMarker) -> PageExecut
         final_page_pixel_sha256=final_ref.pixel_sha256,
         cleanup_base_sha256="1" * 64,
         composition_sha256="2" * 64,
-        translation_binding_sha256s=tuple(item.translation_binding_sha256 for item in bindings),
-        source_payload_sha256s=tuple(item.source_payload_sha256 for item in bindings),
-        target_payload_sha256s=tuple(item.target_payload_sha256 for item in bindings),
+        translation_binding_sha256s=tuple(
+            item.translation_binding_sha256 for item in terminal_bindings
+        ),
+        source_payload_sha256s=tuple(
+            item.source_payload_sha256 for item in terminal_bindings
+        ),
+        target_payload_sha256s=tuple(
+            item.target_payload_sha256 for item in terminal_bindings
+        ),
         target_glyph_patch_sha256s=(),
         target_materialization_sha256s=(),
         final_replacement_verdict_sha256s=(),
@@ -225,6 +233,17 @@ def _verified_result(root: Path, marker: ArtifactGenerationMarker) -> PageExecut
         final_page=final_page,
         terminal_proof=proof,
     )
+
+
+def test_terminal_pixel_proof_v1_round_trip_preserves_payload_and_hash(tmp_path):
+    root, marker = _generation(tmp_path)
+    proof = _verified_result(root, marker).terminal_proof
+    payload = proof.to_dict()
+
+    rebuilt = TerminalPixelProof.from_dict(payload)
+
+    assert rebuilt.to_dict() == payload
+    assert rebuilt.proof_sha256 == proof.proof_sha256
 
 
 def test_page_candidate_transaction_persists_pointer_and_reopens_verified_result(tmp_path):
@@ -286,7 +305,9 @@ def test_page_evidence_ref_rejects_tampered_pointer_snapshot_or_asset(tmp_path, 
     elif tamper == "evidence":
         (root / Path(ref.page_execution_evidence_relative_path)).write_text("{}", encoding="utf-8")
     else:
-        Image.new("RGB", (140, 90), (0, 0, 0)).save(root / "translated" / "page_001.png")
+        Image.new("RGB", (140, 90), (0, 0, 0)).save(
+            root / ".page-generations" / ref.page_id / ref.page_generation_id / "final.png"
+        )
 
     with pytest.raises(PageArtifactIntegrityError):
         ref.read_verified(root)
@@ -402,7 +423,107 @@ def test_wrap_up_builds_self_contained_bundle_that_reopens_after_publication(tmp
 
     assert staged.receipt.receipt_sha256 == bundle.publication_receipt.receipt_sha256
     assert reopened.verified_inputs.sha256 == bundle.verified_inputs_sha256
-    assert reopened.export_manifest.pages[0].translated_path == "translated/page_001.png"
+    assert reopened.export_manifest.pages[0].translated_path == (
+        ".page-generations/page_001/page-generation-001/final.png"
+    )
+
+
+def test_wrap_up_preserves_final_project_qa_contracts(tmp_path):
+    import main
+
+    root, marker = _generation(tmp_path)
+    result = _verified_result(root, marker)
+    ref = PageCandidateTransaction(
+        private_execution_root=root,
+        run_id=result.request.run_id,
+        execution_id=result.request.execution_id,
+        page_id=result.page_id,
+        artifact_store_id=marker.artifact_store_id,
+        generation_id=marker.generation_id,
+        page_generation_id="page-generation-001",
+        transaction_id="transaction-001",
+    ).commit_verified_generation(result)
+    manifest = ChapterSourceManifest.from_extracted_pages(
+        (root / "originals" / "page_001.png",), root,
+        run_id=marker.run_id, execution_id=marker.execution_id,
+    )
+    inputs = main._project_inputs_from_output_pages(
+        manifest,
+        [adapt_page_execution_result_to_output_page(result, evidence_ref=ref)],
+        private_execution_root=root,
+    )
+    final_project = {
+        "schema_version": 12,
+        "owner_graph_status": "verified",
+        "qa": {
+            "export_gate": {"status": "PASS", "allowed": True, "issues": []},
+            "functional_export_gate": {
+                "status": "PASS",
+                "allowed": True,
+                "issues": [],
+            },
+            "final_pixel_reports": [
+                {
+                    "page_id": "page_001",
+                    "artifact_path": str(root / "translated" / "001.png"),
+                    "persisted_sha256": "0" * 64,
+                }
+            ],
+        },
+        "paginas": [
+            {
+                "numero": 1,
+                "page_id": "page_001",
+                "image_layers": {
+                    "rendered": {
+                        "path": "translated/001.png",
+                        "visible": True,
+                    }
+                },
+                "text_layers": [{"owner_id": "owner-001", "render_completed": True}],
+            }
+        ],
+    }
+
+    bundle = main._wrap_up_verified_owner_pages(
+        inputs,
+        source_private_execution_root=root,
+        final_project_payload=final_project,
+        final_qa_report_payload={
+            "summary": {"total": 0, "export_gate_status": "PASS"},
+            "export_gate": final_project["qa"]["export_gate"],
+            "issues": [],
+        },
+    )
+    published_project = json.loads(
+        (bundle.runtime_staging_root / "project.json").read_text(encoding="utf-8")
+    )
+
+    assert published_project["schema_version"] == 1
+    expected_final = VerifiedProjectInputs.read_verified(
+        bundle.runtime_staging_root
+    ).pages[0].final_artifact
+    assert published_project["qa"]["export_gate"] == final_project["qa"]["export_gate"]
+    assert published_project["qa"]["functional_export_gate"] == (
+        final_project["qa"]["functional_export_gate"]
+    )
+    assert published_project["qa"]["final_pixel_reports"][0]["artifact_path"] == (
+        expected_final.relative_path
+    )
+    assert published_project["qa"]["final_pixel_reports"][0]["persisted_sha256"] == (
+        expected_final.file_sha256
+    )
+    assert published_project["paginas"][0]["text_layers"] == (
+        final_project["paginas"][0]["text_layers"]
+    )
+    assert published_project["paginas"][0]["image_layers"]["rendered"]["path"] == (
+        expected_final.relative_path
+    )
+    assert published_project["paginas"][0]["page_execution_evidence"]
+    published_qa = json.loads(
+        (bundle.runtime_staging_root / "qa_report.json").read_text(encoding="utf-8")
+    )
+    assert published_qa["export_gate"] == final_project["qa"]["export_gate"]
 
 
 def test_verified_strip_boundary_calls_run_chapter_once_then_returns_only_frozen_inputs(tmp_path):
@@ -532,3 +653,27 @@ def test_recover_chapter_publication_restores_interrupted_journal(tmp_path):
     assert json.loads((public / "publication_receipt.json").read_text(encoding="utf-8")) == {
         "generation": "old"
     }
+
+def test_publication_replace_retries_transient_windows_permission_lock(tmp_path, monkeypatch):
+    from ownership import publication
+
+    source = tmp_path / "publication.wal.tmp"
+    target = tmp_path / "publication.wal.json"
+    source.write_bytes(b"journal")
+    real_replace = publication.os.replace
+    calls = 0
+
+    def transient_replace(src, dst):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise PermissionError(13, "transient scanner lock", str(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(publication.os, "replace", transient_replace)
+    monkeypatch.setattr(publication.time, "sleep", lambda _seconds: None)
+
+    publication._replace_with_transient_retry(source, target)
+
+    assert calls == 3
+    assert target.read_bytes() == b"journal"

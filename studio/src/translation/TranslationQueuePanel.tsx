@@ -1,4 +1,5 @@
-import { Check, Circle, Clock3, ListFilter } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Check, Circle, Clock3, ListFilter, Search } from "lucide-react";
 import type { StudioProject, TranslationStatus } from "../project/studioProject";
 import {
   buildTranslationQueue,
@@ -48,8 +49,13 @@ export function TranslationQueuePanel({
   onFilterChange: (filter: TranslationQueueFilter) => void;
   onSelectTarget: (target: TranslationTarget) => void | Promise<void>;
 }) {
+  const [query, setQuery] = useState("");
+  const [textClass, setTextClass] = useState("");
   const progress = calculateTranslationProgress(project);
-  const queue = buildTranslationQueue(project, filter);
+  const textClasses = useMemo(() => [...new Set(project.paginas.flatMap((page) => (
+    page.text_layers.map((layer) => String(layer.content_class ?? layer.tipo ?? "sem classe").trim() || "sem classe")
+  )))].sort((left, right) => left.localeCompare(right, "pt-BR")), [project]);
+  const queue = buildTranslationQueue(project, filter, { query, textClass });
   const pages = project.paginas.flatMap((page, pageIndex) => {
     const items = queue.filter((item) => item.pageIndex === pageIndex);
     return items.length > 0 ? [{ page, pageIndex, items }] : [];
@@ -83,6 +89,29 @@ export function TranslationQueuePanel({
             {label}
           </button>
         ))}
+      </div>
+
+      <div className="space-y-1.5 border-b border-border p-2">
+        <label className="flex items-center gap-1.5 rounded-md border border-border bg-bg-secondary px-2 py-1.5 focus-within:border-accent-cyan/50">
+          <Search size={11} className="shrink-0 text-text-muted" />
+          <input
+            aria-label="Buscar texto na fila"
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            placeholder="Buscar origem, tradução ou motivo"
+            className="min-w-0 flex-1 bg-transparent text-[9px] text-text-primary outline-none placeholder:text-text-muted"
+          />
+        </label>
+        <select
+          aria-label="Filtrar por classe"
+          value={textClass}
+          onChange={(event) => setTextClass(event.currentTarget.value)}
+          className="w-full rounded-md border border-border bg-bg-secondary px-2 py-1.5 text-[9px] text-text-secondary outline-none focus:border-accent-cyan/50"
+        >
+          <option value="">Todas as classes</option>
+          {textClasses.map((value) => <option key={value} value={value}>{value}</option>)}
+        </select>
+        {(query || textClass) && <p className="px-1 text-[9px] text-text-muted">{queue.length} resultado(s) neste filtro</p>}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -142,8 +171,12 @@ function QueueItem({ item, selected, onSelect }: { item: TranslationQueueItem; s
       </div>
       <div className="mt-1 flex items-center gap-2 pl-[22px]">
         <span className="truncate text-[9px] text-text-muted">{item.translated || "Sem tradução"}</span>
-        <span className="ml-auto shrink-0 text-[8px] uppercase tracking-wide text-text-muted/70">{STATUS_LABELS[item.status]}</span>
+        <span className="ml-auto shrink-0 text-[8px] text-text-muted/70">{item.textClass}</span>
+        <span className="shrink-0 text-[8px] uppercase tracking-wide text-text-muted/70">{STATUS_LABELS[item.status]}</span>
       </div>
+      {(item.notes || item.qaFlags.length > 0) && <p className="mt-1 truncate pl-[22px] text-[8px] text-status-warning/80">
+        {[item.notes, ...item.qaFlags].filter(Boolean).join(" · ")}
+      </p>}
     </button>
   );
 }

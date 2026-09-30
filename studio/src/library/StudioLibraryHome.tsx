@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Bell, LoaderCircle } from "lucide-react";
-import traduzaiLogoUrl from "../../../traduzaistudiologo.svg";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { AlertTriangle, LoaderCircle } from "lucide-react";
 import {
   openCoverImageDialog,
   openManualChapterArchiveDialog,
@@ -23,6 +22,16 @@ import { LibraryToolbar } from "./LibraryToolbar";
 import { LibraryRecoveryBanner } from "./LibraryRecoveryBanner";
 import { WorkDialog } from "./WorkDialog";
 import { WorkLibrarySidebar } from "./WorkLibrarySidebar";
+import { WorkInspector } from "./WorkInspector";
+import { selectSelectedWorkChapterMetrics } from "./librarySelectors";
+import {
+  DEFAULT_LIBRARY_PANES,
+  LIBRARY_PANE_STORAGE_KEY,
+  parseLibraryPaneLayout,
+  resizeLibraryPane,
+  type LibraryPaneLayout,
+  type LibraryPaneSide,
+} from "./libraryPaneLayout";
 
 export function StudioLibraryHome({
   document,
@@ -48,6 +57,8 @@ export function StudioLibraryHome({
   onSetThumbnailSize,
   onSetTrackingLanguage,
   initialSelectedChapterPath = null,
+  openWorkDialogRequest = false,
+  onConsumeWorkDialogRequest,
 }: {
   document: StudioLibrary;
   status: LibraryStoreStatus;
@@ -76,6 +87,8 @@ export function StudioLibraryHome({
   onSetThumbnailSize: (size: number) => void;
   onSetTrackingLanguage?: (language: string) => void;
   initialSelectedChapterPath?: string | null;
+  openWorkDialogRequest?: boolean;
+  onConsumeWorkDialogRequest?: () => void;
 }) {
   const [workQuery, setWorkQuery] = useState("");
   const [chapterQuery, setChapterQuery] = useState("");
@@ -83,6 +96,7 @@ export function StudioLibraryHome({
     () => document.works.find((work) => work.id === document.selectedWorkId) ?? null,
     [document.selectedWorkId, document.works],
   );
+  const chapterMetrics = useMemo(() => selectSelectedWorkChapterMetrics(document), [document]);
   const initialChapterId = selectedWork?.chapters.find((chapter) => chapter.projectPath === initialSelectedChapterPath)?.id ?? null;
   const [selectedChapterId, setSelectedChapterId] = useState<string | null>(initialChapterId);
   const [workDialogOpen, setWorkDialogOpen] = useState(false);
@@ -91,14 +105,94 @@ export function StudioLibraryHome({
   const [createChapterDialogOpen, setCreateChapterDialogOpen] = useState(false);
   const [linkWorkId, setLinkWorkId] = useState<string | null>(null);
   const [updatesOpen, setUpdatesOpen] = useState(false);
+  const libraryLayoutRef = useRef<HTMLDivElement>(null);
+  const activeResizeCleanupRef = useRef<(() => void) | null>(null);
+  const [paneLayout, setPaneLayout] = useState<LibraryPaneLayout>(() => {
+    if (typeof window === "undefined") return DEFAULT_LIBRARY_PANES;
+    return parseLibraryPaneLayout(window.localStorage.getItem(LIBRARY_PANE_STORAGE_KEY), window.innerWidth);
+  });
   const [missingProjectPaths, setMissingProjectPaths] = useState<Set<string>>(new Set());
   const linkingWork = document.works.find((work) => work.id === linkWorkId) ?? null;
+
+  useEffect(() => () => activeResizeCleanupRef.current?.(), []);
+
+  const persistPaneLayout = (next: LibraryPaneLayout) => {
+    if (typeof window !== "undefined") window.localStorage.setItem(LIBRARY_PANE_STORAGE_KEY, JSON.stringify(next));
+  };
+
+  const updatePaneLayout = (side: LibraryPaneSide, delta: number) => {
+    const availableWidth = libraryLayoutRef.current?.clientWidth ?? window.innerWidth;
+    setPaneLayout((current) => {
+      const next = resizeLibraryPane(current, side, delta, availableWidth);
+      persistPaneLayout(next);
+      return next;
+    });
+  };
+
+  const beginPaneResize = (side: LibraryPaneSide, event: PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    activeResizeCleanupRef.current?.();
+    const startX = event.clientX;
+    const startLayout = paneLayout;
+    const availableWidth = libraryLayoutRef.current?.clientWidth ?? window.innerWidth;
+    let latest = startLayout;
+    const move = (moveEvent: globalThis.PointerEvent) => {
+      latest = resizeLibraryPane(startLayout, side, moveEvent.clientX - startX, availableWidth);
+      setPaneLayout(latest);
+    };
+    const cleanup = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      globalThis.document.body.classList.remove("studio-library-pane-resizing");
+      activeResizeCleanupRef.current = null;
+    };
+    const finish = () => {
+      persistPaneLayout(latest);
+      cleanup();
+    };
+    globalThis.document.body.classList.add("studio-library-pane-resizing");
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    activeResizeCleanupRef.current = cleanup;
+  };
+
+  const handlePaneDividerKey = (side: LibraryPaneSide, event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Home") {
+      event.preventDefault();
+      setPaneLayout((current) => {
+        const next = { ...current, [side]: DEFAULT_LIBRARY_PANES[side] };
+        persistPaneLayout(next);
+        return next;
+      });
+      return;
+    }
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    updatePaneLayout(side, event.key === "ArrowRight" ? 12 : -12);
+  };
+
+  const resetPaneDivider = (side: LibraryPaneSide) => {
+    setPaneLayout((current) => {
+      const next = { ...current, [side]: DEFAULT_LIBRARY_PANES[side] };
+      persistPaneLayout(next);
+      return next;
+    });
+  };
   useEffect(() => {
     setSelectedChapterId(
       selectedWork?.chapters.find((chapter) => chapter.projectPath === initialSelectedChapterPath)?.id ?? null,
     );
     setChapterQuery("");
   }, [initialSelectedChapterPath, selectedWork?.id]);
+
+  useEffect(() => {
+    if (!openWorkDialogRequest) return;
+    setEditingWorkId(null);
+    setWorkDialogOpen(true);
+    onConsumeWorkDialogRequest?.();
+  }, [onConsumeWorkDialogRequest, openWorkDialogRequest]);
 
   const projectPathSignature = useMemo(
     () => document.works.flatMap((work) => work.chapters.map((chapter) => chapter.projectPath)).join("\u0000"),
@@ -177,13 +271,14 @@ export function StudioLibraryHome({
 
   return (
     <main className="studio-home">
-      <div className="studio-library-topbar">
-        <img src={traduzaiLogoUrl} alt="TraduzAI Studio" />
-        <span>Biblioteca local</span>
-        {status === "saving" && <small>Salvando catálogo…</small>}
-      </div>
-
-      <div className="studio-library-layout">
+      <div
+        ref={libraryLayoutRef}
+        className="studio-library-layout"
+        style={{
+          "--studio-library-left-pane": `${paneLayout.left}px`,
+          "--studio-library-right-pane": `${paneLayout.right}px`,
+        } as CSSProperties}
+      >
         <WorkLibrarySidebar
           works={document.works}
           selectedWorkId={document.selectedWorkId}
@@ -196,7 +291,29 @@ export function StudioLibraryHome({
           }}
         />
 
+        <div
+          className="studio-library-pane-divider studio-library-pane-divider-left"
+          role="separator"
+          aria-label="Redimensionar painel de obras"
+          aria-orientation="vertical"
+          aria-valuemin={220}
+          aria-valuemax={480}
+          aria-valuenow={paneLayout.left}
+          tabIndex={0}
+          onPointerDown={(event) => beginPaneResize("left", event)}
+          onKeyDown={(event) => handlePaneDividerKey("left", event)}
+          onDoubleClick={() => resetPaneDivider("left")}
+        />
+
         <section className="studio-library-main">
+          {chapterMetrics && (
+            <div className="studio-library-chapter-metrics" aria-label="Métricas dos capítulos">
+              <article><span className="studio-library-chapter-metric-line"><strong>{chapterMetrics.totalChapters}</strong><span>Capítulos totais</span></span></article>
+              <article><span className="studio-library-chapter-metric-line"><strong>{chapterMetrics.translatedChapters}</strong><span>Traduzidos</span></span></article>
+              <article><span className="studio-library-chapter-metric-line"><strong>{chapterMetrics.editingChapters}</strong><span>Em edição</span></span></article>
+              <article><span className="studio-library-chapter-metric-line"><strong>{chapterMetrics.reviewChapters}</strong><span>Em revisão</span></span></article>
+            </div>
+          )}
           <LibraryToolbar
             title={selectedWork?.title ?? "Nenhuma obra selecionada"}
             chapterCount={selectedWork?.chapters.length ?? 0}
@@ -206,6 +323,7 @@ export function StudioLibraryHome({
             onQueryChange={setChapterQuery}
             onSetView={onSetChapterView}
             onSetThumbnailSize={onSetThumbnailSize}
+            onOpenUpdates={() => setUpdatesOpen(true)}
             onEditWork={selectedWork ? () => {
               setEditingWorkId(selectedWork.id);
               setWorkDialogOpen(true);
@@ -219,12 +337,6 @@ export function StudioLibraryHome({
             saving={status === "saving"}
             onSaveRecoveredCopy={() => onSaveRecoveredCopy?.()}
           />
-
-          <div className="flex justify-end border-b border-zinc-800 px-5 py-2">
-            <button type="button" className="inline-flex items-center gap-2 rounded border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800" onClick={() => setUpdatesOpen(true)}>
-              <Bell size={14} /> Atualizações
-            </button>
-          </div>
 
           {recoveryAvailable && (
             <div className="studio-library-recovery" role="status">
@@ -256,6 +368,20 @@ export function StudioLibraryHome({
 
           {error && <p className="studio-home-error">{error}</p>}
         </section>
+        <div
+          className="studio-library-pane-divider studio-library-pane-divider-right"
+          role="separator"
+          aria-label="Redimensionar painel de detalhes"
+          aria-orientation="vertical"
+          aria-valuemin={240}
+          aria-valuemax={520}
+          aria-valuenow={paneLayout.right}
+          tabIndex={0}
+          onPointerDown={(event) => beginPaneResize("right", event)}
+          onKeyDown={(event) => handlePaneDividerKey("right", event)}
+          onDoubleClick={() => resetPaneDivider("right")}
+        />
+        <WorkInspector work={selectedWork} onEditWork={selectedWork ? () => { setEditingWorkId(selectedWork.id); setWorkDialogOpen(true); } : undefined} />
       </div>
 
       <WorkDialog

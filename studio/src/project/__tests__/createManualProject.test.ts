@@ -106,6 +106,7 @@ describe("createManualProject", () => {
     ]);
     expect(result.project.obra).toBe("Obra");
     expect(savedProjectPath).toBe("N:/biblioteca/obra/003/project.json");
+    expect(result.project.consumer_source_path).toBe("N:/entrada/capitulo.cbz");
     expect(result.project.paginas[0].image_layers.base?.path).toBe("original/001.png");
     expect(result.preparedPages).toEqual(pages);
   });

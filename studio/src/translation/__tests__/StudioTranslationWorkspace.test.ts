@@ -12,6 +12,7 @@ import type { StudioProject } from "../../project/studioProject";
 import { GlossaryPanel } from "../GlossaryPanel";
 import {
   StudioTranslationWorkspace,
+  createRetypesetLayoutRequest,
   createTranslationPatch,
   findAdjacentTranslationTarget,
   findNextPendingTranslationTarget,
@@ -98,6 +99,26 @@ describe("StudioTranslationWorkspace", () => {
     });
   });
 
+  it("builds a renderer-owned layout request without invalidating source analysis", () => {
+    const layer = {
+      ...createProject().paginas[0].text_layers[0],
+      owner_id: "owner-001",
+      translated: "Primeiro corrigido",
+      layout_bbox: [1, 2, 101, 82] as [number, number, number, number],
+      style: { fonte: "Comic Neue", tamanho: 31, alinhamento: "center" as const },
+    };
+
+    expect(createRetypesetLayoutRequest(layer)).toEqual({
+      ownerId: "owner-001",
+      layoutRequest: {
+        owner_id: "owner-001",
+        text: "Primeiro corrigido",
+        layout_bbox: [1, 2, 101, 82],
+        style: { fonte: "Comic Neue", tamanho: 31, alinhamento: "center" },
+      },
+    });
+  });
+
   it("navigates blocks with Alt arrows and reserves Ctrl+Enter for confirm-and-next", () => {
     const project = createProject();
 
@@ -148,11 +169,13 @@ describe("StudioTranslationWorkspace", () => {
     }));
     const workspace = renderToStaticMarkup(createElement(StudioTranslationWorkspace, {
       project,
+      projectPath: "N:/p/project.json",
       layer,
       onChange: () => undefined,
       onConfirmNext: () => undefined,
       onNavigateBlock: () => undefined,
       onUpdateGlossary: () => undefined,
+      error: "Falha ao confirmar composição",
     }));
     const glossary = renderToStaticMarkup(createElement(GlossaryPanel, {
       glossary: { Murim: "mundo marcial" },
@@ -168,7 +191,21 @@ describe("StudioTranslationWorkspace", () => {
     expect(workspace).toContain("Tradução manual");
     expect(workspace).toContain("Glossário do projeto");
     expect(workspace).toContain('data-editor-preserve-text-selection="true"');
+    expect(workspace).toContain("Falha ao confirmar composição");
     expect(glossary).toContain("Murim");
     expect(glossary).toContain("mundo marcial");
+  });
+
+  it("surfaces an empty source as an explicit OCR or region review instead of hiding it", () => {
+    const layer = { ...createProject().paginas[0].text_layers[0], original: "" };
+    const html = renderToStaticMarkup(createElement(TranslationInspector, {
+      layer,
+      onChange: () => undefined,
+      onConfirmNext: () => undefined,
+    }));
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Texto de origem vazio");
+    expect(html).toContain("revise o OCR ou a região");
   });
 });

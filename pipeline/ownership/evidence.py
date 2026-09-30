@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
 import re
 import unicodedata
 from typing import Any, Mapping, Sequence
@@ -10,6 +11,10 @@ from typing import Any, Mapping, Sequence
 
 _LETTER_DIGIT_BOUNDARY = re.compile(r"(?<=[^\W\d_])(?=\d)|(?<=\d)(?=[^\W\d_])")
 _TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
+_SPACING_OR_APOSTROPHE = re.compile(r"[\s'\u2018\u2019`]+", re.UNICODE)
+_NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
+_FUZZY_TRUNCATION_MIN_CHARS = 16
+_FUZZY_TRUNCATION_MIN_RATIO = 0.9
 
 
 def _field(value: Any, key: str, default: Any = None) -> Any:
@@ -57,11 +62,42 @@ def normalize_evidence_tokens(text: str) -> tuple[str, ...]:
     return tuple(_TOKEN.findall(normalized))
 
 
+def normalize_evidence_spacing_signature(text: str) -> str:
+    """Collapse only spacing and apostrophe OCR variance, preserving punctuation."""
+
+    normalized = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    return _SPACING_OR_APOSTROPHE.sub("", normalized)
+
+
 def _contains_contiguous(haystack: tuple[str, ...], needle: tuple[str, ...]) -> bool:
     if not needle or len(haystack) <= len(needle):
         return False
     width = len(needle)
     return any(haystack[index : index + width] == needle for index in range(len(haystack) - width + 1))
+
+
+def _contains_fuzzy_signature(haystack: str, needle: str) -> bool:
+    """Match a long truncated OCR fragment despite sparse character mistakes."""
+
+    if len(needle) < _FUZZY_TRUNCATION_MIN_CHARS or len(haystack) <= len(needle):
+        return False
+    haystack_numbers = tuple(_NUMBER.findall(haystack))
+    needle_numbers = tuple(_NUMBER.findall(needle))
+    if needle_numbers and not _contains_contiguous(haystack_numbers, needle_numbers):
+        if haystack_numbers != needle_numbers:
+            return False
+
+    tolerance = max(2, int(round(len(needle) * 0.08)))
+    min_width = max(_FUZZY_TRUNCATION_MIN_CHARS, len(needle) - tolerance)
+    max_width = min(len(haystack), len(needle) + tolerance)
+    for width in range(min_width, max_width + 1):
+        for start in range(0, len(haystack) - width + 1):
+            if (
+                SequenceMatcher(None, haystack[start : start + width], needle).ratio()
+                >= _FUZZY_TRUNCATION_MIN_RATIO
+            ):
+                return True
+    return False
 
 
 def safely_dominates(
@@ -75,7 +111,18 @@ def safely_dominates(
 
     complete_tokens = normalize_evidence_tokens(str(_field(complete, "text", "")))
     truncated_tokens = normalize_evidence_tokens(str(_field(truncated, "text", "")))
-    if not same_region or not _contains_contiguous(complete_tokens, truncated_tokens):
+    complete_signature = normalize_evidence_spacing_signature(str(_field(complete, "text", "")))
+    truncated_signature = normalize_evidence_spacing_signature(str(_field(truncated, "text", "")))
+    material_extension = len(complete_signature) - len(truncated_signature)
+    coherent_truncation = _contains_contiguous(complete_tokens, truncated_tokens) or bool(
+        truncated_signature
+        and material_extension >= max(3, len(truncated_signature) // 6)
+        and (
+            truncated_signature in complete_signature
+            or _contains_fuzzy_signature(complete_signature, truncated_signature)
+        )
+    )
+    if not same_region or not coherent_truncation:
         return False
 
     complete_components = {str(value) for value in _items(complete, "component_ids")}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
+from contextlib import contextmanager
 from dataclasses import replace
 from hashlib import sha256
 import json
@@ -15,6 +16,38 @@ import pytest
 
 PIPELINE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PIPELINE))
+
+
+def test_untranslated_owner_materializes_fail_closed_qa_record():
+    from types import SimpleNamespace
+    from strip.process_bands import _owner_non_rendering_record
+
+    owner = SimpleNamespace(
+        owner_id="owner_unresolved",
+        page_id="page_001",
+        component_ids=(),
+        observation_ids=(),
+        selected_observation_ids=(),
+        semantic_role="dialogue_body",
+        source_payload="SOURCE",
+        translated_payload=None,
+        disposition="owned",
+        state="owned",
+        route_action="translate_inpaint_render",
+    )
+
+    record = _owner_non_rendering_record(
+        SimpleNamespace(components=()),
+        owner,
+    )
+
+    assert record["translation_unresolved"] is True
+    assert record["source_pixels_preserved"] is True
+    assert record["committed"] is False
+    assert record["write_authority"] == "revoked"
+    assert record["action_mask_ref"] is None
+    assert record["visible"] is False
+    assert record["qa_action"] == "BLOCK"
 
 
 def test_new_automatic_run_defaults_to_owner_enforce():
@@ -495,12 +528,24 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
                 render_layout_contract=render_layout_contract,
             )
 
+    measured_stages = []
+
+    class PerformanceRecorder:
+        @contextmanager
+        def measure(self, stage):
+            measured_stages.append(stage)
+            yield
+
+        def increment_counter(self, *_args, **_kwargs):
+            return None
+
     execution = execute_owner_page_graph(
         page,
         graph,
         translator=Translator(),
         inpainter=Inpainter(),
         typesetter=Typesetter(),
+        performance_recorder=PerformanceRecorder(),
     )
 
     assert calls == [
@@ -509,6 +554,13 @@ def test_enforce_executes_one_atomic_page_space_chain_per_owner(monkeypatch):
         ("inpaint", "owner_a"),
         ("typeset", "owner_a"),
     ]
+    assert {
+        "owner_geometry",
+        "owner_mask_creation",
+        "owner_inpaint",
+        "owner_typesetting",
+        "owner_final_render",
+    }.issubset(measured_stages)
     assert len(execution.commits) == 1
     assert execution.commits[0].committed is True
     assert execution.records[0]["owner_id"] == "owner_a"
@@ -1123,6 +1175,69 @@ def test_unsafe_owner_mask_fails_closed_as_review_without_crashing_page(monkeypa
     assert execution.records[0]["visible"] is False
     assert execution.records[0]["route_action"] == "review_required"
     assert "style_v2_raster_contract" not in execution.records[0]
+
+
+def test_enforce_unsafe_mask_emits_invisible_qa_without_legacy_graph_state(monkeypatch):
+    from inpainter.owner_mask import UnsafeOwnerMaskError
+    from ownership.translation import (
+        OwnerTranslationRequest,
+        apply_owner_translation_result,
+        translate_owner_page,
+    )
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import execute_owner_page_graph
+
+    graph = _graph(state="execution_planned")
+    owner = graph.owners[0]
+    owner.route_action = "translate_inpaint_render"
+    owner.translated_payload = None
+    graph.observations[0] = replace(
+        graph.observations[0],
+        layout_bbox_page=(0, 0, 40, 24),
+    )
+    page = np.full((24, 40, 3), 230, dtype=np.uint8)
+    page[7:12, 9:24] = 12
+
+    request = OwnerTranslationRequest.from_graph(graph, owner.owner_id)
+
+    def backend(_request, _variant):
+        return "CORPO DESTINO"
+
+    backend.backend_name = "fixture"
+    translation_result = translate_owner_page((request,), backends=(backend,))
+    graph = apply_owner_translation_result(graph, translation_result)
+
+    monkeypatch.setattr(
+        "inpainter.owner_mask.build_owner_mask_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            UnsafeOwnerMaskError("fixture overbroad mask")
+        ),
+    )
+
+    execution = execute_owner_page_graph(
+        page,
+        graph,
+        translator=object(),
+        inpainter=object(),
+        typesetter=object(),
+        enforce_graph=True,
+        translation_result_override=translation_result,
+    )
+
+    assert execution.commits == ()
+    assert execution.graph.owners[0].disposition == "owned"
+    assert execution.graph.owners[0].state != "review_required"
+    assert execution.graph.owners[0].route_action != "review_required"
+    execution.graph.require_valid(mode="enforce")
+    assert execution.records[0]["visible"] is False
+    assert execution.records[0]["derived_qa_status"] == "review_required"
+    assert execution.records[0]["write_authority"] == "revoked"
+    assert execution.records[0]["translation_binding_sha256"] == (
+        translation_result.bindings[0].translation_binding_sha256
+    )
+    assert execution.records[0]["target_payload_sha256"] == (
+        translation_result.bindings[0].target_payload_sha256
+    )
 
 
 def test_dialogue_without_independent_container_stops_before_inpaint():

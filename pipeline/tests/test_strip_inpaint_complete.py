@@ -106,7 +106,11 @@ class StripInpaintAdapterTests(unittest.TestCase):
         args = apply_round.call_args[0]
         self.assertTrue(np.array_equal(args[0], band))
         self.assertEqual(args[1]["texts"], page["texts"])
-        self.assertEqual(args[1]["_vision_blocks"], page["_vision_blocks"])
+        self.assertEqual(args[1]["_vision_blocks"], [
+            {**block, "text_pixel_bbox": block["bbox"]}
+            for block in page["_vision_blocks"]
+        ])
+        self.assertNotIn("text_pixel_bbox", page["_vision_blocks"][0])
         self.assertEqual(args[2], "fake-inpainter")
         self.assertTrue(page["_strip_used_real_inpaint"])
         self.assertTrue(page["_strip_used_post_cleanup"])
@@ -837,58 +841,26 @@ class StripInpaintAdapterTests(unittest.TestCase):
         self.assertEqual(page["_strip_fast_local_balloon_count"], 0)
         self.assertEqual(page["_strip_remaining_inpaint_blocks"], 1)
 
-    def test_fast_metadata_background_fill_is_enabled_by_default_for_solid_light_ocr_box(self):
-        from inpainter import inpaint_band_image
+    def test_fast_metadata_background_fill_requires_explicit_fast_policy(self):
+        from inpainter import _fast_metadata_background_fill_enabled
 
-        band = np.full((160, 360, 3), 248, dtype=np.uint8)
-        band[18:36, 24:336] = 32
-        band[128:144, 24:336] = 42
-        band[68:84, 118:244] = 12
-        page = {
-            "texts": [
-                {
-                    "id": "t1",
-                    "bbox": [92, 52, 270, 100],
-                    "text_pixel_bbox": [118, 68, 244, 84],
-                    "line_polygons": [[[118, 68], [244, 68], [244, 84], [118, 84]]],
-                    "balloon_bbox": [72, 40, 292, 114],
-                    "tipo": "narracao",
-                    "balloon_type": "textured",
-                    "layout_profile": "top_narration",
-                    "background_rgb": [248, 248, 248],
-                    "text": "READ ON",
-                }
-            ],
-            "_vision_blocks": [{"bbox": [112, 62, 250, 90], "confidence": 0.76}],
-        }
-
-        env = {
-            **_FAST_LOCAL_ENV,
-            "TRADUZAI_STRIP_FAST_WHITE_INPAINT": "0",
-        }
-        with patch.dict(os.environ, env), patch(
-            "vision_stack.runtime._try_koharu_balloon_fill",
-            return_value=None,
-        ), patch(
-            "inpainter._try_solid_background_text_fill",
-            return_value=None,
-        ), patch(
-            "vision_stack.runtime._get_inpainter",
-        ) as get_inpainter, patch(
-            "vision_stack.runtime._apply_inpainting_round",
-            side_effect=lambda image_np, payload, inp: image_np.copy(),
-        ) as apply_round, patch(
-            "vision_stack.runtime._apply_post_inpaint_cleanup_timed",
-            side_effect=lambda original, cleaned, texts, **_kwargs: (cleaned, {}),
+        with patch.dict(
+            os.environ,
+            {
+                "TRADUZAI_INPAINT_POLICY": "pure",
+                "TRADUZAI_STRIP_FAST_METADATA_FILL": "1",
+            },
         ):
-            cleaned = inpaint_band_image(band, page)
+            self.assertFalse(_fast_metadata_background_fill_enabled())
 
-        get_inpainter.assert_not_called()
-        apply_round.assert_not_called()
-        self.assertTrue(np.all(cleaned[72:80, 128:234] == 248))
-        self.assertEqual(int(cleaned[24, 64, 0]), 32)
-        self.assertEqual(page["_strip_fast_local_balloon_count"], 1)
-        self.assertEqual(page["_strip_remaining_inpaint_blocks"], 0)
+        with patch.dict(
+            os.environ,
+            {
+                "TRADUZAI_INPAINT_POLICY": "fast",
+                "TRADUZAI_STRIP_FAST_METADATA_FILL": "1",
+            },
+        ):
+            self.assertTrue(_fast_metadata_background_fill_enabled())
 
     def test_fast_white_balloon_fill_leaves_textured_blocks_for_lama(self):
         from inpainter import inpaint_band_image

@@ -51,8 +51,8 @@ export function LinkWorkDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-6" role="presentation">
-      <section className="w-full max-w-3xl rounded-lg border border-zinc-700 bg-[#1b1c22] p-5 text-zinc-100" role="dialog" aria-modal="true" aria-labelledby="link-work-title">
+    <div className="studio-link-work-backdrop studio-floating-layer" role="presentation">
+      <section className="studio-link-work-dialog w-full max-w-3xl rounded-lg border border-zinc-700 bg-[#1b1c22] p-5 text-zinc-100" role="dialog" aria-modal="true" aria-labelledby="link-work-title">
         <header className="flex items-start justify-between">
           <div><small className="text-zinc-500">Acompanhamento opcional</small><h2 id="link-work-title" className="text-xl font-semibold">Vincular “{work.title}”</h2></div>
           <button type="button" aria-label="Fechar" className="rounded p-2 hover:bg-zinc-800" onClick={onClose}><X size={18} /></button>
@@ -64,7 +64,7 @@ export function LinkWorkDialog({
             <option value="mangadex">MangaDex</option>
           </select>
           <input aria-label="Título ou ID" value={query} onChange={(event) => setQuery(event.currentTarget.value)} placeholder="Título ou ID da obra" className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-3 py-2" />
-          <button type="submit" disabled={loading} className="inline-flex items-center gap-2 rounded bg-amber-500 px-4 font-semibold text-zinc-950"><Search size={15} />{loading ? "Buscando…" : "Buscar"}</button>
+          <button type="submit" disabled={loading} className="inline-flex items-center gap-2 rounded bg-violet-600 px-4 font-semibold text-white"><Search size={15} />{loading ? "Buscando…" : "Buscar"}</button>
         </form>
         {error && <p className="mt-3 text-sm text-rose-300">{error}</p>}
 
@@ -72,10 +72,10 @@ export function LinkWorkDialog({
           {results.map((result) => {
             const id = `${result.provider}:${result.providerId}`;
             return (
-              <button key={id} type="button" onClick={() => { setSelectedId(id); setIdentityConfirmed(false); }} className={`grid grid-cols-[48px_1fr_auto] items-center gap-3 rounded border p-3 text-left ${selectedId === id ? "border-amber-500 bg-amber-500/10" : "border-zinc-800 bg-zinc-900"}`}>
+              <button key={id} type="button" onClick={() => { setSelectedId(id); setIdentityConfirmed(false); }} className={`grid grid-cols-[48px_1fr_auto] items-center gap-3 rounded border p-3 text-left ${selectedId === id ? "border-violet-500 bg-violet-500/10" : "border-zinc-800 bg-zinc-900"}`}>
                 <span className="h-16 overflow-hidden rounded bg-zinc-800">{result.coverUrl && <img className="h-full w-full object-cover" src={result.coverUrl} alt="" />}</span>
                 <span><strong className="block">{result.title}</strong><small className="text-zinc-500">{result.provider === "anilist" ? "AniList" : "MangaDex"} · {result.status}</small></span>
-                {selectedId === id && <CheckCircle2 className="text-amber-400" size={20} />}
+                {selectedId === id && <CheckCircle2 className="text-cyan-400" size={20} />}
               </button>
             );
           })}
@@ -90,7 +90,7 @@ export function LinkWorkDialog({
 
         <footer className="mt-5 flex justify-end gap-2">
           <button type="button" className="rounded border border-zinc-700 px-4 py-2" onClick={onClose}>Cancelar</button>
-          <button type="button" disabled={!selected || !identityConfirmed} className="rounded bg-amber-500 px-4 py-2 font-semibold text-zinc-950 disabled:opacity-40" onClick={() => selected && void Promise.resolve(onConfirm(selected)).then(onClose)}>Confirmar vínculo</button>
+          <button type="button" disabled={!selected || !identityConfirmed} className="rounded bg-violet-600 px-4 py-2 font-semibold text-white disabled:opacity-40" onClick={() => selected && void Promise.resolve(onConfirm(selected)).then(onClose)}>Confirmar vínculo</button>
         </footer>
       </section>
     </div>

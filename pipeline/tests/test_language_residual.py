@@ -210,18 +210,35 @@ def test_final_observer_rejects_root_hash_from_other_persisted_candidate(tmp_pat
         ).observe(candidate, source_language="en")
 
 
-def test_final_probe_records_exact_native_gray_inverted_and_2x_inputs():
+def test_final_probe_records_exact_native_full_page_input_without_full_page_variants():
+    from ownership.ocr_contract import OCRRequest
     from vision_stack import runtime
+    from vision_stack.ocr import OCREngine
 
     pixels = np.arange(13 * 19 * 3, dtype=np.uint8).reshape(13, 19, 3)
     captured: list[np.ndarray] = []
 
-    class Engine:
-        def recognize_batch(self, inputs):
-            captured.extend(np.asarray(item).copy() for item in inputs)
-            return [None for _item in inputs]
+    class Model:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del det, rec, cls
+            captured.append(np.asarray(image).copy())
+            return [[]]
 
-    with patch.object(runtime, "_get_ocr_engine", return_value=Engine()):
+    engine = OCREngine.__new__(OCREngine)
+    engine._backend = "paddleocr"
+    engine._model = Model()
+    root_sha256 = canonical_page_sha256(pixels)
+    request = OCRRequest(
+        run_id="run-final",
+        origin_execution_id="execution-final",
+        page_id="page-final",
+        page_source_sha256=root_sha256,
+        root_input_pixel_sha256=root_sha256,
+        invocation_id="final-qa:page-final",
+        provider_family="final-pixel-ocr",
+    )
+
+    with patch.object(runtime, "_get_ocr_engine", return_value=engine):
         probe = runtime.run_final_pixel_ocr_probe(
             pixels,
             detected_blocks=[],
@@ -230,33 +247,47 @@ def test_final_probe_records_exact_native_gray_inverted_and_2x_inputs():
             page_number=1,
             source_language="en",
             request_scoped=True,
-            root_input_pixel_sha256=canonical_page_sha256(pixels),
+            root_input_pixel_sha256=root_sha256,
+            ocr_request=request,
         )
 
     attempts = {attempt["variant_id"]: attempt for attempt in probe.ocr_attempts}
-    assert set(attempts) == {"full_page", "native", "gray", "inverted", "scale_2x"}
-    for variant_id, physical_input in zip(
-        ("full_page", "native", "gray", "inverted", "scale_2x"), captured
-    ):
-        assert attempts[variant_id]["input_pixel_sha256"] == canonical_page_sha256(
-            physical_input
-        )
-        assert attempts[variant_id]["provider_called"] is True
-        assert attempts[variant_id]["cache_hit"] is False
+    assert set(attempts) == {"full_page"}
+    assert len(captured) == 1
+    assert attempts["full_page"]["input_pixel_sha256"] == canonical_page_sha256(captured[0])
+    assert attempts["full_page"]["provider_called"] is True
+    assert attempts["full_page"]["cache_hit"] is False
 
 
 def test_request_scoped_probe_physically_reads_empty_detector_page():
+    from ownership.ocr_contract import OCRRequest
     from vision_stack import runtime
+    from vision_stack.ocr import OCREngine
 
     pixels = np.full((14, 20, 3), 231, dtype=np.uint8)
     calls: list[int] = []
 
-    class Engine:
-        def recognize_batch(self, inputs):
-            calls.append(len(inputs))
-            return [None for _item in inputs]
+    class Model:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del image, det, rec, cls
+            calls.append(1)
+            return [[]]
 
-    with patch.object(runtime, "_get_ocr_engine", return_value=Engine()):
+    engine = OCREngine.__new__(OCREngine)
+    engine._backend = "paddleocr"
+    engine._model = Model()
+    root_sha256 = canonical_page_sha256(pixels)
+    request = OCRRequest(
+        run_id="run-empty",
+        origin_execution_id="execution-empty",
+        page_id="page-empty",
+        page_source_sha256=root_sha256,
+        root_input_pixel_sha256=root_sha256,
+        invocation_id="final-qa:page-empty",
+        provider_family="final-pixel-ocr",
+    )
+
+    with patch.object(runtime, "_get_ocr_engine", return_value=engine):
         probe = runtime.run_final_pixel_ocr_probe(
             pixels,
             detected_blocks=[],
@@ -265,12 +296,14 @@ def test_request_scoped_probe_physically_reads_empty_detector_page():
             page_number=2,
             source_language="en",
             request_scoped=True,
+            root_input_pixel_sha256=root_sha256,
+            ocr_request=request,
         )
 
     full_page = next(
         attempt for attempt in probe.ocr_attempts if attempt["variant_id"] == "full_page"
     )
-    assert calls == [5]
+    assert calls == [1]
     assert full_page["provider_called"] is True
     assert full_page["cache_hit"] is False
     assert full_page["root_input_pixel_sha256"] == canonical_page_sha256(pixels)

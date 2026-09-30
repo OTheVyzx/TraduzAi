@@ -202,7 +202,21 @@ def _iou(a: BBox, b: BBox) -> float:
     return inter / union
 
 
-def _nms_balloons(balloons: list[Balloon], iou_threshold: float = 0.5) -> list[Balloon]:
+def _intersection_over_smaller_area(a: BBox, b: BBox) -> float:
+    intersection = max(0, min(a.x2, b.x2) - max(a.x1, b.x1)) * max(
+        0, min(a.y2, b.y2) - max(a.y1, b.y1)
+    )
+    smaller = min(_bbox_area(a), _bbox_area(b))
+    return intersection / float(smaller) if smaller > 0 else 0.0
+
+
+def _nms_balloons(
+    balloons: list[Balloon],
+    iou_threshold: float = 0.5,
+    *,
+    intersection_smaller_threshold: float | None = None,
+    require_same_class: bool = False,
+) -> list[Balloon]:
     """Remove balões redundantes; mantém o de maior confidence em cada cluster."""
     if not balloons:
         return []
@@ -222,7 +236,25 @@ def _nms_balloons(balloons: list[Balloon], iou_threshold: float = 0.5) -> list[B
             (
                 index
                 for index, existing in enumerate(kept)
-                if _iou(cand.strip_bbox, existing.strip_bbox) > iou_threshold
+                if (
+                    not require_same_class
+                    or str((cand.metadata or {}).get("candidate_kind") or "text_region")
+                    == str((existing.metadata or {}).get("candidate_kind") or "text_region")
+                )
+                and (
+                    (
+                        _iou(cand.strip_bbox, existing.strip_bbox) >= iou_threshold
+                        if require_same_class
+                        else _iou(cand.strip_bbox, existing.strip_bbox) > iou_threshold
+                    )
+                    or (
+                        intersection_smaller_threshold is not None
+                        and _intersection_over_smaller_area(
+                            cand.strip_bbox, existing.strip_bbox
+                        )
+                        >= intersection_smaller_threshold
+                    )
+                )
             ),
             None,
         )
@@ -883,6 +915,26 @@ def _expand_sparse_dark_negative_candidate(image: np.ndarray, bbox: BBox, *, con
     return expanded
 
 
+def _dark_band_text_is_covered(
+    image: np.ndarray,
+    band_bbox: BBox,
+    detector_bbox: BBox,
+) -> bool:
+    """Check that a precise detector region contains all text behind a broad scan band."""
+    text_boxes = [
+        box
+        for box in _extract_light_text_boxes_for_band_scan(image)
+        if _bbox_contains_center(band_bbox, box, margin=0)
+    ]
+    return bool(text_boxes) and all(
+        detector_bbox.x1 <= box.x1
+        and detector_bbox.y1 <= box.y1
+        and detector_bbox.x2 >= box.x2
+        and detector_bbox.y2 >= box.y2
+        for box in text_boxes
+    )
+
+
 def _merge_negative_detect_candidates(
     image: np.ndarray,
     current: list[Balloon],
@@ -932,13 +984,36 @@ def _merge_negative_detect_candidates(
 
         if best_index >= 0 and best_score >= 0.25:
             existing = merged[best_index]
-            union = _bbox_union([existing.strip_bbox, candidate.strip_bbox])
+            existing_metadata = dict(getattr(existing, "metadata", {}) or {})
+            prefer_detector_bbox = bool(
+                existing_metadata.get("dark_band_scan_candidate")
+                and candidate_metadata.get("negative_detect_candidate")
+                and float(candidate.confidence) > float(existing.confidence)
+                and _dark_band_text_is_covered(
+                    image,
+                    existing.strip_bbox,
+                    candidate.strip_bbox,
+                )
+            )
+            union = (
+                candidate.strip_bbox
+                if prefer_detector_bbox
+                else _bbox_union([existing.strip_bbox, candidate.strip_bbox])
+            )
             if union is None:
                 continue
-            metadata = _merge_provenance_metadata(
-                dict(getattr(existing, "metadata", {}) or {}),
-                dict(getattr(candidate, "metadata", {}) or {}),
+            primary_metadata, secondary_metadata = (
+                (candidate_metadata, existing_metadata)
+                if float(candidate.confidence) >= float(existing.confidence)
+                else (existing_metadata, candidate_metadata)
             )
+            metadata = _merge_provenance_metadata(
+                primary_metadata,
+                secondary_metadata,
+            )
+            for key in ("dark_band_scan_candidate", "negative_detect_candidate"):
+                if existing_metadata.get(key) or candidate_metadata.get(key):
+                    metadata[key] = True
             merged[best_index] = Balloon(
                 strip_bbox=union,
                 confidence=max(float(existing.confidence), float(candidate.confidence)),
@@ -1103,6 +1178,29 @@ def _source_page_height_for_bbox(strip: VerticalStrip, bbox: BBox) -> int:
     return max(1, int(strip.height))
 
 
+def _is_white_balloon_text_candidate(image: np.ndarray, bbox: BBox) -> bool:
+    if image.size == 0:
+        return False
+    height, width = image.shape[:2]
+    x1 = max(0, min(width, int(bbox.x1)))
+    x2 = max(0, min(width, int(bbox.x2)))
+    y1 = max(0, min(height, int(bbox.y1)))
+    y2 = max(0, min(height, int(bbox.y2)))
+    if x2 <= x1 or y2 <= y1:
+        return False
+    evidence = _inner_dark_text_evidence(image, BBox(x1, y1, x2, y2))
+    bright_ratio = float(evidence.get("bright_pixel_ratio", 0.0) or 0.0)
+    dark_ratio = float(evidence.get("dark_pixel_ratio", 0.0) or 0.0)
+    significant_count = int(evidence.get("significant_component_count", 0) or 0)
+    significant_area = int(evidence.get("significant_area", 0) or 0)
+    return bool(
+        bright_ratio >= 0.50
+        and dark_ratio >= 0.035
+        and significant_count >= 3
+        and significant_area >= 180
+    )
+
+
 def _page_location_for_bbox(strip: VerticalStrip, bbox: BBox) -> tuple[int, int, int]:
     """Return (page index, page y origin, page x origin) by maximum overlap."""
 
@@ -1131,7 +1229,8 @@ def _attach_page_region_identities(strip: VerticalStrip, balloons: list[Balloon]
     by_page: dict[str, list[tuple[Balloon, ComponentSeed, list[int], dict]]] = {}
     for balloon in balloons:
         page_index, page_y0, page_x0 = _page_location_for_bbox(strip, balloon.strip_bbox)
-        page_id = f"page_{page_index + 1:03d}"
+        page_number_offset = int(getattr(strip, "page_number_offset", 0) or 0)
+        page_id = f"page_{page_number_offset + page_index + 1:03d}"
         page_chunks = _source_page_chunks(strip)
         page_height = max(1, int(page_chunks[page_index][1] - page_y0))
         page_width = (
@@ -1350,7 +1449,13 @@ def detect_strip_balloons(
                     for item in local_merged
                 )
 
-    after_nms = _nms_balloons(all_balloons, iou_threshold=iou_threshold)
+    page_native = str(getattr(strip, "raster_mode", "")) == "page_map_v1"
+    after_nms = _nms_balloons(
+        all_balloons,
+        iou_threshold=iou_threshold,
+        intersection_smaller_threshold=0.8 if page_native else None,
+        require_same_class=page_native,
+    )
 
     # Filtro pós-NMS: descartar false-positives gigantes
     filtered = []
@@ -1383,6 +1488,14 @@ def detect_strip_balloons(
             else strip.height
         )
         dark_negative_candidate = bool((getattr(balloon, "metadata", {}) or {}).get("negative_detect_candidate"))
+        white_balloon_scan_candidate = (
+            str((getattr(balloon, "metadata", {}) or {}).get("candidate_kind") or "").strip()
+            == "white_balloon_text_region"
+        )
+        white_balloon_text_candidate = white_balloon_scan_candidate or _is_white_balloon_text_candidate(
+            strip.image,
+            balloon.strip_bbox,
+        )
         oversized = _is_oversized(
             balloon.strip_bbox,
             strip.width,
@@ -1396,6 +1509,14 @@ def detect_strip_balloons(
                 strip.width,
                 filter_height,
                 max(max_height_fraction, 0.55),
+                max_width_fraction,
+            )
+        if oversized and white_balloon_text_candidate:
+            oversized = _is_oversized(
+                balloon.strip_bbox,
+                strip.width,
+                filter_height,
+                max(max_height_fraction, 0.90),
                 max_width_fraction,
             )
         if not oversized:

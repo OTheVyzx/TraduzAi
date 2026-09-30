@@ -60,6 +60,10 @@ class VerticalStrip:
     source_page_breaks: list[int] = field(default_factory=list)
     page_x_offsets: list[int] = field(default_factory=list)  # letterbox offset por página
     source_page_widths: list[int] = field(default_factory=list)
+    # Zero-based chapter ordinal of the first local page. Page-native runs use
+    # one local raster while retaining chapter-global page identity.
+    page_number_offset: int = 0
+    raster_mode: str = "physical_strip_v1"
     source_components_by_page: dict[str, list["SourceTextComponent"]] = field(
         default_factory=dict
     )

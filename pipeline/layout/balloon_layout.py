@@ -3772,7 +3772,7 @@ def _derive_connected_visual_boxes(
     position_reasoner = "heuristic"
     reasoner_model = ""
     reasoner_notes = ""
-    # Otimização: se a heurística já é muito confiável, não precisamos do Ollama (economiza ~30s por bloco)
+    # Preserve the high-confidence geometric result and its diagnostic note.
     if position_confidence >= 0.88:
         return {
             "connected_text_groups": text_groups,
@@ -3787,26 +3787,8 @@ def _derive_connected_visual_boxes(
             "connected_reasoner_notes": "Heurística de alta confiança (>88%)",
         }
 
-    reasoned = _refine_connected_position_bboxes_with_ollama(
-        image_bgr,
-        ocr_text_bbox,
-        balloon_bbox,
-        text_groups,
-        normalized_lobes,
-        position_bboxes,
-        orientation,
-        reasoner_settings,
-    )
-    if reasoned:
-        position_bboxes = [[int(v) for v in bbox] for bbox in reasoned.get("position_bboxes", position_bboxes)]
-        llm_confidence = float(reasoned.get("confidence", position_confidence) or position_confidence)
-        position_confidence = round(
-            min(1.0, detection_confidence * 0.3 + group_confidence * 0.25 + llm_confidence * 0.45),
-            3,
-        )
-        position_reasoner = "ollama"
-        reasoner_model = str(reasoned.get("model", "") or "")
-        reasoner_notes = str(reasoned.get("notes", "") or "")
+    # Connected layout is geometric only. Legacy reasoner settings must not
+    # trigger service discovery or model inference in this processing stage.
     return {
         "connected_text_groups": text_groups,
         "connected_lobe_bboxes": normalized_lobes,

@@ -1646,6 +1646,34 @@ def _apply_translation_render_blocks(
     return translated_pages
 
 
+_PT_PT_NUMERIC_LONG_SCALE_RE = re.compile(
+    r"(?<![\w.,])(?P<number>\d+(?:,\d+)?)\s+mil\s+milh(?:ão|ões)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_pt_br_numeric_scale(
+    text: str,
+    target_locale: str,
+) -> tuple[str, list[str]]:
+    """Convert the exact PT-PT billion form to equivalent PT-BR wording."""
+
+    original = str(text or "")
+    if canonical_target_locale(target_locale) != "pt-BR":
+        return original, []
+
+    def _replacement(match: re.Match[str]) -> str:
+        number = match.group("number")
+        singular = bool(re.fullmatch(r"1(?:,0+)?", number))
+        magnitude = "bilhão" if singular else "bilhões"
+        if match.group(0).isupper():
+            magnitude = magnitude.upper()
+        return f"{number} {magnitude}"
+
+    normalized, count = _PT_PT_NUMERIC_LONG_SCALE_RE.subn(_replacement, original)
+    return normalized, (["pt_br_long_scale_normalized"] if count else [])
+
+
 def _apply_target_locale_validation(
     translated_pages: list[dict],
     target_locale: str,
@@ -3400,6 +3428,10 @@ def _translate_google_single_page(
             tipo,
         )
         locked_final, prefix_cleanup_flags = _repair_translation_after_source_prefix_cleanup(texts[index], locked_final)
+        locked_final, numeric_locale_flags = _normalize_pt_br_numeric_scale(
+            locked_final,
+            target_locale or idioma_destino,
+        )
         missing_protected_terms = _missing_protected_terms_after_lock(locked_final, protected_terms)
         if missing_protected_terms:
             protection_flags = _merge_qa_flags(protection_flags, ["unrestored_placeholder"])
@@ -3417,6 +3449,7 @@ def _translate_google_single_page(
             protection_flags,
             mojibake_flags,
             prefix_cleanup_flags,
+            numeric_locale_flags,
             _translation_quality_flags(repaired_sources[index] or original, locked_final, idioma_origem),
         )
         if _should_preserve_untranslated_kana_sfx(repaired_sources[index] or original, locked_final, idioma_origem):
@@ -3743,6 +3776,10 @@ def _translate_with_ollama(
                 tipo,
             )
             locked_final, prefix_cleanup_flags = _repair_translation_after_source_prefix_cleanup(text_data, locked_final)
+            locked_final, numeric_locale_flags = _normalize_pt_br_numeric_scale(
+                locked_final,
+                target_locale or idioma_destino,
+            )
             missing_protected_terms = _missing_protected_terms_after_lock(locked_final, protected_terms)
             if missing_protected_terms:
                 protection_flags = _merge_qa_flags(protection_flags, ["unrestored_placeholder"])
@@ -3754,6 +3791,7 @@ def _translate_with_ollama(
                 protection_flags,
                 mojibake_flags,
                 prefix_cleanup_flags,
+                numeric_locale_flags,
                 _translation_quality_flags(repaired_source or original, locked_final, idioma_origem),
             )
             glossary_hits = list(glossary_hits)
@@ -3941,9 +3979,11 @@ def translate_single_block(block: dict, project: dict):
     was_upper = False if is_cjk else (text == text.upper() and any(c.isalpha() for c in text))
     
     final = _postprocess(translated, was_upper, tipo, source_text=text, lang=source_lang)
+    final, numeric_locale_flags = _normalize_pt_br_numeric_scale(final, target_locale)
 
     qa_flags = _merge_qa_flags(
         block.get("qa_flags"),
+        numeric_locale_flags,
         _translation_quality_flags(text, final, source_lang),
     )
     locale_validation = validate_target_locale(

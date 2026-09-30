@@ -1,0 +1,80 @@
+{
+  "schema": "traduzai.renderer-preference.v1",
+  "candidates": [
+    {
+      "candidate_id": "renderer-candidate:9bc81d15fd73a0fd447c9379945c5f74",
+      "context_ref": { "relative_path": "previews/context.svg", "sha256": "645b9cdc4b5ce13a8dcc8333154b711793681f611b891674ad2ca675f18e46b9" },
+      "hard_safety_passed": true,
+      "layout_plan_sha256": "8f69913bd45dc203894bdf5ef438addacfe9ca9d99ecf33821473dc84c23ff7c",
+      "metrics": {
+        "fixture_kind": "synthetic_contract_test",
+        "font_size_px": 34,
+        "line_advance_px": 37,
+        "line_count": 2,
+        "raster_safety": {
+          "alpha_sha256": "fbf5c3cbf42588e7046ed1c9e534bae625953bcccc7f475ea5f206b1f86534e6",
+          "authorized_body_sha256": "9f865bd653ce8b7784b0996d7d3970130d93287c8aa7fa71cdcf5c7b573525c2",
+          "bbox": [0, 0, 360, 240],
+          "evidence_sha256": "1a1df14e50bad37901646b7d7e57836f5140b6831949b9e5c188a08797c8296b",
+          "ink_pixel_count": 9600,
+          "outside_authorized_body_px": 0,
+          "protected_art_overlap_px": 0,
+          "protected_art_sha256": "ca7d4336ff4641d4604f27cc07d27be3a26085a9d2cf62b8279af473c0bbd992",
+          "schema": "traduzai.raster-safety.v1",
+          "status": "pass"
+        }
+      },
+      "output_sha256": "9ad0ea63eb77c506ee11b7ffe6e33a651bd7415e04e8d5b825fd5c26216a4d37",
+      "owner_id": "fixture:renderer-preference:owner-001",
+      "preference_profile": "uncalibrated",
+      "preview_ref": { "relative_path": "previews/candidate-a.svg", "sha256": "9ad0ea63eb77c506ee11b7ffe6e33a651bd7415e04e8d5b825fd5c26216a4d37" },
+      "recipe_sha256": "98ed4422e3041c7f47e1dd2902ea93b00be9defa44f7243860f378e22b45b571",
+      "schema": "traduzai.renderer-preference.v1",
+      "source_sha256": "645b9cdc4b5ce13a8dcc8333154b711793681f611b891674ad2ca675f18e46b9",
+      "style_sha256": "ecc1fbe161fa3ae18f3184bb63968669a1716670c1ef69c9e9e9eafd625c7999",
+      "target_sha256": "c4830df52d636db475295a8c2c82c9f78e084465a7f711705fdafbbdf21454aa",
+      "target_text": "AÇÃO TOTAL"
+    },
+    {
+      "candidate_id": "renderer-candidate:bca6b1334e6ed8a66198504b879604f2",
+      "context_ref": { "relative_path": "previews/context.svg", "sha256": "645b9cdc4b5ce13a8dcc8333154b711793681f611b891674ad2ca675f18e46b9" },
+      "hard_safety_passed": true,
+      "layout_plan_sha256": "1ce0ee9e827e67bb198da90f1441930d4b26a9be55f3ef9a298a37ebd8ae7158",
+      "metrics": {
+        "fixture_kind": "synthetic_contract_test",
+        "font_size_px": 30,
+        "line_advance_px": 33,
+        "line_count": 1,
+        "raster_safety": {
+          "alpha_sha256": "e7907d0a715443f987b09cb83e85c91bc5a47e4263052a9379b13d0f5414128d",
+          "authorized_body_sha256": "9f865bd653ce8b7784b0996d7d3970130d93287c8aa7fa71cdcf5c7b573525c2",
+          "bbox": [0, 0, 360, 240],
+          "evidence_sha256": "a134e3d7542ef64586ba158788cb7a27a13a0d6938e9d9f6f628a6be33726194",
+          "ink_pixel_count": 6014,
+          "outside_authorized_body_px": 0,
+          "protected_art_overlap_px": 0,
+          "protected_art_sha256": "ca7d4336ff4641d4604f27cc07d27be3a26085a9d2cf62b8279af473c0bbd992",
+          "schema": "traduzai.raster-safety.v1",
+          "status": "pass"
+        }
+      },
+      "output_sha256": "078d1e433e19fa138cbc361337cac0d60762df1e9c7a9279e22cb50a18f4c0d8",
+      "owner_id": "fixture:renderer-preference:owner-001",
+      "preference_profile": "uncalibrated",
+      "preview_ref": { "relative_path": "previews/candidate-b.svg", "sha256": "078d1e433e19fa138cbc361337cac0d60762df1e9c7a9279e22cb50a18f4c0d8" },
+      "recipe_sha256": "6558114ad979acd53f8f425e7f8910a7c05cc19dd6496d2a53e19b8a97598887",
+      "schema": "traduzai.renderer-preference.v1",
+      "source_sha256": "645b9cdc4b5ce13a8dcc8333154b711793681f611b891674ad2ca675f18e46b9",
+      "style_sha256": "ecc1fbe161fa3ae18f3184bb63968669a1716670c1ef69c9e9e9eafd625c7999",
+      "target_sha256": "c4830df52d636db475295a8c2c82c9f78e084465a7f711705fdafbbdf21454aa",
+      "target_text": "AÇÃO TOTAL"
+    }
+  ],
+  "positions": {
+    "A": "renderer-candidate:9bc81d15fd73a0fd447c9379945c5f74",
+    "B": "renderer-candidate:bca6b1334e6ed8a66198504b879604f2"
+  },
+  "randomization_sha256": "a4a44ba2b46f341422ee2deff78215fd93d5c4d3a9309e241340a1c334c8e06b",
+  "preference_profile": "uncalibrated",
+  "comparison_sha256": "6d5b1f3d2c4371d570f1c0c31cdc965c91a6b76cac00f5bfef4cd7edd0d2135d"
+}

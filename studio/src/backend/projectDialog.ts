@@ -136,6 +136,7 @@ export async function createManualChapterFromImages(
         pages,
       }),
       source_path: input.projectJsonPath,
+      consumer_source_path: input.sourcePath,
       output_path: input.projectJsonPath,
     };
     await runtime.save(input.projectJsonPath, project);

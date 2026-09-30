@@ -5,6 +5,7 @@ import { Editor } from "../../../src/pages/Editor";
 import type { EditorSceneVisualNode } from "../../../src/components/editor/stage/editorSceneVisual";
 import { useAppStore, useEditorStore, type Project, type TextLayerStyle } from "../../../src/editor-shared";
 import type { TextEntry } from "../../../src/lib/stores/appStore";
+import { deriveProjectStatusFromReviewState } from "../../../src/lib/pipelineCompletion";
 import { createLegacyEditorBackendAdapter } from "../backend/editorBackendCompat";
 import { getStudioEditorBackend } from "../backend/editorBackend";
 import { downloadStudioPagePsd } from "../export/psd";
@@ -30,6 +31,7 @@ import type { StudioWorkspace } from "./studioWorkspace";
 import { TranslationQueuePanel, type TranslationTarget } from "../translation/TranslationQueuePanel";
 import {
   StudioTranslationWorkspace,
+  createRetypesetLayoutRequest,
   createTranslationPatch,
   findAdjacentTranslationTarget,
   findNextPendingTranslationTarget,
@@ -37,6 +39,10 @@ import {
   translationUsesStudioComposite,
 } from "../translation/StudioTranslationWorkspace";
 import { resolveTranslationStatus, type TranslationQueueFilter } from "../translation/translationQueue";
+import { StudioJobControls } from "../jobs/StudioJobControls";
+import { canonicalStudioProjectIdentity } from "../jobs/StudioJobControls";
+import { StudioFinalExport } from "../export/StudioFinalExport";
+import { createTauriStudioIpcClient } from "../backend/studioIpcTauri";
 
 const DEFAULT_TEXT_STYLE: TextLayerStyle = {
   fonte: "Comic Neue",
@@ -56,6 +62,38 @@ const DEFAULT_TEXT_STYLE: TextLayerStyle = {
   rotacao: 0,
   alinhamento: "center",
 };
+
+const APP_PROJECT_STATUSES = new Set<Project["status"]>([
+  "idle",
+  "setup",
+  "processing",
+  "done",
+  "done_blocked",
+  "needs_review",
+  "error",
+]);
+
+function projectStatusForEditor(project: StudioProject): Project["status"] {
+  const status = project.status;
+  if (typeof status === "string" && APP_PROJECT_STATUSES.has(status as Project["status"])) {
+    return status as Project["status"];
+  }
+  const qa = project.qa && typeof project.qa === "object" ? project.qa as Record<string, unknown> : {};
+  const hasReviewEvidence = [
+    project.completion_status,
+    project.output_review_state,
+    project.export_gate,
+    project.blocking_flags,
+    project.review_flags,
+    project.critical_issue_count,
+    project.review_issue_count,
+    project.needs_review,
+    qa.export_gate,
+  ].some((value) => value !== undefined && value !== null);
+  return hasReviewEvidence
+    ? deriveProjectStatusFromReviewState(project)
+    : "idle";
+}
 
 function canonicalizeTextStyle(style: unknown): TextLayerStyle {
   const record = typeof style === "object" && style !== null ? (style as Record<string, unknown>) : {};
@@ -94,7 +132,7 @@ function repairMaskLeakedIntoInpaint(page: StudioProject["paginas"][number]) {
   };
 }
 
-function toAppProject(project: StudioProject, projectPath: string): Project {
+export function toAppProject(project: StudioProject, projectPath: string): Project {
   const paginas = project.paginas.map((inputPage) => {
     const page = repairMaskLeakedIntoInpaint(inputPage);
     const textLayers = page.text_layers.map((layer, index) => {
@@ -107,8 +145,8 @@ function toAppProject(project: StudioProject, projectPath: string): Project {
         traduzido: layer.traduzido ?? layer.translated ?? "",
         translated: layer.translated ?? layer.traduzido ?? "",
         tipo: layer.tipo ?? "fala",
-        confianca_ocr: layer.confianca_ocr ?? layer.ocr_confidence ?? 1,
-        ocr_confidence: layer.ocr_confidence ?? layer.confianca_ocr ?? 1,
+        confianca_ocr: layer.confianca_ocr ?? layer.ocr_confidence ?? 0,
+        ocr_confidence: layer.ocr_confidence ?? layer.confianca_ocr ?? 0,
         visible: layer.visible !== false,
         locked: layer.locked === true,
         order: layer.order ?? index,
@@ -131,7 +169,9 @@ function toAppProject(project: StudioProject, projectPath: string): Project {
     capitulo: Number(project.capitulo ?? 1),
     idioma_origem: project.idioma_origem ?? "en",
     idioma_destino: project.idioma_destino ?? "pt-BR",
-    qualidade: "normal",
+    qualidade: project.qualidade === "rapida" || project.qualidade === "alta"
+      ? project.qualidade
+      : "normal",
     contexto: {
       sinopse: "",
       genero: [],
@@ -146,11 +186,14 @@ function toAppProject(project: StudioProject, projectPath: string): Project {
       fontes_usadas: [],
     },
     paginas,
-    status: "done",
+    status: projectStatusForEditor(project),
     source_path: projectPath,
+    // The file selected/reopened by the Studio is the write authority. A
+    // promoted pipeline project may retain historical source/output metadata
+    // from its seed, but editor saves must never escape back to that old file.
     output_path: projectPath,
     totalPages: project.paginas.length,
-    mode: "manual",
+    mode: project.mode === "auto" ? "auto" : "manual",
   };
 }
 
@@ -159,12 +202,14 @@ export function StudioSharedEditor({
   projectPath,
   workspace,
   onBack,
+  onProjectPromoted,
   workspaceSwitcher,
 }: {
   project: StudioProject;
   projectPath: string;
   workspace: StudioWorkspace;
   onBack: () => void;
+  onProjectPromoted?: (previousPath: string, promotedPath: string) => void | Promise<void>;
   workspaceSwitcher: ReactNode;
 }) {
   const appProject = useMemo(() => toAppProject(project, projectPath), [project, projectPath]);
@@ -181,6 +226,7 @@ export function StudioSharedEditor({
   const [isExportingPsd, setIsExportingPsd] = useState(false);
   const [translationFilter, setTranslationFilter] = useState<TranslationQueueFilter>("all");
   const [isConfirmingTranslation, setIsConfirmingTranslation] = useState(false);
+  const [translationCommitError, setTranslationCommitError] = useState<string | null>(null);
   const initializedProjectPath = useRef<string | null>(null);
   const recoverySnapshot = useStudioProjectStore((state) => state.recoverySnapshot);
   const restoreRecovery = useStudioProjectStore((state) => state.restoreRecovery);
@@ -419,6 +465,13 @@ export function StudioSharedEditor({
     updatePendingEdit(selectedLayerId, patch as unknown as Partial<TextEntry>);
   }, [selectedLayerId, updatePendingEdit]);
 
+  const refreshProjectAfterBackendMutation = useCallback(async (persistedProjectPath = projectPath) => {
+    if (persistedProjectPath !== projectPath) {
+      await onProjectPromoted?.(projectPath, persistedProjectPath);
+    }
+    await useStudioProjectStore.getState().loadProject(persistedProjectPath);
+  }, [onProjectPromoted, projectPath]);
+
   const confirmTranslationAndAdvance = useCallback(async () => {
     if (!selectedTranslationLayer || isConfirmingTranslation) return;
     const layerId = selectedTranslationLayer.id;
@@ -434,6 +487,7 @@ export function StudioSharedEditor({
     const nextTarget = findNextPendingTranslationTarget(navigationProject, currentPageIndex, layerId);
 
     setIsConfirmingTranslation(true);
+    setTranslationCommitError(null);
     try {
       const editorState = useEditorStore.getState();
       editorState.updatePendingEdit(layerId, patch as unknown as Partial<TextEntry>);
@@ -441,11 +495,29 @@ export function StudioSharedEditor({
       const projectStore = useStudioProjectStore.getState();
       projectStore.setCurrentPageIndex(currentPageIndex);
       await projectStore.patchCurrentTextLayer(layerId, patch);
+      const latestProject = await getStudioEditorBackend().loadProject({ project_path: projectPath });
+      const identity = canonicalStudioProjectIdentity(latestProject, projectPath);
+      if ("error" in identity) throw new Error(identity.error);
+      const request = createRetypesetLayoutRequest({
+        ...selectedTranslationLayer,
+        ...patch,
+      });
+      const nonce = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+      await createTauriStudioIpcClient().retypesetOwner({
+        projectPath,
+        ownerId: request.ownerId,
+        layoutRequest: request.layoutRequest,
+        expectedRevision: identity.expectedRevision,
+        idempotencyKey: `retypeset:${request.ownerId}:r${identity.expectedRevision}:${nonce}`,
+      });
+      await refreshProjectAfterBackendMutation();
       if (nextTarget) await selectTranslationTarget(nextTarget);
+    } catch (error) {
+      setTranslationCommitError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsConfirmingTranslation(false);
     }
-  }, [currentPageIndex, isConfirmingTranslation, selectTranslationTarget, selectedTranslationLayer, translationProject]);
+  }, [currentPageIndex, isConfirmingTranslation, projectPath, refreshProjectAfterBackendMutation, selectTranslationTarget, selectedTranslationLayer, translationProject]);
 
   const navigateTranslationBlock = useCallback(async (direction: "next" | "previous") => {
     const target = findAdjacentTranslationTarget(translationProject, currentPageIndex, selectedLayerId, direction);
@@ -501,18 +573,18 @@ export function StudioSharedEditor({
   return (
     <MemoryRouter>
       {recoverySnapshot && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/75 p-6" role="dialog" aria-modal="true" aria-labelledby="studio-recovery-title">
-          <div className="w-full max-w-md rounded-2xl border border-status-warning/40 bg-bg-secondary p-5 shadow-2xl">
-            <p id="studio-recovery-title" className="text-sm font-semibold text-text-primary">Sessão de recuperação encontrada</p>
-            <p className="mt-2 text-xs leading-5 text-text-muted">
+        <div className="studio-floating-layer studio-editor-recovery-backdrop" role="dialog" aria-modal="true" aria-labelledby="studio-recovery-title">
+          <section className="studio-editor-recovery-panel">
+            <p id="studio-recovery-title" className="studio-editor-recovery-title">Sessão de recuperação encontrada</p>
+            <p className="studio-editor-recovery-copy">
               Escolha recuperar a sessão anterior ou ignorá-la antes de continuar editando este projeto.
             </p>
-            <div className="mt-5 flex justify-end gap-2">
+            <div className="studio-editor-recovery-actions">
               <button
                 type="button"
                 disabled={isProjectSaving}
                 onClick={() => void dismissRecovery()}
-                className="rounded-md border border-border px-3 py-2 text-xs text-text-secondary disabled:opacity-40"
+                className="studio-editor-recovery-secondary"
               >
                 Ignorar
               </button>
@@ -520,12 +592,12 @@ export function StudioSharedEditor({
                 type="button"
                 disabled={isProjectSaving}
                 onClick={() => void restoreRecovery()}
-                className="rounded-md bg-status-warning px-3 py-2 text-xs font-semibold text-black disabled:opacity-40"
+                className="studio-editor-recovery-primary"
               >
                 Recuperar sessão
               </button>
             </div>
-          </div>
+          </section>
         </div>
       )}
       <Editor
@@ -547,12 +619,14 @@ export function StudioSharedEditor({
         layersPanel={workspace === "translation" ? (
           <StudioTranslationWorkspace
             project={translationProject}
+            projectPath={projectPath}
             layer={selectedTranslationLayer}
             onChange={updateTranslationLayer}
             onConfirmNext={confirmTranslationAndAdvance}
             onNavigateBlock={navigateTranslationBlock}
             onUpdateGlossary={updateProjectGlossary}
             isSaving={isConfirmingTranslation}
+            error={translationCommitError}
           />
         ) : <StudioLayersTree onSelectTextLayer={selectSceneTextLayer} />}
         selectionTargetNodeId={selectionTargetNode?.id ?? null}
@@ -569,35 +643,51 @@ export function StudioSharedEditor({
             : null
         }
         onRequestPageChange={changeStudioPage}
-        headerActions={workspace === "editing" ? (
+        headerActions={(
           <>
-            <ChapterToolsPanel
-              project={project}
-              currentPageIndex={currentPageIndex}
-              selectedLayerId={selectedLayerId}
-              onPrepareProject={prepareChapterProject}
-              onNavigateToLayer={navigateToChapterLayer}
-            />
-            <GenerativeFillPanel
+            <StudioJobControls
+              key={`job:${projectPath}`}
+              project={translationProject}
               projectPath={projectPath}
-              page={editorPage as unknown as StudioPage | null}
+              onPersisted={refreshProjectAfterBackendMutation}
             />
-            <StudioRetouchToolbar
+            <StudioFinalExport
+              key={`export:${projectPath}:${translationProject.project_revision ?? "unknown"}`}
+              project={translationProject}
               projectPath={projectPath}
-              page={editorPage as unknown as StudioPage | null}
+              onPersisted={refreshProjectAfterBackendMutation}
             />
-            <button
-              type="button"
-              onClick={() => void exportCurrentPagePsd()}
-              disabled={isExportingPsd || !currentPage}
-              className="flex items-center gap-1 rounded-lg border border-status-success/30 bg-status-success/10 px-2.5 py-1 text-[11px] font-medium text-status-success transition-smooth hover:bg-status-success/15 disabled:opacity-30"
-              title="Salvar pagina atual em PSD"
-            >
-              <FileDown size={12} />
-              Salvar em PSD
-            </button>
+            {workspace === "editing" && (
+              <>
+                <ChapterToolsPanel
+                  project={project}
+                  currentPageIndex={currentPageIndex}
+                  selectedLayerId={selectedLayerId}
+                  onPrepareProject={prepareChapterProject}
+                  onNavigateToLayer={navigateToChapterLayer}
+                />
+                <GenerativeFillPanel
+                  projectPath={projectPath}
+                  page={editorPage as unknown as StudioPage | null}
+                />
+                <StudioRetouchToolbar
+                  projectPath={projectPath}
+                  page={editorPage as unknown as StudioPage | null}
+                />
+                <button
+                  type="button"
+                  onClick={() => void exportCurrentPagePsd()}
+                  disabled={isExportingPsd || !currentPage}
+                  className="flex items-center gap-1 rounded-lg border border-status-success/30 bg-status-success/10 px-2.5 py-1 text-[11px] font-medium text-status-success transition-smooth hover:bg-status-success/15 disabled:opacity-30"
+                  title="Exportação editável para diagnóstico. Não substitui a exportação final aprovada pelo gate."
+                >
+                  <FileDown size={12} />
+                  Exportar PSD editável
+                </button>
+              </>
+            )}
           </>
-        ) : undefined}
+        )}
       />
     </MemoryRouter>
   );

@@ -158,6 +158,8 @@ class ExternalPageAudit:
 
     def to_dict(self):
         payload = asdict(self)
+        for key in ("observations", "source_only_residuals", "unowned_source_residuals"):
+            payload[key] = list(payload[key])
         return payload
 
 
@@ -182,7 +184,11 @@ class ChapterAuditReport:
 
 
 def _tokens(value: str) -> tuple[str, ...]:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
+    normalized = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", value).casefold()
+        if not unicodedata.combining(character)
+    )
     return tuple(re.findall(r"[^\W_]+", normalized, flags=re.UNICODE))
 
 
@@ -251,6 +257,20 @@ def _overlaps(left, right) -> bool:
     return min(left[2], right[2]) > max(left[0], right[0]) and min(left[3], right[3]) > max(left[1], right[1])
 
 
+def _parse_external_ocr_stdout(stdout: str) -> dict[str, Any]:
+    for line in reversed(str(stdout or "").splitlines()):
+        candidate = line.strip()
+        if not candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise ValueError("external OCR child emitted no JSON object")
+
+
 class ExternalOCRProcessRunner:
     def __init__(self, command: Sequence[str] | None = None):
         self.command = tuple(command or (sys.executable, str(Path(__file__).resolve())))
@@ -263,7 +283,7 @@ class ExternalOCRProcessRunner:
         )
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or "external OCR child failed")
-        return json.loads(completed.stdout)
+        return _parse_external_ocr_stdout(completed.stdout)
 
 
 def _audit_external_page(result, final_path: Path, runner: ExternalOCRProcessRunner, source_lang: str):
@@ -414,6 +434,21 @@ def _copy_review_assets(
     }, stage_rows
 
 
+def _resolve_source_manifest_paths(source: Path, manifest: Any) -> tuple[Path, ...]:
+    source = Path(source).resolve(strict=True)
+    images: list[Path] = []
+    for item in manifest.pages:
+        image = source.joinpath(
+            *Path(item.relative_source_path).parts
+        ).resolve(strict=True)
+        try:
+            image.relative_to(source)
+        except ValueError as exc:
+            raise ValueError("source manifest page escapes source root") from exc
+        images.append(image)
+    return tuple(images)
+
+
 def audit_chapter_from_paths(
     *, source: Path, run: Path, report: Path, review_dir: Path,
     source_lang: str, target_lang: str, compare_content_run: Path | None,
@@ -423,10 +458,7 @@ def audit_chapter_from_paths(
     source, run = Path(source).resolve(strict=True), Path(run).resolve(strict=True)
     publication = reopen_verified_publication(run)
     manifest = publication.verified_inputs.source_manifest
-    images = tuple(
-        source.joinpath(*Path(item.relative_path).parts).resolve(strict=True)
-        for item in manifest.pages
-    )
+    images = _resolve_source_manifest_paths(source, manifest)
     mismatches = []
     if len(images) != manifest.source_page_count or canonical_source_tree_sha256(images, source) != manifest.source_tree_sha256:
         mismatches.append("source_manifest_mismatch")

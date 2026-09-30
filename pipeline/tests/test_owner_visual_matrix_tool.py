@@ -692,6 +692,87 @@ def test_runner_injects_runtime_models_dir_without_polluting_versioned_config(tm
     assert "models_dir" not in json.loads(config.read_text(encoding="utf-8"))
 
 
+def test_runner_evidence_is_persisted_outside_published_work_dir(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tools.validate_owner_visual_matrix import _run_entry
+
+    config = tmp_path / "fixture.json"
+    config.write_text(json.dumps({"input_key": "fixture"}), encoding="utf-8")
+    source = tmp_path / "source"
+    source.mkdir()
+    output_root = tmp_path / "output"
+
+    def fake_run(command, **_kwargs):
+        if command[0] == "git":
+            return SimpleNamespace(
+                returncode=0,
+                stdout="a" * 40 if "rev-parse" in command else "",
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("tools.validate_owner_visual_matrix.subprocess.run", fake_run)
+    result = _run_entry(
+        {"entry_id": "entry_a", "work_dir": "entry_a"},
+        tmp_path / "matrix.json",
+        output_root,
+        {"config_path": config, "source_path": source},
+    )
+
+    runner_manifest_path = Path(result["runner_manifest_path"])
+    assert runner_manifest_path == (
+        output_root / "runner_evidence" / "entry_a.json"
+    ).resolve()
+    assert runner_manifest_path.is_file()
+    assert not (output_root / "entry_a" / "run_manifest.json").exists()
+
+
+def test_runner_evidence_hashes_canonical_published_final_artifacts(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tools.validate_owner_visual_matrix import build_runner_evidence
+
+    work_dir = tmp_path / "published"
+    final = work_dir / ".page-generations" / "page_001" / "generation-1" / "final.png"
+    final.parent.mkdir(parents=True)
+    final.write_bytes(b"verified-final")
+    (work_dir / "export_manifest.json").write_text(
+        json.dumps(
+            {
+                "pages": [
+                    {
+                        "page_id": "page_001",
+                        "translated_path": ".page-generations/page_001/generation-1/final.png",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "project.json").write_text("{}", encoding="utf-8")
+    config = tmp_path / "config.json"
+    config.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "tools.validate_owner_visual_matrix.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="a" * 40, stderr=""),
+    )
+    evidence = build_runner_evidence(
+        entry={"entry_id": "entry_a", "work_dir": str(work_dir)},
+        command=["python", "main.py"],
+        completed=SimpleNamespace(returncode=0, stdout="", stderr=""),
+        runtime={"input_sha256": "b" * 64, "config_path": str(config)},
+        effective_config_path=config,
+        started_at="2026-08-10T00:00:00Z",
+        finished_at="2026-08-10T00:01:00Z",
+    )
+
+    assert evidence["final_artifact_sha256"] == {
+        ".page-generations/page_001/generation-1/final.png": sha256(
+            b"verified-final"
+        ).hexdigest()
+    }
+
+
 def _passing_owner_project(artifact: Path) -> dict:
     digest = sha256(artifact.read_bytes()).hexdigest()
     return {
@@ -785,6 +866,22 @@ def test_matrix_blocks_under_source_scale_owner(tmp_path):
     entry, _ = _write_owner_project(tmp_path, project)
 
     assert "under_source_scale" in validate_entry_result(entry, tmp_path)["contracts"]
+
+
+def test_matrix_respects_ok_quality_when_source_scale_is_untrusted(tmp_path):
+    from tools.validate_owner_visual_matrix import validate_entry_result
+
+    artifact = tmp_path / "final.png"
+    artifact.write_bytes(b"pixels")
+    project = _passing_owner_project(artifact)
+    quality = project["paginas"][0]["text_layers"][0]["owner_render_quality"]
+    quality.update({"status": "ok", "source_scale_ratio": 0.26})
+    entry, _ = _write_owner_project(tmp_path, project)
+
+    result = validate_entry_result(entry, tmp_path)
+
+    assert "under_source_scale" not in result["contracts"]
+    assert result["status"] == "PASS"
 
 
 def test_style_matrix_requires_owner_paired_source_and_final(tmp_path):

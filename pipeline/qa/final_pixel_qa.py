@@ -395,6 +395,13 @@ def evaluate_final_pixel_observation(
                 component_ids=(component.component_id,),
                 offenders=(component.component_id,),
             )
+        elif disposition.decision == "uncertain":
+            add(
+                "uncertain_source_component_requires_review",
+                "source_coverage_contract",
+                component_ids=(component.component_id,),
+                offenders=(component.component_id,),
+            )
 
     geometry = composition.page_surface_geometry
     geometry_hash = str(composition.page_surface_geometry_sha256 or "")

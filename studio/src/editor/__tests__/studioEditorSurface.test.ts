@@ -21,4 +21,5 @@ describe("Studio editor surface", () => {
     expect(actions).toEqual([]);
     expect(layerProcessingActionsForMode("traduzai")).toEqual(["ocr", "translate", "inpaint"]);
   });
+
 });

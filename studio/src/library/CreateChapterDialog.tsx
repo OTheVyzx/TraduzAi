@@ -125,7 +125,7 @@ export function CreateChapterDialog({
   };
 
   return (
-    <div className="studio-dialog-backdrop" role="presentation">
+    <div className="studio-dialog-backdrop studio-floating-layer" role="presentation">
       <section className="studio-dialog studio-create-chapter-dialog" role="dialog" aria-modal="true" aria-labelledby="studio-create-chapter-title">
         <header>
           <div><small>{work.title}</small><h2 id="studio-create-chapter-title">Criar capítulo manual</h2></div>

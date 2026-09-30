@@ -81,6 +81,15 @@ def test_source_scale_rejects_16px_render_for_66px_source_ink() -> None:
     assert quality.source_scale_ratio < 0.75
 
 
+def test_page_032_catastrophic_shrink_requires_review_even_with_weak_source_confidence() -> None:
+    quality = _evaluate(
+        source_heights=(51,), source_x_heights=(35.7,),
+        font_size=12, line_heights=(11,), source_confidence=0.0,
+    )
+    assert quality.status == "under_source_scale"
+    assert "catastrophic_source_scale_mismatch" in quality.reasons
+
+
 def test_trusted_container_rejects_eight_percent_height_occupancy() -> None:
     quality = _evaluate(
         source_heights=(),

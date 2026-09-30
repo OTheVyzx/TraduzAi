@@ -232,7 +232,7 @@ class TestConnectedBalloonSplitter:
         if result["connected_balloon"]:
             assert result["orientation"] == "vertical"
 
-    def test_low_confidence_lobe_assignment_blocks_export(self):
+    def test_low_confidence_lobe_assignment_discards_split_and_requires_review(self):
         text = {
             "id": "connected_low_conf",
             "translated": "VOCE ESTA CERTO.",
@@ -255,6 +255,12 @@ class TestConnectedBalloonSplitter:
         gate = evaluate_export_gate({"paginas": [{"text_layers": [text]}]})
 
         assert "lobe_assignment_low_confidence" in text.get("qa_flags", [])
-        assert gate["status"] == "BLOCK"
-        assert gate["allowed"] is False
+        # The renderer revokes the uncertain split. Current export policy keeps
+        # this suspicion review-only rather than treating it as confirmed damage.
+        assert not text.get("balloon_subregions")
+        assert not text.get("connected_lobe_bboxes")
+        assert gate["status"] == "PASS"
+        assert gate["allowed"] is True
+        assert gate["needs_review"] is True
+        assert gate["issues"][0]["blocks_export"] is False
         assert gate["issues"][0]["flags"] == ["lobe_assignment_low_confidence"]

@@ -46,6 +46,38 @@ def _attach_real_bubble_mask(page: dict, image_shape, bbox: list[int] | None = N
 
 
 class VisionStackInpainterTests(unittest.TestCase):
+    # Positive tests of direct pixel fills/legacy cleanup must opt into that
+    # policy. Keep geometry-only and pure/default-policy tests outside this set.
+    _DIRECT_FILL_POLICY_TESTS = {
+        "test_card_visual_dark_fill_runs_without_global_fast_dark_opt_in",
+        "test_connected_white_geometry_fill_clears_text_without_erasing_lobe_outline",
+        "test_dark_balloon_fill_does_not_use_negative_white",
+        "test_dark_bubble_text_fill_prefers_local_black_panel_over_warm_shadow",
+        "test_dark_bubble_text_fill_samples_inner_black_not_glow_color",
+        "test_dark_panel_bbox_fallback_missing_bubble_uses_glyph_mask_not_panel_strip",
+        "test_dark_panel_contract_fill_keeps_text_only_mask_for_visual_contract",
+        "test_dark_panel_fill_handles_dense_light_glyph_in_tight_unsafe_card_bbox",
+        "test_dark_panel_fill_handles_misclassified_near_black_panel",
+        "test_dark_panel_fill_rejects_colored_art_caption_with_line_geometry",
+        "test_dark_panel_fill_uses_visual_glyph_for_unsafe_colored_card",
+        "test_dark_panel_text_fill_cleans_tilted_ui_antialias_margin",
+        "test_dark_panel_text_fill_uses_contract_mask_as_direct_fill",
+        "test_dark_panel_text_fills_accumulates_visual_mask_for_dark_bubble_no_glyph",
+        "test_dark_panel_text_fills_clean_form_white_labels_with_metadata",
+        "test_final_white_cleanup_extension_also_force_fills_late_residue",
+        "test_flat_dark_bbox_fallback_uses_solid_fill_instead_of_telea_smear",
+        "test_flat_ui_prefill_uses_metadata_geometry_when_source_bbox_is_too_narrow",
+        "test_flat_ui_prefill_uses_text_geometry_when_ui_context_ring_is_colored",
+        "test_rejected_visual_card_fast_dark_fill_ignores_balloon_qa_for_local_fill",
+        "test_strip_real_inpaint_force_fills_remaining_white_balloon_residual",
+        "test_unsafe_white_balloon_text_fill_cleans_text_without_outline",
+        "test_unsafe_white_fill_clears_stale_unsafe_flags_when_it_fills",
+        "test_white_balloon_dark_residual_check_triggers_force_fill",
+        "test_white_balloon_final_fallback_uses_residual_region_beyond_expanded_mask",
+        "test_white_balloon_final_residual_check_force_fills_late_light_residue",
+        "test_white_balloon_light_residual_after_retry_triggers_force_fill",
+        "test_white_residual_force_fill_uses_dark_local_context",
+    }
     _LEGACY_FAST_DARK_OPT_IN_BROKEN_TESTS = {
         "test_fast_dark_panel_fill_handles_phone_ui_with_line_geometry",
         "test_fast_dark_panel_fill_is_clamped_to_text_geometry",
@@ -55,6 +87,14 @@ class VisionStackInpainterTests(unittest.TestCase):
     def setUp(self):
         if self._testMethodName in self._LEGACY_FAST_DARK_OPT_IN_BROKEN_TESTS:
             self.skipTest("legacy opt-in fast dark fill is isolated; default path uses sampled fast_solid")
+        # These tests exercise the named opt-in fast strategies. Their individual
+        # feature switches still apply; the application default remains pure.
+        # addCleanup restores the environment even when an assertion fails.
+        if (self._testMethodName.startswith("test_fast_")
+                or self._testMethodName in self._DIRECT_FILL_POLICY_TESTS):
+            policy = patch.dict("os.environ", {"TRADUZAI_INPAINT_POLICY": "fast"}, clear=False)
+            policy.start()
+            self.addCleanup(policy.stop)
 
     def test_band_local_text_bbox_normalization_shifts_page_relative_y(self):
         from inpainter import _texts_with_band_local_bboxes

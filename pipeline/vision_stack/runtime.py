@@ -28,7 +28,13 @@ from PIL import Image
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 from ownership.hash_contract import canonical_page_sha256
-from ownership.ocr_contract import OCRRequest, OCRTransformOperation, OCRTransformSpec
+from ownership.ocr_contract import (
+    OCRDiagnostics,
+    OCRInvocationResult,
+    OCRRequest,
+    OCRTransformOperation,
+    OCRTransformSpec,
+)
 
 if TYPE_CHECKING:
     # Hints para o IDE - Ignorar avisos de resolução pois o sys.path é dinâmico
@@ -6563,6 +6569,31 @@ def _drop_contained_duplicate_ocr_texts(
                 str(first_text.get("text", "") or ""),
                 str(second_text.get("text", "") or ""),
             )
+            geometry_compatible = (
+                _bbox_iou(first_bbox, second_bbox) >= 0.50
+                or _bbox_inner_overlap_ratio(first_bbox, second_bbox) >= 0.80
+                or _bbox_inner_overlap_ratio(second_bbox, first_bbox) >= 0.80
+            )
+            if similarity < 0.72 and geometry_compatible:
+                review_flag = "overlapping_ocr_text_divergence_review"
+                for divergent in (first_text, second_text):
+                    flags = list(divergent.get("qa_flags") or [])
+                    if review_flag not in flags:
+                        flags.append(review_flag)
+                    divergent["qa_flags"] = flags
+                record_decision(
+                    stage="ocr",
+                    action="preserve_blocks",
+                    reason=review_flag,
+                    page=page_number,
+                    details={
+                        "first_text": first_text.get("text", ""),
+                        "second_text": second_text.get("text", ""),
+                        "similarity": round(float(similarity), 3),
+                        "iou": round(float(_bbox_iou(first_bbox, second_bbox)), 3),
+                    },
+                )
+                continue
             if (
                 similarity >= 0.96
                 and _bbox_iou(first_bbox, second_bbox) >= 0.72
@@ -13218,8 +13249,10 @@ def build_page_result(
             estilo,
             background_rgb=background_rgb,
             force_black_text=is_white_balloon,
+            semantic_role="dialogue_body",
+            content_class=tipo,
+            layout_profile=block_profile,
         )
-        estilo["force_upper"] = True
         qa_flags = [block_profile] if block_profile == "decorative_noise" else []
         for flag in informative_qa_flags:
             if flag in {"low_confidence_visual_noise", "low_ocr_confidence", "suspicious_low_confidence", "ocr_partial_low_confidence_fragment"}:
@@ -15367,6 +15400,7 @@ class FinalPixelProbeResult:
     geometry_projection_count: int = 0
     request_scoped: bool = False
     root_input_pixel_sha256: str = ""
+    ocr_invocation: OCRInvocationResult | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -15385,6 +15419,46 @@ class FinalPixelProbeResult:
             "coverage_failures",
             tuple(sorted(set(str(value) for value in self.coverage_failures))),
         )
+
+
+_TERMINAL_PAGE_MAX_SIDE = 16_384
+_TERMINAL_PAGE_MAX_PIXELS = 16_777_216
+_TERMINAL_REGION_BASE_TILE_SIDE = 2_048
+_TERMINAL_REGION_OVERLAP = 64
+
+
+def _terminal_ocr_region_tiles(
+    bbox_page: tuple[int, int, int, int],
+) -> tuple[tuple[int, int, int, int], ...]:
+    """Partition one terminal ROI before any potentially enlarging transform."""
+
+    x1, y1, x2, y2 = (int(value) for value in bbox_page)
+    if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1:
+        raise ValueError("terminal OCR region bbox is invalid")
+
+    def starts(start: int, end: int) -> tuple[int, ...]:
+        length = end - start
+        if length <= _TERMINAL_REGION_BASE_TILE_SIDE:
+            return (start,)
+        step = _TERMINAL_REGION_BASE_TILE_SIDE - _TERMINAL_REGION_OVERLAP
+        values = list(range(start, end - _TERMINAL_REGION_BASE_TILE_SIDE + 1, step))
+        last = end - _TERMINAL_REGION_BASE_TILE_SIDE
+        if values[-1] != last:
+            values.append(last)
+        return tuple(values)
+
+    x_starts = starts(x1, x2)
+    y_starts = starts(y1, y2)
+    return tuple(
+        (
+            tile_x,
+            tile_y,
+            min(x2, tile_x + _TERMINAL_REGION_BASE_TILE_SIDE),
+            min(y2, tile_y + _TERMINAL_REGION_BASE_TILE_SIDE),
+        )
+        for tile_y in y_starts
+        for tile_x in x_starts
+    )
 
 
 def _final_probe_record(
@@ -15445,6 +15519,7 @@ def run_final_pixel_ocr_probe(
     page_surface_geometry: dict[str, Any] | Any | None = None,
     request_scoped: bool = False,
     root_input_pixel_sha256: str = "",
+    ocr_request: OCRRequest | None = None,
 ) -> FinalPixelProbeResult:
     """Run OCR directly on final pixels before semantic routing or skip policy."""
 
@@ -15550,134 +15625,167 @@ def run_final_pixel_ocr_probe(
     raw_records: list[dict[str, Any]] = []
     recognition_error = ""
 
+    ocr_invocation = None
     if request_scoped:
+        if not isinstance(ocr_request, OCRRequest):
+            raise TypeError("request-scoped final OCR requires OCRRequest")
+        if ocr_request.root_input_pixel_sha256 != physical_root_sha256:
+            raise ValueError("final OCR request root does not match physical pixels")
+        if str(ocr_request.page_id) != str(page_id):
+            raise ValueError("final OCR request page does not match probe page")
+        if max(width, height) > _TERMINAL_PAGE_MAX_SIDE or width * height > _TERMINAL_PAGE_MAX_PIXELS:
+            raise ValueError("terminal native page exceeds the bounded OCR input budget")
         ocr = _get_ocr_engine("max", lang=str(source_language or "en"))
-        gray_rgb = cv2.cvtColor(
-            cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY),
-            cv2.COLOR_GRAY2RGB,
-        )
-        variant_specs = (
-            (
-                "full_page",
-                image_rgb.copy(),
-                OCRTransformSpec.build((OCRTransformOperation(kind="identity"),)),
-            ),
-            (
-                "native",
-                image_rgb.copy(),
-                OCRTransformSpec.build((OCRTransformOperation(kind="identity"),)),
-            ),
-            (
-                "gray",
-                gray_rgb,
-                OCRTransformSpec.build(
-                    (
-                        OCRTransformOperation(kind="identity"),
-                        OCRTransformOperation(kind="grayscale_to_rgb"),
-                    )
-                ),
-            ),
-            (
-                "inverted",
-                255 - gray_rgb,
-                OCRTransformSpec.build(
-                    (
-                        OCRTransformOperation(kind="identity"),
-                        OCRTransformOperation(kind="grayscale_to_rgb"),
-                        OCRTransformOperation(kind="invert"),
-                    )
-                ),
-            ),
-            (
-                "scale_2x",
-                cv2.resize(
-                    image_rgb,
-                    (width * 2, height * 2),
-                    interpolation=cv2.INTER_CUBIC,
-                ),
-                OCRTransformSpec.build(
-                    (
-                        OCRTransformOperation(kind="identity"),
-                        OCRTransformOperation(
-                            kind="resize",
-                            output_size=(width * 2, height * 2),
-                            interpolation="cubic",
-                        ),
-                    )
-                ),
-            ),
-        )
         try:
-            strict_values = ocr.recognize_batch(
-                [variant_pixels.copy() for _, variant_pixels, _ in variant_specs]
+            ocr_invocation = ocr.recognize_page_with_evidence(
+                image_rgb,
+                [],
+                request=ocr_request,
             )
-            if strict_values is None:
-                strict_values = []
-            if not isinstance(strict_values, (list, tuple)):
-                strict_values = [strict_values]
-            for index, (variant_id, variant_pixels, transform_spec) in enumerate(
-                variant_specs
-            ):
-                input_sha256 = canonical_page_sha256(variant_pixels)
-                value = strict_values[index] if index < len(strict_values) else None
-                record = _final_probe_record(
-                    value,
-                    fallback_bbox=[0, 0, width, height],
-                    target_id=f"full-page:{variant_id}",
-                )
-                if record is not None:
-                    used_fallback = bool(record.pop("_bbox_from_fallback", False))
-                    raw_bbox = list(record.get("bbox") or [0, 0, width, height])
-                    if variant_id == "scale_2x" and not used_fallback:
-                        raw_bbox = [int(round(value / 2.0)) for value in raw_bbox]
-                    record["bbox"] = raw_bbox
-                    record["artifact_bbox_frame"] = raw_bbox
-                    record["coordinate_space"] = "page"
-                    record["final_probe_variant"] = variant_id
-                    record["input_pixel_sha256"] = input_sha256
-                    raw_records.append(record)
-                    status = "recognized"
-                    reason = "full_page_raw_ocr_record_captured"
-                else:
-                    status = "no_usable_ocr"
-                    reason = "full_page_ocr_attempt_returned_no_text"
-                attempts.append(
+            attempts.extend(attempt.to_json() for attempt in ocr_invocation.attempts)
+            for record in ocr_invocation.full_page_lines:
+                raw_records.append(
                     {
-                        "target_id": f"full-page:{variant_id}",
-                        "target_kind": "full_page",
-                        "variant_id": variant_id,
-                        "bbox": [0, 0, width, height],
-                        "status": status,
-                        "reason": reason,
-                        "root_input_pixel_sha256": physical_root_sha256,
-                        "parent_input_pixel_sha256": physical_root_sha256,
-                        "input_pixel_sha256": input_sha256,
-                        "input_width": int(variant_pixels.shape[1]),
-                        "input_height": int(variant_pixels.shape[0]),
-                        "input_mode": "RGB",
-                        "provider_called": True,
-                        "cache_hit": False,
-                        "transform_spec_canonical_json": transform_spec.canonical_json_bytes.decode(
-                            "utf-8"
-                        ),
-                        "transform_spec_sha256": transform_spec.sha256,
+                        "text": record.text,
+                        "confidence": float(record.confidence),
+                        "bbox": list(record.bbox_page),
+                        "artifact_bbox_frame": list(record.bbox_page),
+                        "line_polygons": [list(point) for point in record.polygon_page],
+                        "coordinate_space": "page",
+                        "final_probe_variant": record.variant_id,
+                        "attempt_id": record.attempt_id,
+                        "input_pixel_sha256": record.input_pixel_sha256,
+                        "observation_stage": "raw_final_pixel_ocr",
                     }
                 )
+            invocation_results = [ocr_invocation]
+            processed_region_status: dict[
+                tuple[int, int, int, int], tuple[bool, bool, str]
+            ] = {}
+            for target in targets:
+                target_bbox = tuple(int(value) for value in target["bbox"])
+                prior_status = processed_region_status.get(target_bbox)
+                if prior_status is not None:
+                    target_failed, target_had_text, target_reason = prior_status
+                    attempts.append(
+                        {
+                            "target_id": target["target_id"],
+                            "target_kind": target["target_kind"],
+                            "bbox": list(target_bbox),
+                            "status": (
+                                "ocr_error"
+                                if target_failed
+                                else "recognized"
+                                if target_had_text
+                                else "no_usable_ocr"
+                            ),
+                            "reason": target_reason,
+                            "shared_physical_region": True,
+                        }
+                    )
+                    continue
+                target_failed = False
+                target_had_text = False
+                for region_bbox in _terminal_ocr_region_tiles(target_bbox):
+                    for variant in ("native", "gray", "inverted", "scale_2x"):
+                        try:
+                            region_result = ocr.recognize_region_with_evidence(
+                                image_rgb,
+                                bbox_page=region_bbox,
+                                request=ocr_request,
+                                variants=(variant,),
+                            )
+                        except Exception as exc:
+                            recognition_error = f"{type(exc).__name__}:{exc}"
+                            target_failed = True
+                            break
+                        invocation_results.append(region_result)
+                        attempts.extend(
+                            attempt.to_json() for attempt in region_result.attempts
+                        )
+                        target_had_text = target_had_text or bool(region_result.observations)
+                        for record in region_result.observations:
+                            raw_records.append(
+                                {
+                                    "text": record.text,
+                                    "confidence": float(record.confidence),
+                                    "bbox": list(record.bbox_page),
+                                    "artifact_bbox_frame": list(record.bbox_page),
+                                    "line_polygons": [
+                                        list(point) for point in record.polygon_page
+                                    ],
+                                    "coordinate_space": "page",
+                                    "final_probe_variant": record.variant_id,
+                                    "attempt_id": record.attempt_id,
+                                    "input_pixel_sha256": record.input_pixel_sha256,
+                                    "final_probe_target_id": target["target_id"],
+                                    "observation_stage": "raw_final_pixel_ocr",
+                                }
+                            )
+                    if target_failed:
+                        break
+                target_reason = (
+                    recognition_error
+                    if target_failed
+                    else "raw_ocr_record_captured"
+                    if target_had_text
+                    else "ocr_attempt_returned_no_text_after_variants"
+                )
+                attempts.append(
+                    {
+                        "target_id": target["target_id"],
+                        "target_kind": target["target_kind"],
+                        "bbox": list(target["bbox"]),
+                        "status": (
+                            "ocr_error"
+                            if target_failed
+                            else "recognized"
+                            if target_had_text
+                            else "no_usable_ocr"
+                        ),
+                        "reason": target_reason,
+                    }
+                )
+                processed_region_status[target_bbox] = (
+                    target_failed,
+                    target_had_text,
+                    target_reason,
+                )
+            if not recognition_error:
+                merged_attempts = tuple(
+                    attempt
+                    for result in invocation_results
+                    for attempt in result.attempts
+                )
+                merged_observations = tuple(
+                    record
+                    for result in invocation_results
+                    for record in result.observations
+                )
+                ocr_invocation = OCRInvocationResult.build(
+                    request=ocr_request,
+                    blocks=tuple(
+                        block
+                        for result in invocation_results
+                        for block in result.blocks
+                    ),
+                    observations=merged_observations,
+                    full_page_lines=tuple(invocation_results[0].full_page_lines),
+                    attempts=merged_attempts,
+                    diagnostics=OCRDiagnostics(
+                        ocr_request.provider_family,
+                        {
+                            "terminal_mode": "native_page_plus_bounded_regions",
+                            "region_count": len(targets),
+                            "variant_order": ["native", "gray", "inverted", "scale_2x"],
+                        },
+                    ),
+                )
+            else:
+                ocr_invocation = None
         except Exception as exc:
             recognition_error = f"{type(exc).__name__}:{exc}"
-            attempts.append(
-                {
-                    "target_id": "full-page",
-                    "target_kind": "full_page",
-                    "variant_id": "full_page",
-                    "status": "ocr_error",
-                    "reason": recognition_error,
-                    "root_input_pixel_sha256": physical_root_sha256,
-                    "input_pixel_sha256": physical_root_sha256,
-                    "provider_called": True,
-                    "cache_hit": False,
-                }
-            )
+            ocr_invocation = None
 
     def project_record(
         record: dict[str, Any] | None,
@@ -15712,7 +15820,7 @@ def run_final_pixel_ocr_probe(
         record["coordinate_space"] = "logical_page" if geometry is not None else "page"
         return record
 
-    if targets:
+    if targets and not request_scoped:
         ocr = _get_ocr_engine("max", lang=str(source_language or "en"))
         crops = [
             image_rgb[target["bbox"][1] : target["bbox"][3], target["bbox"][0] : target["bbox"][2]].copy()
@@ -15837,6 +15945,7 @@ def run_final_pixel_ocr_probe(
         coverage_failures=tuple(failures),
         request_scoped=bool(request_scoped),
         root_input_pixel_sha256=physical_root_sha256,
+        ocr_invocation=ocr_invocation,
     )
 
 

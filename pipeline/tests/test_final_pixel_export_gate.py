@@ -370,6 +370,35 @@ def test_export_gate_blocks_under_source_scale_owner(tmp_path):
     assert "under_source_scale" in _reasons(gate)
 
 
+def test_export_gate_respects_quality_status_when_source_scale_is_untrusted(tmp_path):
+    from qa.export_gate import evaluate_export_gate
+
+    artifact = tmp_path / "001.png"
+    artifact.write_bytes(b"page-one")
+    project = _project(artifact)
+    project["paginas"][0]["text_layers"] = [{
+        "id": "owner_a",
+        "owner_id": "owner_a",
+        "render_completed": True,
+        "fit_status": "ok",
+        "render_bbox": [10, 10, 30, 20],
+        "owner_render_quality": {
+            "schema_version": 1,
+            "status": "ok",
+            "source_scale_ratio": 0.26,
+            "x_height_ratio": 0.26,
+            "outside_safe_pixels": 0,
+            "rendered_line_core_heights_px": [18, 18, 18],
+        },
+    }]
+
+    gate = evaluate_export_gate(project)
+
+    assert gate["status"] == "PASS"
+    assert "under_source_scale" not in _reasons(gate)
+    assert "under_source_x_height" not in _reasons(gate)
+
+
 def _ok_quality():
     return {
         "schema_version": 1,

@@ -1030,7 +1030,11 @@ def build_final_replacement_verdict(
         and bool(target_within_safe_region)
     )
     if not source_removed:
-        raise SourceResidualStillMaterialError("source residual mask remains material")
+        raise SourceResidualStillMaterialError(
+            "source residual mask remains material: "
+            f"owner_id={binding.owner_id} residual_pixels={residual_count} "
+            f"source_support_pixels={source_support_count}"
+        )
     if not target_materialized:
         raise TargetMaterializationError("target glyph evidence is not material and contained")
     verdict_id = canonical_json_sha256(

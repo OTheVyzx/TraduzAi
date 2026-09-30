@@ -318,9 +318,20 @@ async function ensureRecoveryMetadata(backend: StudioEditorBackend, projectPath:
   });
 }
 
-export function createLegacyEditorBackendAdapter(backend: StudioEditorBackend): LegacyEditorBackendApi {
+const LEGACY_EDITOR_WRITE_METHODS = new Set<keyof LegacyEditorBackendApi>([
+  "saveProjectJson", "createEditorTextLayer", "patchEditorTextLayer", "deleteEditorTextLayer",
+  "setEditorLayerVisibility", "updateMaskRegion", "updateBrushRegion", "updateRecoveryRegion",
+  "updateReinpaintRegion", "writeMaskFromPng", "writeHealingMask", "healInpaintRegion",
+  "renderPreviewPage", "runPageActionWithOptionalMask", "runProcessRegion", "retypesetPage",
+  "detectPage", "detectBoxesPage", "ocrPage", "translatePage", "reinpaintPage", "processBlock",
+]);
+
+export function createLegacyEditorBackendAdapter(
+  backend: StudioEditorBackend,
+  options?: { writeRunner?: <T>(operation: () => Promise<T>) => Promise<T> },
+): LegacyEditorBackendApi {
   const baseProjects = projectBasesFor(backend);
-  return {
+  const adapter: LegacyEditorBackendApi = {
     saveProjectJson: async ({ project_path, project_json }) => {
       const incoming = project_json as StudioProject;
       const base = baseProjects.get(project_path);
@@ -415,13 +426,17 @@ export function createLegacyEditorBackendAdapter(backend: StudioEditorBackend): 
       };
     },
     renderPreviewPage: async ({ project_path, page_index, page }) => {
+      const renderedSource = page.image_layers.rendered?.path ?? page.arquivo_traduzido;
+      if (!renderedSource || renderedSource === "data:image/png;base64,") {
+        throw new Error("Renderização ainda não conectada ao pipeline do Studio.");
+      }
       const path = await backend.updateBitmapLayer({
         project_path,
         page_index,
         layer_key: "rendered",
         width: 1,
         height: 1,
-        png_data: page.image_layers.rendered?.path ?? page.arquivo_traduzido ?? "data:image/png;base64,",
+        png_data: renderedSource,
         dirty_bbox: null,
       });
       return { output_path: path, path, preview_path: null, renderer_backend: "studio-local" };
@@ -460,45 +475,44 @@ export function createLegacyEditorBackendAdapter(backend: StudioEditorBackend): 
           message: "Inpaint Studio Lite aplicado",
         };
       }
+      if (config.action === "ocr" || config.action === "translate") {
+        const label = config.action === "ocr" ? "OCR" : "de tradução";
+        throw new Error(`Ação ${label} ainda não conectada ao pipeline do Studio.`);
+      }
       return {
         action: config.action,
         changed_assets: ["project_json"],
         message: "Acao de pipeline ainda nao conectada no Studio local",
       };
     },
-    runProcessRegion: async (config) => ({
-      page_index: config.page_index,
-      overlay: {
-        id: `studio-process-${config.page_index + 1}`,
-        page_index: config.page_index,
-        bbox: config.bbox,
-        crop_path: config.mask_path ?? "",
-        text_layer_ids: [],
-        visible: true,
-        locked: false,
-        order: 0,
-      },
-      changed_assets: ["project_json"],
-      changed_layers: [],
-      message: "Processamento regional ainda nao conectado no Studio local",
-    }),
+    runProcessRegion: async () => {
+      throw new Error("Processamento regional ainda não conectado ao pipeline do Studio.");
+    },
     retypesetPage: async (config) => {
       const page = await backend.loadEditorPage(config);
       return page.page.image_layers.rendered?.path ?? page.page.arquivo_traduzido ?? "";
     },
     detectPage: async (config) => {
-      if (!backend.studioLiteDetectPage) return "Deteccao ainda nao conectada no Studio local";
+      if (!backend.studioLiteDetectPage) {
+        throw new Error("Detecção ainda não conectada ao pipeline do Studio.");
+      }
       const result = await backend.studioLiteDetectPage({ ...config, boxes_only: false });
       return result.message ?? `Studio Lite detectou ${result.detections.length} regioes`;
     },
     detectBoxesPage: async (config) => {
-      if (!backend.studioLiteDetectPage) return "Deteccao de caixas ainda nao conectada no Studio local";
+      if (!backend.studioLiteDetectPage) {
+        throw new Error("Detecção de caixas ainda não conectada ao pipeline do Studio.");
+      }
       const result = await backend.studioLiteDetectPage({ ...config, boxes_only: true });
       return result.message ?? `Studio Lite encontrou ${result.detections.length} caixas`;
     },
     preloadEditorVisionPage: async () => "Preload visual desativado no Studio local",
-    ocrPage: async () => "OCR ainda nao conectado no Studio local",
-    translatePage: async () => "Traducao ainda nao conectada no Studio local",
+    ocrPage: async () => {
+      throw new Error("OCR ainda não conectado ao pipeline do Studio.");
+    },
+    translatePage: async () => {
+      throw new Error("Tradução ainda não conectada ao pipeline do Studio.");
+    },
     reinpaintPage: async (config) => {
       if (backend.studioLiteInpaintRegion && (config.bbox || config.mask_path)) {
         const result = await backend.studioLiteInpaintRegion(config);
@@ -507,6 +521,20 @@ export function createLegacyEditorBackendAdapter(backend: StudioEditorBackend): 
       const page = await backend.loadEditorPage(config);
       return page.page.image_layers.inpaint?.path ?? page.page.image_layers.base?.path ?? page.page.arquivo_original ?? "";
     },
-    processBlock: async () => "Processamento de bloco ainda nao conectado no Studio local",
+    processBlock: async () => {
+      throw new Error("Processamento de bloco ainda não conectado ao pipeline do Studio.");
+    },
   };
+  if (!options?.writeRunner) return adapter;
+  const writeRunner = options.writeRunner;
+  return new Proxy(adapter, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver) as unknown;
+      if (typeof value !== "function") return value;
+      if (!LEGACY_EDITOR_WRITE_METHODS.has(property as keyof LegacyEditorBackendApi)) return value.bind(target);
+      return (...args: unknown[]) => writeRunner(
+        () => (value as (...methodArgs: unknown[]) => Promise<unknown>).apply(target, args),
+      );
+    },
+  });
 }

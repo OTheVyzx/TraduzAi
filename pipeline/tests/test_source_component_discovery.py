@@ -137,6 +137,34 @@ def test_support_only_container_does_not_become_source_text_without_glyphs() -> 
     ) == []
 
 
+def test_support_only_container_does_not_promote_touched_glyph_evidence() -> None:
+    image = np.full((220, 420, 3), 245, dtype=np.uint8)
+    glyph = GlyphCandidate(
+        bbox_page=(190, 140, 209, 160),
+        detector_source="glyph_scan",
+        confidence=0.55,
+    )
+    container = DetectorRegion(
+        bbox_page=(20, 20, 400, 200),
+        detector_source="white_balloon_band_scan",
+        confidence=0.95,
+        evidence_id="white-balloon-container-1",
+        support_only=True,
+    )
+
+    components = discover_source_text_components(
+        image,
+        page_id="page_001",
+        detector_regions=[container],
+        glyph_candidates=[glyph],
+    )
+
+    assert len(components) == 1
+    assert components[0].detector_sources == ("glyph_scan",)
+    assert components[0].evidence_ids == ()
+    assert components[0].confidence == pytest.approx(0.55)
+
+
 def test_periodic_hatching_without_text_is_not_promoted() -> None:
     height, width = 1600, 1000
     image = np.full((height, width, 3), 255, dtype=np.uint8)

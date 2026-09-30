@@ -7,6 +7,8 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -36,6 +38,7 @@ def _observation(
     tile_provenance: tuple[str, ...] = ("tile_a",),
     coverage_score: float | None = None,
     language_score: float | None = None,
+    provider: str = "test_ocr",
 ) -> TextObservation:
     return TextObservation(
         observation_id=observation_id,
@@ -43,7 +46,7 @@ def _observation(
         component_ids=component_ids,
         text=text,
         confidence=confidence,
-        provider="test_ocr",
+        provider=provider,
         bbox_page=bbox,
         tile_provenance=tile_provenance,
         coverage_score=coverage_score,
@@ -324,6 +327,319 @@ def test_equally_supported_divergent_full_readings_require_review() -> None:
     assert graph.owners[0].selected_observation_ids == []
 
 
+def test_strong_independent_consensus_ignores_sparse_full_reading_outliers() -> None:
+    component = _component("prize_card", (100, 100, 400, 220))
+    canonical = "CONGRATULATIONS YOU'VE EARNED 4.6 BILLION PRIZE MONEY!"
+    observations = [
+        _observation(
+            f"canonical_{index}",
+            ("prize_card",),
+            canonical,
+            component.bbox_page,
+            provider=provider,
+        )
+        for index, provider in enumerate(
+            ("legacy", "raw", "direct", "inverted", "native", "negative", "full_page"),
+            start=1,
+        )
+    ]
+    observations.extend(
+        [
+            _observation(
+                "punctuation_equivalent",
+                ("prize_card",),
+                "CONGRATULATIONS. YOU'VE EARNED 4.6 BILLION PRIZE MONEY!",
+                component.bbox_page,
+                provider="negative_repeat",
+            ),
+            _observation(
+                "minority_typo",
+                ("prize_card",),
+                "CONGRATULATIONSS YOU'VE EARNED 4.6 BILLION PRIZEMONEY!",
+                component.bbox_page,
+                provider="x2",
+            ),
+            _observation(
+                "minority_typo_native",
+                ("prize_card",),
+                "CONGRATULATIONSS YOU'VE EARNED 4.6 BILLION PRIZEMONEY!",
+                component.bbox_page,
+                provider="native_x2",
+            ),
+            _observation(
+                "minority_typo_inverted",
+                ("prize_card",),
+                "CONGRATULATIONSS YOU'VE EARNED 4.6 BILLION PRIZEMONEY!",
+                component.bbox_page,
+                provider="inverted_x2",
+            ),
+            _observation(
+                "sparse_noise",
+                ("prize_card",),
+                "2OOL LLN",
+                component.bbox_page,
+                provider="rotated",
+            ),
+        ]
+    )
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=observations,
+        semantic_regions=[SemanticRegion("body", ("prize_card",), "body")],
+    )
+
+    owner = graph.owners[0]
+    assert owner.state == "ocr_ready"
+    assert owner.source_payload == canonical
+    assert set(owner.selected_observation_ids) == {
+        "canonical_1",
+        "canonical_2",
+        "canonical_3",
+        "canonical_4",
+        "canonical_5",
+        "canonical_6",
+        "canonical_7",
+        "punctuation_equivalent",
+    }
+    reasons = {
+        item.observation_id: item.rejection_reason
+        for item in graph.observations
+        if item.observation_id
+        in {
+            "minority_typo",
+            "minority_typo_native",
+            "minority_typo_inverted",
+            "sparse_noise",
+        }
+    }
+    assert reasons == {
+        "minority_typo": "dominated_candidate",
+        "minority_typo_native": "dominated_candidate",
+        "minority_typo_inverted": "dominated_candidate",
+        "sparse_noise": "dominated_candidate",
+    }
+
+
+def test_independent_consensus_tolerates_minor_full_reading_ocr_typos() -> None:
+    component = _component("card_title", (100, 100, 400, 180))
+    observations = [
+        _observation(
+            "native",
+            ("card_title",),
+            "ELIXIR OF SAVAGE MIGHT",
+            component.bbox_page,
+            provider="native",
+        ),
+        _observation(
+            "inverted",
+            ("card_title",),
+            "EUXIR OF SAVAGE MIGHT",
+            component.bbox_page,
+            provider="inverted",
+        ),
+        _observation(
+            "full_page",
+            ("card_title",),
+            "ELIXIR OF SAVAGE MIGHI",
+            component.bbox_page,
+            provider="full_page",
+        ),
+    ]
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=observations,
+        semantic_regions=[SemanticRegion("title", ("card_title",), "title")],
+    )
+
+    owner = graph.owners[0]
+    assert owner.state == "ocr_ready"
+    assert owner.source_payload in {
+        "ELIXIR OF SAVAGE MIGHT",
+        "EUXIR OF SAVAGE MIGHT",
+        "ELIXIR OF SAVAGE MIGHI",
+    }
+    assert len(owner.selected_observation_ids) == 1
+    assert owner.selected_observation_ids[0] in {"native", "inverted", "full_page"}
+    assert {
+        item.rejection_reason
+        for item in graph.observations
+        if item.observation_id not in owner.selected_observation_ids
+    } == {"dominated_candidate"}
+
+
+def test_near_consensus_never_collapses_numeric_magnitude_variants() -> None:
+    component = _component("numeric_card", (100, 100, 400, 180))
+    observations = [
+        _observation(
+            "decimal",
+            ("numeric_card",),
+            "A REWARD OF 4.6 BILLION COINS",
+            component.bbox_page,
+            provider="native",
+        ),
+        _observation(
+            "integer",
+            ("numeric_card",),
+            "A REWARD OF 46 BILLION COINS",
+            component.bbox_page,
+            provider="inverted",
+        ),
+        _observation(
+            "other_decimal",
+            ("numeric_card",),
+            "A REWARD OF 4,6 BILLION COINS",
+            component.bbox_page,
+            provider="full_page",
+        ),
+    ]
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=observations,
+        semantic_regions=[SemanticRegion("card", ("numeric_card",), "body")],
+    )
+
+    assert graph.owners[0].state == "review_required"
+    assert graph.owners[0].source_payload == ""
+
+
+def test_consensus_counts_repeated_rotated_noise_as_one_provider() -> None:
+    component = _component("dialogue", (100, 100, 340, 220))
+    canonical = "I'M SORRY SIR. I'LL BE GOING FIRST"
+    observations = [
+        _observation(
+            "canonical_raw",
+            ("dialogue",),
+            canonical,
+            component.bbox_page,
+            provider="raw",
+        ),
+        _observation(
+            "canonical_negative_a",
+            ("dialogue",),
+            "I'MSORRY SIR.I'LLBE GOING FIRST",
+            component.bbox_page,
+            provider="negative",
+        ),
+        _observation(
+            "canonical_negative_b",
+            ("dialogue",),
+            "I'MSORRY SIR.I'LLBE GOING FIRST",
+            component.bbox_page,
+            provider="negative",
+        ),
+        _observation(
+            "canonical_legacy",
+            ("dialogue",),
+            "I'M SORRY SIR. ILLBE GOING FIRST",
+            component.bbox_page,
+            provider="legacy",
+        ),
+        _observation(
+            "rotated_noise_a",
+            ("dialogue",),
+            "GOSSOUNST",
+            component.bbox_page,
+            provider="rotated",
+        ),
+        _observation(
+            "rotated_noise_b",
+            ("dialogue",),
+            "IORRYSY",
+            component.bbox_page,
+            provider="rotated",
+        ),
+        _observation(
+            "rotated_fragment",
+            ("dialogue",),
+            "I'M SORRY,",
+            component.bbox_page,
+            provider="rotated",
+        ),
+    ]
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=observations,
+        semantic_regions=[SemanticRegion("body", ("dialogue",), "body")],
+    )
+
+    owner = graph.owners[0]
+    assert owner.state == "ocr_ready"
+    assert owner.source_payload == canonical
+    assert set(owner.selected_observation_ids) == {
+        "canonical_raw",
+        "canonical_negative_a",
+        "canonical_negative_b",
+        "canonical_legacy",
+    }
+
+
+def test_spacing_equivalent_consensus_selects_translation_ready_word_boundaries() -> None:
+    component = _component("question", (100, 100, 300, 180))
+    observations = [
+        _observation(
+            "collapsed_legacy",
+            ("question",),
+            "AREYOU READY?",
+            component.bbox_page,
+            provider="legacy",
+        ),
+        _observation(
+            "collapsed_raw",
+            ("question",),
+            "AREYOU READY?",
+            component.bbox_page,
+            provider="raw",
+        ),
+        _observation(
+            "spaced_a",
+            ("question",),
+            "ARE YOU READY?",
+            component.bbox_page,
+            provider="negative_a",
+        ),
+        _observation(
+            "spaced_b",
+            ("question",),
+            "ARE YOU READY?",
+            component.bbox_page,
+            provider="negative_b",
+        ),
+        _observation(
+            "spaced_c",
+            ("question",),
+            "ARE YOU READY?",
+            component.bbox_page,
+            provider="negative_c",
+        ),
+    ]
+
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=observations,
+        semantic_regions=[SemanticRegion("question", ("question",), "body")],
+    )
+
+    owner = graph.owners[0]
+    assert owner.state == "ocr_ready"
+    assert owner.source_payload == "ARE YOU READY?"
+    assert set(owner.selected_observation_ids) == {
+        "collapsed_legacy",
+        "collapsed_raw",
+        "spaced_a",
+        "spaced_b",
+        "spaced_c",
+    }
+
+
 def test_ocr_ready_graph_does_not_require_executor_before_execution_planning() -> None:
     component = _component("body", (100, 100, 300, 160))
     graph = build_page_owner_graph(
@@ -533,6 +849,139 @@ def test_external_url_identifier_is_explicitly_preserved_not_translated() -> Non
     assert graph.component_dispositions[0].reason == "policy:nontranslatable_external_identifier"
 
 
+def test_conflicting_ocr_variants_of_external_identifier_are_preserved_before_selection() -> None:
+    component = _component("scanlation_url", (20, 20, 220, 48))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=[
+            _observation(
+                "url_a",
+                (component.component_id,),
+                "www.arvencomics.com",
+                component.bbox_page,
+                provider="raw",
+            ),
+            _observation(
+                "url_b",
+                (component.component_id,),
+                "www.aryencomics.com",
+                component.bbox_page,
+                provider="rotated",
+            ),
+        ],
+        semantic_regions=[SemanticRegion("url", (component.component_id,), "body")],
+    )
+
+    assert graph.owners == []
+    assert graph.component_dispositions[0].decision == "preserve"
+    assert graph.component_dispositions[0].reason == "policy:nontranslatable_external_identifier"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        "ARVEN COMICS",
+        "/2 unreal.venturer CONTENTS LAB. BLUE",
+        "NIGHT OWL SCANS",
+    ),
+)
+def test_short_editorial_brand_identifier_is_preserved(payload: str) -> None:
+    component = _component("editorial_brand", (20, 20, 260, 54))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=[
+            _observation(
+                "brand_ocr",
+                (component.component_id,),
+                payload,
+                component.bbox_page,
+                confidence=0.99,
+            )
+        ],
+        semantic_regions=[
+            SemanticRegion("brand", (component.component_id,), "dialogue_body")
+        ],
+    )
+
+    assert graph.owners == []
+    assert graph.component_dispositions[0].decision == "preserve"
+    assert graph.component_dispositions[0].reason == (
+        "policy:nontranslatable_external_identifier"
+    )
+
+
+def test_top_chapter_header_is_preserved_as_one_apparatus_zone() -> None:
+    title = _component("title", (40, 0, 260, 42))
+    episode = _component("episode", (80, 92, 230, 126))
+    dialogue = _component("dialogue", (40, 620, 260, 680))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[title, episode, dialogue],
+        observations=[
+            _observation("title_ocr", (title.component_id,), "GRAND FINALE", title.bbox_page),
+            _observation(
+                "episode_ocr",
+                (episode.component_id,),
+                "EP. 35 SISTERHOOD",
+                episode.bbox_page,
+            ),
+            _observation(
+                "dialogue_ocr",
+                (dialogue.component_id,),
+                "WE SHOULD MOVE NOW",
+                dialogue.bbox_page,
+            ),
+        ],
+        semantic_regions=[
+            SemanticRegion("title", (title.component_id,), "dialogue_body"),
+            SemanticRegion("episode", (episode.component_id,), "dialogue_body"),
+            SemanticRegion("dialogue", (dialogue.component_id,), "dialogue_body"),
+        ],
+    )
+
+    decisions = {item.component_id: item for item in graph.component_dispositions}
+    assert decisions[title.component_id].decision == "preserve"
+    assert decisions[episode.component_id].decision == "preserve"
+    assert decisions[title.component_id].reason == "policy:chapter_header_apparatus"
+    assert decisions[dialogue.component_id].decision == "owned"
+    assert [owner.source_payload for owner in graph.owners] == ["WE SHOULD MOVE NOW"]
+
+
+def test_standalone_episode_marker_is_preserved_outside_page_header() -> None:
+    title = _component("title_footer", (60, 650, 280, 700))
+    marker = _component("episode_footer", (80, 720, 260, 760))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[title, marker],
+        observations=[
+            _observation(
+                "title_footer_ocr",
+                (title.component_id,),
+                "GRAND FINALE",
+                title.bbox_page,
+            ),
+            _observation(
+                "episode_footer_ocr",
+                (marker.component_id,),
+                "EP. 35 SISTERHOOD",
+                marker.bbox_page,
+            )
+        ],
+        semantic_regions=[
+            SemanticRegion("title_footer", (title.component_id,), "dialogue_body"),
+            SemanticRegion("episode_footer", (marker.component_id,), "dialogue_body")
+        ],
+    )
+
+    assert graph.owners == []
+    decisions = {item.component_id: item for item in graph.component_dispositions}
+    assert decisions[title.component_id].decision == "preserve"
+    assert decisions[marker.component_id].decision == "preserve"
+    assert decisions[marker.component_id].reason == "policy:chapter_marker_apparatus"
+
+
 def test_detector_region_without_any_ocr_evidence_is_suppressed() -> None:
     component = _component("art_false_positive", (30, 30, 90, 70))
     graph = build_page_owner_graph(
@@ -605,6 +1054,58 @@ def test_scanlation_apparatus_below_page_marker_is_explicitly_preserved() -> Non
     assert decisions[marker.component_id].decision == "preserve"
     assert decisions[promo.component_id].decision == "preserve"
     assert decisions[promo.component_id].reason == "policy:scanlation_apparatus"
+
+
+def test_explicit_scanlation_promo_copy_is_preserved_without_a_page_cutoff() -> None:
+    official = _component("official_support", (100, 20, 500, 70))
+    server = _component("server_news", (100, 100, 500, 150))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[official, server],
+        observations=[
+            _observation(
+                "official_ocr",
+                (official.component_id,),
+                "READ FROM OFFICIAL SITES TO SUPPORT US AND HELP PAY OUR STAFF",
+                official.bbox_page,
+            ),
+            _observation(
+                "server_ocr",
+                (server.component_id,),
+                "JOIN THE SERVER TO RECEIVE ALL THE NEWS AND UPDATES",
+                server.bbox_page,
+            ),
+        ],
+        semantic_regions=[
+            SemanticRegion("official_region", (official.component_id,), "body"),
+            SemanticRegion("server_region", (server.component_id,), "body"),
+        ],
+    )
+
+    assert graph.owners == []
+    assert {
+        item.reason for item in graph.component_dispositions
+    } == {"policy:scanlation_apparatus"}
+
+
+def test_story_dialogue_mentioning_a_server_is_not_scanlation_apparatus() -> None:
+    component = _component("dialogue", (100, 20, 500, 90))
+    graph = build_page_owner_graph(
+        page_id="page_001",
+        components=[component],
+        observations=[
+            _observation(
+                "dialogue_ocr",
+                (component.component_id,),
+                "JOIN THE SERVER NOW!",
+                component.bbox_page,
+            )
+        ],
+        semantic_regions=[SemanticRegion("dialogue_region", (component.component_id,), "body")],
+    )
+
+    assert [owner.source_payload for owner in graph.owners] == ["JOIN THE SERVER NOW!"]
+    assert graph.component_dispositions[0].decision == "owned"
 
 
 def test_scanlation_credit_page_uses_independent_contact_and_support_markers() -> None:

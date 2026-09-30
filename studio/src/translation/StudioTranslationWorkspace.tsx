@@ -5,6 +5,8 @@ import { buildTranslationQueue, resolveTranslationStatus } from "./translationQu
 import { GlossaryPanel } from "./GlossaryPanel";
 import { TranslationInspector } from "./TranslationInspector";
 import type { TranslationTarget } from "./TranslationQueuePanel";
+import { StudioRendererPreference } from "../preferences/StudioRendererPreference";
+import { useStudioProjectStore } from "../store/projectStore";
 
 export interface TranslationDraft {
   translated: string;
@@ -22,6 +24,22 @@ export function createTranslationPatch(draft: TranslationDraft): Partial<StudioT
     tipo: draft.type,
     translation_notes: draft.notes,
     translation_status: draft.status,
+  };
+}
+
+export function createRetypesetLayoutRequest(layer: StudioTextLayer) {
+  const ownerId = String(layer.owner_id ?? layer.logical_owner_id ?? layer.id).trim();
+  if (!ownerId) throw new Error("A unidade não possui owner canônico para composição");
+  const text = String(layer.translated ?? layer.traduzido ?? "");
+  if (!text.trim()) throw new Error("A composição exige uma tradução não vazia");
+  return {
+    ownerId,
+    layoutRequest: {
+      owner_id: ownerId,
+      text,
+      layout_bbox: layer.layout_bbox ?? layer.bbox,
+      style: layer.style ?? layer.estilo ?? {},
+    },
   };
 }
 
@@ -109,20 +127,24 @@ function projectGlossary(project: StudioProject): Record<string, string> {
 
 export function StudioTranslationWorkspace({
   project,
+  projectPath,
   layer,
   onChange,
   onConfirmNext,
   onNavigateBlock,
   onUpdateGlossary,
   isSaving = false,
+  error = null,
 }: {
   project: StudioProject;
+  projectPath: string;
   layer: StudioTextLayer | null;
   onChange: (patch: Partial<StudioTextLayer>) => void;
   onConfirmNext: () => void | Promise<void>;
   onNavigateBlock: (direction: "next" | "previous") => void | Promise<void>;
   onUpdateGlossary: (glossary: Record<string, string>) => void | Promise<void>;
   isSaving?: boolean;
+  error?: string | null;
 }) {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -168,6 +190,17 @@ export function StudioTranslationWorkspace({
           onChange={onChange}
           onConfirmNext={onConfirmNext}
           isSaving={isSaving}
+        />
+        {error && (
+          <p role="alert" className="mx-3 mb-3 rounded-lg border border-status-error/30 bg-status-error/10 px-2.5 py-2 text-[10px] leading-4 text-status-error">
+            {error}
+          </p>
+        )}
+        <StudioRendererPreference
+          project={project}
+          projectPath={projectPath}
+          layer={normalizedLayer}
+          onPersisted={() => useStudioProjectStore.getState().loadProject(projectPath)}
         />
         <GlossaryPanel glossary={projectGlossary(project)} onChange={onUpdateGlossary} />
       </div>

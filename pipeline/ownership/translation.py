@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
+from contextlib import nullcontext
 from dataclasses import dataclass
 import json
+import logging
 import re
+import time
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
 from .hash_contract import canonical_json_bytes, canonical_json_sha256, sha256_bytes, sha256_text
@@ -32,7 +35,29 @@ except ImportError:  # pragma: no cover - package import
 
 
 _TRANSLATABLE_STATES = frozenset({"owned", "ocr_ready", "execution_planned"})
+logger = logging.getLogger(__name__)
 _NOOP_DISPLAY_MAX_TOKEN_LENGTH = 12
+
+
+def _performance_measure(recorder: Any | None, stage: str):
+    if recorder is None or not callable(getattr(recorder, "measure", None)):
+        return nullcontext()
+    return recorder.measure(stage)
+
+
+def _persist_translation_attempt(
+    recorder: Any | None,
+    attempt: "TranslationAttempt",
+    *,
+    latency_sec: float,
+) -> None:
+    writer = getattr(recorder, "record_translation_attempt", None)
+    if not callable(writer):
+        return
+    try:
+        writer(attempt, latency_sec=latency_sec)
+    except Exception as exc:
+        logger.warning("failed to persist translation attempt: %s", exc)
 _NOOP_DISPLAY_MIN_INK_HEIGHT_RATIO = 0.68
 _NOOP_DISPLAY_MAX_COMPONENT_ASPECT = 1.8
 _NOOP_EMPHATIC_DISPLAY_MAX_COMPONENT_ASPECT = 4.0
@@ -882,14 +907,16 @@ def translate_owner(
     attempt_kwargs: Mapping[str, object] | None = None,
     page_language_evidence: PageLanguageEvidence | None = None,
     repaint_already_target_pixels: bool = False,
+    performance_recorder: Any | None = None,
 ) -> tuple[TranslationBinding, tuple[TranslationAttempt, ...]]:
     attempts: list[TranslationAttempt] = []
-    source_verdict = validate_target_language(
-        source=request.source_text,
-        target=request.source_text,
-        role=request.semantic_role,
-        page_language_evidence=page_language_evidence,
-    )
+    with _performance_measure(performance_recorder, "translation_validation"):
+        source_verdict = validate_target_language(
+            source=request.source_text,
+            target=request.source_text,
+            role=request.semantic_role,
+            page_language_evidence=page_language_evidence,
+        )
     if (
         repaint_already_target_pixels
         and source_verdict.accepted
@@ -919,6 +946,7 @@ def translate_owner(
             language_verdict=repaint_verdict,
             attempt_index=1,
         )
+        _persist_translation_attempt(performance_recorder, attempt, latency_sec=0.0)
         return bind_translation(
             request,
             request.source_text,
@@ -943,6 +971,7 @@ def translate_owner(
             language_verdict=source_verdict,
             attempt_index=1,
         )
+        _persist_translation_attempt(performance_recorder, attempt, latency_sec=0.0)
         return bind_translation(
             request,
             request.source_text,
@@ -963,6 +992,7 @@ def translate_owner(
             )
         provider_kwargs = dict(attempt_kwargs or {})
         for attempt_index, control in enumerate(controls, 1):
+            attempt_started = time.perf_counter()
             provider_result = None
             target_text: str | None = None
             try:
@@ -999,12 +1029,13 @@ def translate_owner(
                 if len(records) != 1:
                     raise TranslationIdentityError("provider response owner cardinality mismatch")
                 target_text = str(records[0].get("translated") or "")
-                verdict = validate_target_language(
-                    source=request.source_text,
-                    target=target_text,
-                    role=request.semantic_role,
-                    page_language_evidence=page_language_evidence,
-                )
+                with _performance_measure(performance_recorder, "translation_validation"):
+                    verdict = validate_target_language(
+                        source=request.source_text,
+                        target=target_text,
+                        role=request.semantic_role,
+                        page_language_evidence=page_language_evidence,
+                    )
                 status = "accepted" if verdict.accepted else "rejected"
                 metadata = json.loads(
                     provider_result.provider_metadata_json_bytes.decode("utf-8")
@@ -1047,8 +1078,18 @@ def translate_owner(
                     attempt_index=attempt_index,
                 )
                 attempts.append(attempt)
+                _persist_translation_attempt(
+                    performance_recorder,
+                    attempt,
+                    latency_sec=time.perf_counter() - attempt_started,
+                )
                 continue
             attempts.append(attempt)
+            _persist_translation_attempt(
+                performance_recorder,
+                attempt,
+                latency_sec=time.perf_counter() - attempt_started,
+            )
             if attempt.status == "accepted" and target_text is not None:
                 return bind_translation(request, target_text, attempts), tuple(attempts)
         if any(item.status == "rejected" for item in attempts):
@@ -1062,16 +1103,18 @@ def translate_owner(
             or backend.__class__.__name__
         )
         for backend_attempt in range(max(1, int(max_attempts_per_backend))):
+            attempt_started = time.perf_counter()
             variant = "primary" if backend_attempt == 0 else "contextual"
             attempt_index = len(attempts) + 1
             try:
                 target_text = str(backend(request, variant) or "")
-                verdict = validate_target_language(
-                    source=request.source_text,
-                    target=target_text,
-                    role=request.semantic_role,
-                    page_language_evidence=page_language_evidence,
-                )
+                with _performance_measure(performance_recorder, "translation_validation"):
+                    verdict = validate_target_language(
+                        source=request.source_text,
+                        target=target_text,
+                        role=request.semantic_role,
+                        page_language_evidence=page_language_evidence,
+                    )
                 status = "accepted" if verdict.accepted else "rejected"
                 attempt = TranslationAttempt.build(
                     request=request,
@@ -1102,8 +1145,18 @@ def translate_owner(
                     attempt_index=attempt_index,
                 )
                 attempts.append(attempt)
+                _persist_translation_attempt(
+                    performance_recorder,
+                    attempt,
+                    latency_sec=time.perf_counter() - attempt_started,
+                )
                 continue
             attempts.append(attempt)
+            _persist_translation_attempt(
+                performance_recorder,
+                attempt,
+                latency_sec=time.perf_counter() - attempt_started,
+            )
             if attempt.status == "accepted":
                 return bind_translation(request, target_text, attempts), tuple(attempts)
     if any(item.status == "rejected" for item in attempts):
@@ -1120,9 +1173,11 @@ def translate_owner_page(
     attempt_kwargs: Mapping[str, object] | None = None,
     page_language_evidence_by_owner: Mapping[str, PageLanguageEvidence] | None = None,
     repaint_already_target_pixels: bool = False,
+    performance_recorder: Any | None = None,
 ) -> OwnerPageTranslationResult:
     attempts: list[TranslationAttempt] = []
     bindings: list[TranslationBinding] = []
+    owner_errors: list[RuntimeError] = []
     for request in requests:
         try:
             binding, owner_attempts = translate_owner(
@@ -1135,12 +1190,18 @@ def translate_owner_page(
                     request.owner_id
                 ),
                 repaint_already_target_pixels=repaint_already_target_pixels,
+                performance_recorder=performance_recorder,
             )
         except (TranslationValidationExhausted, TranslationInfrastructureError) as exc:
-            error_type = type(exc)
-            raise error_type((*attempts, *exc.attempts)) from exc
+            attempts.extend(exc.attempts)
+            owner_errors.append(exc)
+            continue
         attempts.extend(owner_attempts)
         bindings.append(binding)
+    if owner_errors and not bindings and all(
+        isinstance(item, TranslationInfrastructureError) for item in owner_errors
+    ):
+        raise TranslationInfrastructureError(attempts) from owner_errors[-1]
     return OwnerPageTranslationResult.build(attempts, bindings)
 
 
@@ -1169,10 +1230,12 @@ def apply_owner_translation_result(
     owners = _translation_owners(merged)
     expected_ids = {owner.owner_id for owner in owners}
     bindings_by_owner = {binding.owner_id: binding for binding in result.bindings}
-    if set(bindings_by_owner) != expected_ids:
-        raise TranslationIdentityError("translation bindings do not cover every owner exactly once")
+    if not set(bindings_by_owner).issubset(expected_ids):
+        raise TranslationIdentityError("translation bindings include an unexpected owner")
     for owner in owners:
-        binding = bindings_by_owner[owner.owner_id]
+        binding = bindings_by_owner.get(owner.owner_id)
+        if binding is None:
+            continue
         if tuple(owner.component_ids) != binding.component_ids:
             raise TranslationIdentityError("translation binding component identity mismatch")
         if sha256_text(str(owner.source_payload or "")) != binding.source_payload_sha256:

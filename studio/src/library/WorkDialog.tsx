@@ -75,6 +75,7 @@ export function WorkDialog({
       title: title.trim(),
       aliases: aliasesFromText(aliases),
       coverPath,
+      ...(work?.description ? { description: work.description } : {}),
       publicationStatus,
       external: {
         ...(anilistId.trim() && Number.isFinite(Number(anilistId)) ? { anilistId: Number(anilistId) } : {}),
@@ -90,7 +91,7 @@ export function WorkDialog({
   };
 
   return (
-    <div className="studio-dialog-backdrop" role="presentation">
+    <div className="studio-dialog-backdrop studio-floating-layer" role="presentation">
       <section className="studio-dialog" role="dialog" aria-modal="true" aria-labelledby="studio-work-dialog-title">
         <header>
           <div>
@@ -139,11 +140,12 @@ export function WorkDialog({
                   <span>Manter este status manual mesmo se as fontes divergirem</span>
                 </label>
               )}
-              <div className="studio-dialog-field-pair">
+              {work && <div className="studio-dialog-field-pair">
                 <label><span>AniList ID</span><input inputMode="numeric" value={anilistId} onChange={(event) => setAnilistId(event.currentTarget.value)} /></label>
                 <label><span>MangaDex ID</span><input value={mangaDexId} onChange={(event) => setMangaDexId(event.currentTarget.value)} /></label>
-              </div>
+              </div>}
               <label><span>Fonte canônica</span><input type="url" value={canonicalUrl} placeholder="https://" onChange={(event) => setCanonicalUrl(event.currentTarget.value)} /></label>
+              {!work && <p className="studio-settings-note">Criar obra local manualmente continua disponivel: informe o titulo e salve sem selecionar um resultado.</p>}
               {work && onLinkTracking && (
                 <button type="button" className="studio-dialog-secondary" onClick={onLinkTracking}>
                   <Link2 size={14} /> Vincular ou trocar fonte

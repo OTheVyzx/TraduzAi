@@ -15,6 +15,7 @@ import {
   type StudioTextLayer,
   type StudioTextStyle,
 } from "./studioProject";
+import { writeV12Project } from "./v12Writeback";
 
 const IMAGE_LAYER_KEYS: ImageLayerKey[] = ["base", "mask", "inpaint", "brush", "recovery", "rendered"];
 const STUDIO_SCENE_NODE_KINDS: StudioSceneNodeKind[] = [
@@ -372,6 +373,11 @@ function normalizeBaseProject(value: unknown, kind: ProjectImportKind): ProjectI
 
 function normalizeV12Project(value: Record<string, unknown>): ProjectImportResult {
   const warnings: string[] = [];
+  if (value.studio_schema_version === STUDIO_SCHEMA_VERSION && Array.isArray(value.paginas)) {
+    const result = normalizeBaseProject(value, "studio_project");
+    result.warnings.push("Imported v12 project from Studio canonical paginas");
+    return result;
+  }
   const legacy = isRecord(value.legacy) ? value.legacy : {};
   if (Array.isArray(legacy.paginas)) {
     const result = normalizeBaseProject({ ...value, paginas: legacy.paginas }, "v12_analysis_project");
@@ -452,12 +458,15 @@ export function toTraduzAiV2Compat(project: StudioProject): Record<string, unkno
       studio_scene: normalizeStudioScene(page.studio_scene, page.image_layers, textLayers),
     };
   });
-  return {
+  const compat = {
     ...project,
     app: "traduzai",
     versao: COMPAT_PROJECT_VERSION,
     paginas,
   };
+  return project.schema_version === "12.0" || project.schema_version === 12
+    ? writeV12Project(project, paginas)
+    : compat;
 }
 
 export function finalImagePathForPage(page: Pick<StudioPage, "arquivo_traduzido" | "image_layers"> & Record<string, unknown>) {

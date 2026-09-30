@@ -50,6 +50,30 @@ class GatedLibraryBackend extends FakeLibraryBackend {
   }
 }
 
+class DelayedLoadLibraryBackend extends FakeLibraryBackend {
+  private releaseLoad!: (document: StudioLibrary) => void;
+  readonly loadStarted: Promise<void>;
+  private markLoadStarted!: () => void;
+
+  constructor(initial = createEmptyLibrary()) {
+    super(initial);
+    this.loadStarted = new Promise<void>((resolve) => {
+      this.markLoadStarted = resolve;
+    });
+  }
+
+  override async load() {
+    this.markLoadStarted();
+    return new Promise<StudioLibrary>((resolve) => {
+      this.releaseLoad = resolve;
+    });
+  }
+
+  finishLoad(document: StudioLibrary) {
+    this.releaseLoad(clone(document));
+  }
+}
+
 async function nextTick() {
   await Promise.resolve();
   await Promise.resolve();
@@ -140,6 +164,23 @@ describe("libraryStore", () => {
     backend.pending.shift()?.();
     await Promise.all([first, second]);
     expect(backend.document.works.map((work) => work.id)).toEqual(["work-1", "work-2"]);
+  });
+
+  it("ignores an older load result after a newer local mutation", async () => {
+    const staleDocument = createEmptyLibrary();
+    const backend = new DelayedLoadLibraryBackend(staleDocument);
+    const store = createLibraryStore(backend);
+
+    const loading = store.getState().load();
+    await backend.loadStarted;
+    await store.getState().addWork({ id: "work-new", title: "Estado novo", aliases: [] });
+
+    backend.finishLoad(staleDocument);
+    await loading;
+
+    expect(store.getState().document.works.map((work) => work.id)).toEqual(["work-new"]);
+    expect(store.getState().status).toBe("ready");
+    expect(backend.document.works.map((work) => work.id)).toEqual(["work-new"]);
   });
 
   it("keeps the in-memory document when persistence fails", async () => {

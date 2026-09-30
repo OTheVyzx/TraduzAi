@@ -186,20 +186,19 @@ describe("createLegacyEditorBackendAdapter", () => {
     ).rejects.toThrow(/png_data/);
   });
 
-  it("renders preview by updating rendered layer", async () => {
+  it("refuses to materialize an empty rendered preview", async () => {
     const { backend, compat } = backendWithProject();
     const loaded = await compat.loadEditorPage({ project_path: "memory://compat", page_index: 0 });
 
-    const result = await compat.renderPreviewPage({
+    await expect(compat.renderPreviewPage({
       project_path: "memory://compat",
       page_index: 0,
       page: loaded.page,
       fingerprint: "abc",
-    });
+    })).rejects.toThrow("Renderização ainda não conectada ao pipeline do Studio.");
 
     const page = await backend.loadEditorPage({ project_path: "memory://compat", page_index: 0 });
-    expect(result.renderer_backend).toBe("studio-local");
-    expect(page.page.image_layers.rendered?.path).toBe("data:image/png;base64,");
+    expect(page.page.image_layers.rendered?.path).toBeNull();
   });
 
   it("uses Studio Lite detect when the backend provides it", async () => {
@@ -252,16 +251,41 @@ describe("createLegacyEditorBackendAdapter", () => {
     expect(result.changed_assets).toContain("mask");
   });
 
-  it("keeps local detect stubs when Studio Lite detect is unavailable", async () => {
+  it("fails closed when Studio Lite detect is unavailable", async () => {
     const { compat } = backendWithProject();
 
-    await expect(compat.detectPage({ project_path: "memory://compat", page_index: 0 })).resolves.toBe(
-      "Deteccao ainda nao conectada no Studio local",
-    );
-    await expect(compat.detectBoxesPage({ project_path: "memory://compat", page_index: 0 })).resolves.toBe(
-      "Deteccao de caixas ainda nao conectada no Studio local",
-    );
+    await expect(compat.detectPage({ project_path: "memory://compat", page_index: 0 }))
+      .rejects.toThrow("Detecção ainda não conectada ao pipeline do Studio.");
+    await expect(compat.detectBoxesPage({ project_path: "memory://compat", page_index: 0 }))
+      .rejects.toThrow("Detecção de caixas ainda não conectada ao pipeline do Studio.");
   });
+
+  it("fails closed for direct pipeline actions that are not connected", async () => {
+    const { compat } = backendWithProject();
+    const page = { project_path: "memory://compat", page_index: 0 };
+
+    await expect(compat.ocrPage(page)).rejects.toThrow("OCR ainda não conectado ao pipeline do Studio.");
+    await expect(compat.translatePage(page)).rejects.toThrow("Tradução ainda não conectada ao pipeline do Studio.");
+    await expect(compat.runProcessRegion({ ...page, bbox: [1, 2, 30, 40] }))
+      .rejects.toThrow("Processamento regional ainda não conectado ao pipeline do Studio.");
+    await expect(compat.processBlock({ ...page, block_id: "block-1", mode: "translate" }))
+      .rejects.toThrow("Processamento de bloco ainda não conectado ao pipeline do Studio.");
+  });
+
+  it.each(["ocr", "translate"] as const)(
+    "fails closed when the %s page action is not connected",
+    async (action) => {
+      const { compat } = backendWithProject();
+
+      await expect(compat.runPageActionWithOptionalMask({
+        project_path: "memory://compat",
+        page_index: 0,
+        action,
+        bbox: [1, 2, 30, 40],
+        mask_path: "mask/lasso.png",
+      })).rejects.toThrow(`Ação ${action === "ocr" ? "OCR" : "de tradução"} ainda não conectada ao pipeline do Studio.`);
+    },
+  );
 
   it("uses Studio Lite inpaint for regional reinpaint when bbox or mask is provided", async () => {
     const { backend } = backendWithProject();

@@ -99,4 +99,46 @@ describe("persistência de metadados da tradução manual", () => {
       });
     },
   );
+
+  it("persists a manual region as pending analysis instead of pretending OCR confidence", async () => {
+    let persistedProject = projectFixture(pageFixture());
+    configureEditorBackend({
+      saveProjectJson: async ({ project_json }) => {
+        persistedProject = structuredClone(project_json as Project);
+      },
+      loadEditorPage: async ({ page_index }) => ({
+        page_index,
+        page: structuredClone(persistedProject.paginas[page_index]),
+        project: structuredClone(persistedProject),
+      }),
+    } as Partial<EditorBackendApi> as EditorBackendApi);
+    useAppStore.setState({ project: persistedProject });
+    useEditorStore.setState({
+      currentPageIndex: 0,
+      currentPage: structuredClone(persistedProject.paginas[0]),
+      pendingEdits: {},
+      pendingStructuralEdits: { created: [], deleted: {}, order: undefined },
+    });
+
+    await useEditorStore.getState().createTextLayer([10, 20, 80, 90]);
+    const created = useEditorStore.getState().currentPage?.text_layers.at(-1);
+    expect(created).toMatchObject({
+      source_bbox: [10, 20, 80, 90],
+      layout_bbox: [10, 20, 80, 90],
+      render_bbox: null,
+      translation_status: "pending",
+      confianca_ocr: 0,
+      ocr_confidence: 0,
+      qa_flags: ["manual_region_requires_analysis"],
+      style_origin: "editor",
+    });
+
+    await useEditorStore.getState().commitEdits();
+    expect(persistedProject.paginas[0].text_layers.at(-1)).toMatchObject({
+      id: created?.id,
+      qa_flags: ["manual_region_requires_analysis"],
+      render_preview_path: null,
+    });
+    expect(useEditorStore.getState().pendingStructuralEdits.created).toEqual([]);
+  });
 });

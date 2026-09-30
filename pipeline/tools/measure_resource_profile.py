@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import time
+import uuid
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,17 @@ def measure_resource_profile(
             current_vram = _read_nvidia_smi_memory_mb()
             if current_vram is not None:
                 peak_vram_mb = max(peak_vram_mb or 0, current_vram)
+            _write_partial_journal(
+                output_path,
+                {
+                    "state": "running",
+                    "elapsed_seconds": round(elapsed, 4),
+                    "peak_rss_mb": round(peak_rss / (1024 * 1024), 3),
+                    "global_gpu_memory_peak_mb": peak_vram_mb,
+                    "sample_count": sample_count,
+                    "child_pid": int(process.pid),
+                },
+            )
             time.sleep(max(0.01, sample_interval))
 
         try:
@@ -136,8 +148,41 @@ def measure_resource_profile(
         sample_count=sample_count,
         timed_out=timed_out,
     )
+    if timed_out:
+        result["termination"] = {
+            "classification": "external_timeout",
+            "confidence": "high",
+            "evidence": [f"profiler timeout reached after {timeout_seconds}s"],
+        }
+    elif exit_code == 0:
+        result["termination"] = {
+            "classification": "normal",
+            "confidence": "high",
+            "evidence": ["child process returned exit code 0"],
+        }
+    else:
+        result["termination"] = {
+            "classification": "unknown",
+            "confidence": "low",
+            "evidence": [
+                f"child process returned exit code {exit_code}",
+                "exit code alone cannot distinguish OOM, native abort, or external kill",
+            ],
+        }
     result["stdout_tail"] = _tail_file(stdout_path)
     result["stderr_tail"] = _tail_file(stderr_path)
+    _write_partial_journal(
+        output_path,
+        {
+            "state": "finished",
+            "elapsed_seconds": result["gate"]["elapsed_seconds"],
+            "peak_rss_mb": result["gate"]["peak_rss_mb"],
+            "global_gpu_memory_peak_mb": result["gate"]["peak_vram_mb"],
+            "sample_count": result["gate"]["sample_count"],
+            "exit_code": result["gate"]["exit_code"],
+            "timed_out": result["gate"]["timed_out"],
+        },
+    )
     return _write_result(result, out_dir)
 
 
@@ -260,6 +305,7 @@ def _result(
             "peak_rss_mb": peak_rss_mb,
             "avg_cpu_percent": avg_cpu_percent,
             "peak_vram_mb": peak_vram_mb,
+            "gpu_measurement_scope": "global_device_approximate",
             "sample_count": sample_count,
             "timed_out": timed_out,
         }
@@ -276,6 +322,39 @@ def _tail_file(path: Path | None, *, max_chars: int = 2000) -> str:
     if path is None or not path.exists():
         return ""
     return _tail(path.read_text(encoding="utf-8", errors="replace"), max_chars=max_chars)
+
+
+def _write_partial_journal(output_path: Path | None, payload: dict[str, Any]) -> None:
+    if output_path is None:
+        return
+    journal_path = output_path / "resources.partial.json"
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    last_error: OSError | None = None
+    for attempt in range(3):
+        temporary_path = output_path / f"resources.partial.{uuid.uuid4().hex}.tmp"
+        try:
+            temporary_path.write_text(serialized, encoding="utf-8")
+            temporary_path.replace(journal_path)
+            return
+        except OSError as exc:
+            last_error = exc
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if attempt < 2:
+                time.sleep(0.01 * (attempt + 1))
+    # Resource telemetry is observational. A transient network-drive or file
+    # scanner lock must never terminate the command being measured. Preserve
+    # the last valid journal and record the sampling fault best-effort.
+    if last_error is not None:
+        try:
+            with (output_path / "resources.partial.errors.log").open(
+                "a", encoding="utf-8"
+            ) as handle:
+                handle.write(f"{type(last_error).__name__}: {last_error}\n")
+        except OSError:
+            pass
 
 
 def _write_result(result: dict[str, Any], out_dir: str | Path | None) -> dict[str, Any]:

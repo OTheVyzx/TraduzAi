@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { copyStyleFromLayer, createApplyStyleCommand } from "../../editor/batch/chapterCommands";
+import {
+  copyStyleFromLayer,
+  createApplyStyleCommand,
+  createReplaceTextCommand,
+  previewChapterReplacements,
+} from "../../editor/batch/chapterCommands";
 import { createRecoverySnapshot } from "../../autosave/recovery";
 import { configureStudioEditorBackend, getStudioEditorBackend } from "../../backend/editorBackend";
 import { MemoryStudioEditorBackend } from "../../backend/memoryBackend";
@@ -23,20 +28,155 @@ describe("useStudioProjectStore", () => {
   });
 
   it("imports project json into the configured backend", async () => {
-    await useStudioProjectStore.getState().importProjectJson(
-      JSON.stringify({
-        versao: "1.0",
-        paginas: [{ numero: 1, textos: [{ id: "a", bbox: [0, 0, 1, 1], texto: "A", traduzido: "B" }] }],
-      }),
-      "memory://store-test",
-    );
+    const originalBackend = getStudioEditorBackend();
+    const backend = new MemoryStudioEditorBackend();
+    configureStudioEditorBackend(backend);
+    try {
+      await useStudioProjectStore.getState().importProjectJson(
+        JSON.stringify({
+          versao: "1.0",
+          paginas: [{ numero: 1, textos: [{ id: "a", bbox: [0, 0, 1, 1], texto: "A", traduzido: "B" }] }],
+        }),
+        "memory://store-test",
+      );
 
-    const state = useStudioProjectStore.getState();
-    expect(state.project?.paginas).toHaveLength(1);
-    expect(state.lastImport?.kind).toBe("traduzai_v1");
+      const state = useStudioProjectStore.getState();
+      expect(state.project?.paginas).toHaveLength(1);
+      expect(state.lastImport?.kind).toBe("traduzai_v1");
+      expect((await backend.loadProject({ project_path: "memory://store-test" }))
+        .paginas[0].text_layers[0].translated).toBe("B");
 
-    await state.loadProject("memory://store-test");
-    expect(useStudioProjectStore.getState().project?.paginas[0].text_layers[0].translated).toBe("B");
+      await state.loadProject("memory://store-test");
+      expect(useStudioProjectStore.getState().project?.paginas[0].text_layers[0].translated).toBe("B");
+    } finally {
+      configureStudioEditorBackend(originalBackend);
+    }
+  });
+
+  it("ignores a project load that finishes after another project becomes active", async () => {
+    const originalBackend = getStudioEditorBackend();
+    const stalePath = "memory://stale-load";
+    const staleProject = importStudioProject({
+      versao: "1.0",
+      paginas: [{ numero: 1, textos: [{ id: "stale", bbox: [0, 0, 1, 1], traduzido: "Antigo" }] }],
+    }).project;
+    const backend = new MemoryStudioEditorBackend({ [stalePath]: staleProject });
+    let releaseLoad!: () => void;
+    let markLoadStarted!: () => void;
+    const loadStarted = new Promise<void>((resolve) => { markLoadStarted = resolve; });
+    const loadGate = new Promise<void>((resolve) => { releaseLoad = resolve; });
+    const loadProject = backend.loadProject.bind(backend);
+    backend.loadProject = async (config) => {
+      markLoadStarted();
+      await loadGate;
+      return loadProject(config);
+    };
+    configureStudioEditorBackend(backend);
+    try {
+      const staleLoad = useStudioProjectStore.getState().loadProject(stalePath);
+      await loadStarted;
+      await useStudioProjectStore.getState().importProjectJson(
+        JSON.stringify({
+          versao: "1.0",
+          paginas: [{ numero: 1, textos: [{ id: "new", bbox: [0, 0, 1, 1], traduzido: "Atual" }] }],
+        }),
+        "memory://active-project",
+      );
+
+      releaseLoad();
+      await staleLoad;
+
+      expect(useStudioProjectStore.getState().projectPath).toBe("memory://active-project");
+      expect(useStudioProjectStore.getState().project?.paginas[0].text_layers[0].translated).toBe("Atual");
+    } finally {
+      configureStudioEditorBackend(originalBackend);
+    }
+  });
+
+  it("does not restore a saved project over a newer active project", async () => {
+    const originalBackend = getStudioEditorBackend();
+    const savedPath = "memory://save-finishes-late";
+    const savedProject = importStudioProject({
+      versao: "1.0",
+      paginas: [{ numero: 1, textos: [{ id: "saved", bbox: [0, 0, 1, 1], traduzido: "Salvo" }] }],
+    }).project;
+    const backend = new MemoryStudioEditorBackend({ [savedPath]: savedProject });
+    let releaseSave!: () => void;
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
+    const saveProjectJson = backend.saveProjectJson.bind(backend);
+    backend.saveProjectJson = async (config) => {
+      markSaveStarted();
+      await saveGate;
+      return saveProjectJson(config);
+    };
+    configureStudioEditorBackend(backend);
+    try {
+      await useStudioProjectStore.getState().loadProject(savedPath);
+      const lateSave = useStudioProjectStore.getState().saveProject();
+      await saveStarted;
+      const activateNewProject = useStudioProjectStore.getState().importProjectJson(
+        JSON.stringify({
+          versao: "1.0",
+          paginas: [{ numero: 1, textos: [{ id: "new", bbox: [0, 0, 1, 1], traduzido: "Projeto atual" }] }],
+        }),
+        "memory://new-active-project",
+      );
+
+      releaseSave();
+      await Promise.all([lateSave, activateNewProject]);
+
+      expect(useStudioProjectStore.getState().projectPath).toBe("memory://new-active-project");
+      expect(useStudioProjectStore.getState().project?.paginas[0].text_layers[0].translated).toBe("Projeto atual");
+    } finally {
+      configureStudioEditorBackend(originalBackend);
+    }
+  });
+
+  it("does not apply a late text mutation to a newer active project", async () => {
+    const originalBackend = getStudioEditorBackend();
+    const editedPath = "memory://edit-finishes-late";
+    const editedProject = importStudioProject({
+      versao: "1.0",
+      paginas: [{ numero: 1, textos: [{ id: "edited", bbox: [0, 0, 1, 1], traduzido: "Antes" }] }],
+    }).project;
+    const backend = new MemoryStudioEditorBackend({ [editedPath]: editedProject });
+    let releasePatch!: () => void;
+    let markPatchPersisted!: () => void;
+    const patchPersisted = new Promise<void>((resolve) => { markPatchPersisted = resolve; });
+    const patchGate = new Promise<void>((resolve) => { releasePatch = resolve; });
+    const patchEditorTextLayer = backend.patchEditorTextLayer.bind(backend);
+    backend.patchEditorTextLayer = async (config) => {
+      const result = await patchEditorTextLayer(config);
+      markPatchPersisted();
+      await patchGate;
+      return result;
+    };
+    configureStudioEditorBackend(backend);
+    try {
+      await useStudioProjectStore.getState().loadProject(editedPath);
+      const latePatch = useStudioProjectStore.getState().patchCurrentTextLayer("edited", {
+        translated: "Depois",
+        traduzido: "Depois",
+      });
+      await patchPersisted;
+      await useStudioProjectStore.getState().importProjectJson(
+        JSON.stringify({
+          versao: "1.0",
+          paginas: [{ numero: 1, textos: [{ id: "new", bbox: [0, 0, 1, 1], traduzido: "Projeto atual" }] }],
+        }),
+        "memory://active-after-edit",
+      );
+
+      releasePatch();
+      await latePatch;
+
+      expect(useStudioProjectStore.getState().projectPath).toBe("memory://active-after-edit");
+      expect(useStudioProjectStore.getState().project?.paginas[0].text_layers[0].translated).toBe("Projeto atual");
+    } finally {
+      configureStudioEditorBackend(originalBackend);
+    }
   });
 
   it("closes the active project explicitly and clears chapter-only state", async () => {
@@ -139,6 +279,94 @@ describe("useStudioProjectStore", () => {
     expect(await useStudioProjectStore.getState().redoChapterCommand()).toBe(true);
     expect(useStudioProjectStore.getState().project?.paginas[0].text_layers[1].style).toMatchObject({ fonte: "Wild" });
     expect(useStudioProjectStore.getState().project?.paginas[0].text_layers[1].translated).toBe("Edicao posterior");
+  });
+
+  it("keeps a multipage chapter command recoverable when persistence fails", async () => {
+    const originalBackend = getStudioEditorBackend();
+    const projectPath = "memory://store-command-write-failure";
+    const project = importStudioProject({
+      versao: "2.0",
+      paginas: [
+        { numero: 1, textos: [{ id: "a", bbox: [0, 0, 1, 1], texto: "A", traduzido: "Antes" }] },
+        { numero: 2, textos: [{ id: "b", bbox: [0, 0, 1, 1], texto: "B", traduzido: "Antes" }] },
+      ],
+    }).project;
+    const backend = new MemoryStudioEditorBackend({ [projectPath]: project });
+    configureStudioEditorBackend(backend);
+    try {
+      await useStudioProjectStore.getState().loadProject(projectPath);
+      const before = structuredClone(useStudioProjectStore.getState().project!);
+      const matches = previewChapterReplacements(before, {
+        query: "Antes",
+        replacement: "Depois",
+        caseSensitive: false,
+        wholeWord: true,
+      });
+      const command = createReplaceTextCommand(before, matches);
+      backend.mutateProject = async () => {
+        throw new Error("falha simulada ao persistir lote");
+      };
+
+      expect(await useStudioProjectStore.getState().executeChapterCommand(command)).toBe(false);
+      const state = useStudioProjectStore.getState();
+      expect(state.project).toEqual(before);
+      expect(state.chapterHistory).toEqual([]);
+      expect(state.chapterHistoryIndex).toBe(0);
+      expect(state.hasUnsavedChanges).toBe(true);
+      expect(state.error).toContain("falha simulada");
+    } finally {
+      configureStudioEditorBackend(originalBackend);
+    }
+  });
+
+  it("does not apply a completed chapter command to a newer active project", async () => {
+    const originalBackend = getStudioEditorBackend();
+    const editedPath = "memory://command-finishes-late";
+    const editedProject = importStudioProject({
+      versao: "2.0",
+      paginas: [{ numero: 1, textos: [{ id: "a", bbox: [0, 0, 1, 1], traduzido: "Antes" }] }],
+    }).project;
+    const backend = new MemoryStudioEditorBackend({ [editedPath]: editedProject });
+    configureStudioEditorBackend(backend);
+    try {
+      await useStudioProjectStore.getState().loadProject(editedPath);
+      const active = useStudioProjectStore.getState().project!;
+      const command = createReplaceTextCommand(active, previewChapterReplacements(active, {
+        query: "Antes",
+        replacement: "Depois",
+        caseSensitive: false,
+        wholeWord: true,
+      }));
+      let releaseMutation!: () => void;
+      let markMutationPersisted!: () => void;
+      const mutationPersisted = new Promise<void>((resolve) => { markMutationPersisted = resolve; });
+      const mutationGate = new Promise<void>((resolve) => { releaseMutation = resolve; });
+      const mutateProject = backend.mutateProject.bind(backend);
+      backend.mutateProject = async (config) => {
+        const result = await mutateProject(config);
+        markMutationPersisted();
+        await mutationGate;
+        return result;
+      };
+
+      const lateCommand = useStudioProjectStore.getState().executeChapterCommand(command);
+      await mutationPersisted;
+      await useStudioProjectStore.getState().importProjectJson(
+        JSON.stringify({
+          versao: "1.0",
+          paginas: [{ numero: 1, textos: [{ id: "new", bbox: [0, 0, 1, 1], traduzido: "Projeto atual" }] }],
+        }),
+        "memory://active-after-command",
+      );
+      releaseMutation();
+      await lateCommand;
+
+      expect(useStudioProjectStore.getState().projectPath).toBe("memory://active-after-command");
+      expect(useStudioProjectStore.getState().project?.paginas[0].text_layers[0].translated).toBe("Projeto atual");
+      expect(useStudioProjectStore.getState().chapterHistory).toEqual([]);
+    } finally {
+      configureStudioEditorBackend(originalBackend);
+    }
   });
 
   it("refuses chapter undo when the same style field changed afterwards", async () => {

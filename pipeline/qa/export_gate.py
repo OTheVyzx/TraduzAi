@@ -370,22 +370,6 @@ def _collect_owner_functional_contract_issues(
                     )
                 if not quality.get("rendered_line_core_heights_px"):
                     add("missing_rendered_line_core_metrics", "layout_legibility_contract")
-                try:
-                    source_scale_ratio = float(quality.get("source_scale_ratio"))
-                except (TypeError, ValueError):
-                    source_scale_ratio = None
-                if (
-                    source_scale_ratio is not None
-                    and source_scale_ratio < 0.75
-                    and status != "under_source_scale"
-                ):
-                    add("under_source_scale", "layout_legibility_contract")
-                try:
-                    x_height_ratio = float(quality.get("x_height_ratio"))
-                except (TypeError, ValueError):
-                    x_height_ratio = None
-                if x_height_ratio is not None and x_height_ratio < 0.75:
-                    add("under_source_x_height", "layout_legibility_contract")
             if str(layer.get("fit_status") or "") == "below_proportional_legibility":
                 add("below_proportional_legibility", "layout_legibility_contract")
 

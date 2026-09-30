@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from difflib import SequenceMatcher
 import hashlib
 import json
 import math
 import re
 from typing import Iterable, Sequence
 
-from .evidence import normalize_evidence_tokens, safely_dominates
+from .evidence import (
+    normalize_evidence_spacing_signature,
+    normalize_evidence_tokens,
+    safely_dominates,
+)
 from .model import (
     BBox,
     ComponentDisposition,
@@ -23,6 +28,13 @@ from .model import (
 
 _SELECTED_INK_MIN_SAFETY_MARGIN_PX = 3
 _SELECTED_INK_MAX_SAFETY_MARGIN_PX = 18
+_FULL_READING_CONSENSUS_MIN_OBSERVATIONS = 3
+_FULL_READING_CONSENSUS_MIN_PROVIDERS = 3
+_FULL_READING_CONSENSUS_MIN_SHARE_NUMERATOR = 2
+_FULL_READING_CONSENSUS_MIN_SHARE_DENOMINATOR = 3
+_FULL_READING_CONSENSUS_RUNNER_UP_MULTIPLIER = 2
+_FULL_READING_NEAR_EQUIVALENT_MIN_CHARS = 12
+_FULL_READING_NEAR_EQUIVALENT_RATIO = 0.9
 
 
 @dataclass(frozen=True)
@@ -273,6 +285,95 @@ def _observation_support_rank(
     )
 
 
+def _strong_full_reading_consensus(
+    candidates: Sequence[tuple[TextObservation, frozenset[str]]],
+    normalized_tokens: dict[str, tuple[str, ...]],
+) -> frozenset[str] | None:
+    """Return a uniquely corroborated payload without hiding real ambiguity."""
+
+    def near_equivalent(left: TextObservation, right: TextObservation) -> bool:
+        left_tokens = normalize_evidence_tokens(left.text)
+        right_tokens = normalize_evidence_tokens(right.text)
+        left_signature = "".join(left_tokens)
+        right_signature = "".join(right_tokens)
+        if min(len(left_signature), len(right_signature)) < _FULL_READING_NEAR_EQUIVALENT_MIN_CHARS:
+            return False
+        left_numbers = tuple(re.findall(r"\d+(?:[.,]\d+)?", str(left.text)))
+        right_numbers = tuple(re.findall(r"\d+(?:[.,]\d+)?", str(right.text)))
+        if left_numbers != right_numbers:
+            return False
+        return (
+            SequenceMatcher(None, left_signature, right_signature).ratio()
+            >= _FULL_READING_NEAR_EQUIVALENT_RATIO
+        )
+
+    groups: list[list[TextObservation]] = []
+    for observation, _associated in candidates:
+        matching_indexes = [
+            index
+            for index, group in enumerate(groups)
+            if any(
+                normalized_tokens[candidate.observation_id]
+                == normalized_tokens[observation.observation_id]
+                or normalize_evidence_spacing_signature(candidate.text)
+                == normalize_evidence_spacing_signature(observation.text)
+                or near_equivalent(candidate, observation)
+                for candidate in group
+            )
+        ]
+        if not matching_indexes:
+            groups.append([observation])
+            continue
+        first_index = matching_indexes[0]
+        groups[first_index].append(observation)
+        for index in reversed(matching_indexes[1:]):
+            groups[first_index].extend(groups.pop(index))
+    if len(groups) <= 1:
+        return frozenset(
+            observation.observation_id
+            for group in groups
+            for observation in group
+        ) or None
+
+    def provider_ids(group: Sequence[TextObservation]) -> frozenset[str]:
+        return frozenset(
+            str(observation.provider).strip()
+            for observation in group
+            if str(observation.provider).strip()
+        )
+
+    ranked = sorted(
+        groups,
+        key=lambda group: (
+            -len(provider_ids(group)),
+            -len(group),
+            tuple(sorted(observation.observation_id for observation in group)),
+        ),
+    )
+    winners = ranked[0]
+    winner_count = len(winners)
+    provider_count = len(provider_ids(winners))
+    runner_up_provider_count = len(provider_ids(ranked[1]))
+    all_provider_count = len(
+        frozenset().union(*(provider_ids(group) for group in groups))
+    )
+    if winner_count < _FULL_READING_CONSENSUS_MIN_OBSERVATIONS:
+        return None
+    if provider_count < _FULL_READING_CONSENSUS_MIN_PROVIDERS:
+        return None
+    if (
+        provider_count * _FULL_READING_CONSENSUS_MIN_SHARE_DENOMINATOR
+        < all_provider_count * _FULL_READING_CONSENSUS_MIN_SHARE_NUMERATOR
+    ):
+        return None
+    if (
+        provider_count
+        < runner_up_provider_count * _FULL_READING_CONSENSUS_RUNNER_UP_MULTIPLIER
+    ):
+        return None
+    return frozenset(observation.observation_id for observation in winners)
+
+
 def _select_observations(
     region: _ResolvedRegion,
     observations: Sequence[TextObservation],
@@ -347,21 +448,32 @@ def _select_observations(
             for observation, _associated in full_candidates
         }
         if len(maximal_payloads) > 1:
-            for observation, _associated in full_candidates:
-                rejection_reasons[observation.observation_id] = "ambiguous_reading"
-            for observation, associated in selectable:
-                if observation.observation_id in rejection_reasons:
-                    continue
-                rejection_reasons[observation.observation_id] = (
-                    "dominated_subcoverage"
-                    if associated != expected_ids
-                    else "dominated_truncation"
-                )
-            return [], [item[0] for item in evidence], rejection_reasons
+            consensus_ids = _strong_full_reading_consensus(
+                full_candidates,
+                normalized_tokens,
+            )
+            if consensus_ids is None:
+                for observation, _associated in full_candidates:
+                    rejection_reasons[observation.observation_id] = "ambiguous_reading"
+                for observation, associated in selectable:
+                    if observation.observation_id in rejection_reasons:
+                        continue
+                    rejection_reasons[observation.observation_id] = (
+                        "dominated_subcoverage"
+                        if associated != expected_ids
+                        else "dominated_truncation"
+                    )
+                return [], [item[0] for item in evidence], rejection_reasons
+            full_candidates = [
+                item
+                for item in full_candidates
+                if item[0].observation_id in consensus_ids
+            ]
 
         ranked_full = sorted(
             full_candidates,
             key=lambda item: (
+                -len(normalized_tokens[item[0].observation_id]),
                 _observation_support_rank(item[0], item[1], region_bbox),
                 str(item[0].provider),
                 str(item[0].observation_id),
@@ -371,7 +483,9 @@ def _select_observations(
         equally_supported = [
             item
             for item in ranked_full
-            if _observation_support_rank(item[0], item[1], region_bbox) == best_support
+            if len(normalized_tokens[item[0].observation_id])
+            == len(normalized_tokens[ranked_full[0][0].observation_id])
+            and _observation_support_rank(item[0], item[1], region_bbox) == best_support
         ]
         selected_observation, _covered = equally_supported[0]
         selected_group = [
@@ -381,8 +495,12 @@ def _select_observations(
                     observation
                     for observation, _associated in full_candidates
                     if observation.observation_id != selected_observation.observation_id
-                    and normalized_tokens[observation.observation_id]
-                    == normalized_tokens[selected_observation.observation_id]
+                    and (
+                        normalized_tokens[observation.observation_id]
+                        == normalized_tokens[selected_observation.observation_id]
+                        or normalize_evidence_spacing_signature(observation.text)
+                        == normalize_evidence_spacing_signature(selected_observation.text)
+                    )
                 ),
                 key=_observation_order,
             ),
@@ -525,17 +643,21 @@ def _normalise_regions(
 def _atomic_payload(selected: Sequence[TextObservation]) -> str:
     parts: list[str] = []
     seen_evidence: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+    seen_spacing_evidence: set[tuple[str, tuple[str, ...]]] = set()
     for item in selected:
         part = " ".join(str(item.text).split())
         if not part:
             continue
+        component_key = tuple(sorted(str(value) for value in item.component_ids))
         evidence_key = (
             normalize_evidence_tokens(part),
-            tuple(sorted(str(value) for value in item.component_ids)),
+            component_key,
         )
-        if evidence_key in seen_evidence:
+        spacing_key = (normalize_evidence_spacing_signature(part), component_key)
+        if evidence_key in seen_evidence or spacing_key in seen_spacing_evidence:
             continue
         seen_evidence.add(evidence_key)
+        seen_spacing_evidence.add(spacing_key)
         parts.append(part)
     return " ".join(parts)
 
@@ -566,11 +688,31 @@ def _is_nontranslatable_external_identifier(payload: str) -> bool:
 
     normalized = " ".join(str(payload or "").split())
     credit_roles = re.findall(r"(?i)(?:^|\s)(?:TL|PR|RD|TS|CL)\s*:", normalized)
+    brand_words = re.findall(r"[A-Za-z]+", normalized.casefold())
+    short_editorial_brand = bool(
+        brand_words
+        and (
+            (len(brand_words) == 2 and brand_words[-1] in {"comic", "comics"})
+            or (
+                len(brand_words) <= 4
+                and brand_words[-1]
+                in {"scans", "scanlation", "translations", "studio"}
+            )
+            or (
+                len(brand_words) <= 6
+                and any(
+                    brand_words[index : index + 2] == ["contents", "lab"]
+                    for index in range(max(0, len(brand_words) - 1))
+                )
+            )
+        )
+    )
     return bool(
         normalized
         and (
             _EXTERNAL_IDENTIFIER_RE.search(normalized)
             or len(credit_roles) >= 3
+            or short_editorial_brand
         )
     )
 
@@ -620,6 +762,92 @@ def _scanlation_apparatus_cutoff(
     if len(present_weak_families) >= 2:
         candidates.extend(min(values) for values in present_weak_families)
     return max(0, min(candidates) - 100) if candidates else None
+
+
+def _is_explicit_scanlation_promo(payload: str) -> bool:
+    normalized = "".join(
+        character for character in str(payload or "").casefold() if character.isalnum()
+    )
+    official_support = bool(
+        "readfromofficialsites" in normalized
+        and ("supportus" in normalized or "payourstaff" in normalized)
+    )
+    server_news = bool(
+        "jointheserver" in normalized
+        and ("news" in normalized or "updates" in normalized)
+    )
+    return official_support or server_news
+
+
+_CHAPTER_HEADER_MARKER_RE = re.compile(
+    r"(?i)^\s*(?:ep(?:isode)?|ch(?:apter)?)\.?\s*#?\s*\d+\b"
+)
+
+
+def _chapter_header_component_ids(
+    components: Sequence[SourceTextComponent],
+    observations: Sequence[TextObservation],
+) -> set[str]:
+    """Return components in a top-of-page chapter-title apparatus zone."""
+
+    if not components:
+        return set()
+    page_bottom = max(int(component.bbox_page[3]) for component in components)
+    top_limit = max(160, int(round(page_bottom * 0.08)))
+    markers = [
+        observation
+        for observation in observations
+        if float(observation.confidence) >= 0.60
+        and _CHAPTER_HEADER_MARKER_RE.search(str(observation.text or ""))
+    ]
+    if not markers:
+        return set()
+    top_markers = [
+        observation
+        for observation in markers
+        if int(observation.bbox_page[1]) <= top_limit
+    ]
+    marker_component_ids = {
+        component_id
+        for observation in markers
+        for component_id in observation.component_ids
+    }
+    apparatus_ids: set[str] = set()
+    if top_markers:
+        marker_bottom = max(
+            int(observation.bbox_page[3]) for observation in top_markers
+        )
+        marker_height = max(
+            1,
+            max(
+                int(observation.bbox_page[3]) - int(observation.bbox_page[1])
+                for observation in top_markers
+            ),
+        )
+        apparatus_bottom = max(top_limit, marker_bottom + (marker_height * 2))
+        apparatus_ids.update(
+            component.component_id
+            for component in components
+            if int(component.bbox_page[1]) <= top_limit
+            and int(component.bbox_page[3]) <= apparatus_bottom
+        )
+    apparatus_ids.update(marker_component_ids)
+    for marker in markers:
+        marker_height = max(1, int(marker.bbox_page[3]) - int(marker.bbox_page[1]))
+        adjacency_limit = max(160, marker_height * 4)
+        marker_x1, marker_x2 = int(marker.bbox_page[0]), int(marker.bbox_page[2])
+        for component in components:
+            component_x1, component_y1, component_x2, component_y2 = (
+                int(value) for value in component.bbox_page
+            )
+            vertical_gap = int(marker.bbox_page[1]) - component_y2
+            horizontal_overlap = max(
+                0,
+                min(marker_x2, component_x2) - max(marker_x1, component_x1),
+            )
+            if 0 <= vertical_gap <= adjacency_limit and horizontal_overlap > 0:
+                apparatus_ids.add(component.component_id)
+    return apparatus_ids
 
 
 def build_page_owner_graph(
@@ -686,6 +914,10 @@ def build_page_owner_graph(
         for observation in canonical_observations
     ]
     scanlation_cutoff = _scanlation_apparatus_cutoff(canonical_observations)
+    chapter_header_component_ids = _chapter_header_component_ids(
+        ordered_components,
+        canonical_observations,
+    )
 
     for component in ordered_components:
         if component.page_id != page_id:
@@ -737,6 +969,58 @@ def build_page_owner_graph(
                 )
             )
 
+        region_scanlation_promo = any(
+            _associated_component_ids(observation, region.components)
+            and set(observation.component_ids).issubset(set(component_ids))
+            and _is_explicit_scanlation_promo(observation.text)
+            for observation in canonical_observations
+        )
+        if requested_disposition == "owned" and region_scanlation_promo:
+            dispositions.extend(
+                ComponentDisposition(
+                    component_id=component_id,
+                    decision="preserve",
+                    owner_id=None,
+                    reason="policy:scanlation_apparatus",
+                )
+                for component_id in component_ids
+            )
+            continue
+
+        region_chapter_marker = any(
+            float(observation.confidence) >= 0.60
+            and _associated_component_ids(observation, region.components)
+            and set(observation.component_ids).issubset(set(component_ids))
+            and _CHAPTER_HEADER_MARKER_RE.search(str(observation.text or ""))
+            for observation in canonical_observations
+        )
+        if requested_disposition == "owned" and region_chapter_marker:
+            dispositions.extend(
+                ComponentDisposition(
+                    component_id=component_id,
+                    decision="preserve",
+                    owner_id=None,
+                    reason="policy:chapter_marker_apparatus",
+                )
+                for component_id in component_ids
+            )
+            continue
+
+        if (
+            requested_disposition == "owned"
+            and set(component_ids).issubset(chapter_header_component_ids)
+        ):
+            dispositions.extend(
+                ComponentDisposition(
+                    component_id=component_id,
+                    decision="preserve",
+                    owner_id=None,
+                    reason="policy:chapter_header_apparatus",
+                )
+                for component_id in component_ids
+            )
+            continue
+
         if (
             requested_disposition == "owned"
             and scanlation_cutoff is not None
@@ -749,6 +1033,24 @@ def build_page_owner_graph(
                     decision="preserve",
                     owner_id=None,
                     reason="policy:scanlation_apparatus",
+                )
+                for component_id in component_ids
+            )
+            continue
+
+        region_external_identifier = any(
+            _associated_component_ids(observation, region.components)
+            and set(observation.component_ids).issubset(set(component_ids))
+            and _is_nontranslatable_external_identifier(observation.text)
+            for observation in canonical_observations
+        )
+        if requested_disposition == "owned" and region_external_identifier:
+            dispositions.extend(
+                ComponentDisposition(
+                    component_id=component_id,
+                    decision="preserve",
+                    owner_id=None,
+                    reason="policy:nontranslatable_external_identifier",
                 )
                 for component_id in component_ids
             )

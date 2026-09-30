@@ -65,6 +65,20 @@ def test_letter_digit_boundaries_normalize_200million():
     assert normalize_evidence_tokens("200MILLION") == ("200", "million")
 
 
+def test_spacing_signature_ignores_only_spacing_and_apostrophe_variants():
+    from ownership.evidence import normalize_evidence_spacing_signature
+
+    assert normalize_evidence_spacing_signature("AREYOU READY?") == (
+        normalize_evidence_spacing_signature("ARE YOU READY?")
+    )
+    assert normalize_evidence_spacing_signature("ITS READY") == (
+        normalize_evidence_spacing_signature("IT'S READY")
+    )
+    assert normalize_evidence_spacing_signature("RATE: 4.6") != (
+        normalize_evidence_spacing_signature("RATE: 46")
+    )
+
+
 def test_complete_observation_safely_dominates_coherent_truncation():
     from ownership.evidence import safely_dominates
 
@@ -77,6 +91,62 @@ def test_complete_observation_safely_dominates_coherent_truncation():
         ),
         same_region=True,
         corroboration_count=2,
+    )
+
+
+def test_complete_observation_dominates_truncation_with_collapsed_spaces():
+    from ownership.evidence import safely_dominates
+
+    assert safely_dominates(
+        complete=_observation("TOTAL PURCHASE AMOUNT 200MILLION", (10, 10, 90, 70)),
+        truncated=_observation("TOTALPURCHASEAMOUNT", (10, 10, 90, 35)),
+        same_region=True,
+        corroboration_count=2,
+    )
+
+
+def test_corroborated_complete_observation_dominates_minor_ocr_drift_fragment():
+    from ownership.evidence import safely_dominates
+
+    assert safely_dominates(
+        complete=_observation(
+            "GRADE B PERMANENTLY INCREASES AGILITY ADVANCED ALCHEMY GREATLY ENHANCED THE POTONS EFFECTIVENESS",
+            (10, 10, 190, 100),
+        ),
+        truncated=_observation(
+            "ADVANCED ALCHEMY GREATLY ENHANCED THE POTIONS EFFECTIVENESS",
+            (10, 55, 190, 100),
+        ),
+        same_region=True,
+        corroboration_count=2,
+    )
+
+
+def test_fuzzy_truncation_never_hides_numeric_disagreement():
+    from ownership.evidence import safely_dominates
+
+    assert not safely_dominates(
+        complete=_observation(
+            "GRADE A PERMANENTLY INCREASES HEALTH BY 7 UPON CONSUMPTION",
+            (10, 10, 190, 100),
+        ),
+        truncated=_observation(
+            "PERMANENTLY INCREASES HEALTH BY 2 UPON CONSUMPTION",
+            (10, 40, 190, 100),
+        ),
+        same_region=True,
+        corroboration_count=3,
+    )
+
+
+def test_one_character_suffix_is_not_treated_as_safe_truncation():
+    from ownership.evidence import safely_dominates
+
+    assert not safely_dominates(
+        complete=_observation("WARNINGE", (10, 10, 90, 70)),
+        truncated=_observation("WARNING", (10, 10, 90, 70)),
+        same_region=True,
+        corroboration_count=3,
     )
 
 

@@ -59,7 +59,7 @@ describe("libraryModel", () => {
       publicationStatus: "unknown",
       chapters: [],
     });
-    expect(document.preferences).toEqual({ chapterView: "grid", thumbnailSize: 240, trackingLanguage: "en" });
+    expect(document.preferences).toEqual({ chapterView: "list", thumbnailSize: 240, trackingLanguage: "en" });
   });
 
   it("persists only normalized tracking snapshots and the configured source language", () => {
@@ -107,5 +107,90 @@ describe("libraryModel", () => {
       fetchedAt: "2026-07-22T12:00:00Z",
     });
     expect(document.works[0].external.tracking).not.toHaveProperty("rawResponse");
+  });
+
+  it("preserves optional presentation metadata without requiring it from older libraries", () => {
+    const document = normalizeLibrary({
+      works: [{
+        id: "work-1",
+        title: "Obra",
+        aliases: [],
+        publicationStatus: "unknown",
+        external: {},
+        description: "  Uma sinopse curta. ",
+        genres: ["A\u00e7\u00e3o", "", "Fantasia"],
+        sourceLanguage: "ko",
+        targetLanguage: "pt-BR",
+        chapters: [],
+      }],
+    });
+
+    expect(document.works[0]).toMatchObject({
+      description: "Uma sinopse curta.",
+      genres: ["A\u00e7\u00e3o", "Fantasia"],
+      sourceLanguage: "ko",
+      targetLanguage: "pt-BR",
+    });
+  });
+
+  it("drops a legacy Suwayomi binding without dropping trackers", () => {
+    const document = normalizeLibrary({
+      works: [{
+        id: "work-1",
+        title: "Obra",
+        aliases: [],
+        publicationStatus: "unknown",
+        external: {
+          anilistId: 123,
+          mangaDexId: "tracker-id",
+          suwayomi: {
+            serverUrl: "http://127.0.0.1:4567",
+            sourceId: "2499283573021220255",
+            sourceName: "MangaDex",
+            mangaId: "42",
+            canonicalUrl: "https://mangadex.org/title/42",
+            cookie: "must-not-persist",
+          },
+        },
+        chapters: [],
+      }],
+    });
+
+    expect(document.works[0].external).toMatchObject({ anilistId: 123, mangaDexId: "tracker-id" });
+    expect(document.works[0].external).not.toHaveProperty("suwayomi");
+  });
+
+  it("persists the isolated Mihon extension origin without replacing trackers", () => {
+    const document = normalizeLibrary({
+      works: [{
+        id: "work-1",
+        title: "Obra",
+        aliases: [],
+        publicationStatus: "unknown",
+        external: {
+          anilistId: 123,
+          contentOrigin: {
+            kind: "mihon-extension",
+            runtimeRecordId: "reader-1",
+            extensionPackage: "eu.kanade.tachiyomi.extension.pt.comikey",
+            sourceId: "9223372036854775807",
+            sourceName: "Comikey",
+            cookie: "must-not-persist",
+          },
+        },
+        chapters: [],
+      }],
+    });
+
+    expect(document.works[0].external).toEqual({
+      anilistId: 123,
+      contentOrigin: {
+        kind: "mihon-extension",
+        runtimeRecordId: "reader-1",
+        extensionPackage: "eu.kanade.tachiyomi.extension.pt.comikey",
+        sourceId: "9223372036854775807",
+        sourceName: "Comikey",
+      },
+    });
   });
 });

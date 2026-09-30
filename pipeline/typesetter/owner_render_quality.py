@@ -272,6 +272,12 @@ def evaluate_owner_render_quality(
     elif not invalid and font_size_final < minimum_legible_font_px:
         reasons.append("below_minimum")
         status = "below_minimum"
+    elif not invalid and source_scale_ratio is not None and source_scale_ratio < 0.40:
+        # Even weak source-size evidence must not silently accept a catastrophic
+        # shrink.  The owner is sent to review; the value is not treated as a
+        # calibrated source-scale measurement.
+        reasons.append("catastrophic_source_scale_mismatch")
+        status = "under_source_scale"
     elif not invalid and source_trusted and source_scale_ratio is not None:
         if source_scale_ratio < 0.75:
             reasons.append("under_source_scale")

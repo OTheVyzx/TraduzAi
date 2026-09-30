@@ -132,6 +132,241 @@ from vision_stack.runtime import (
 
 
 class VisionStackRuntimeTests(unittest.TestCase):
+    def test_request_scoped_final_probe_provider_exception_never_becomes_physical_attempt(self):
+        from ownership.hash_contract import canonical_page_sha256
+        from ownership.ocr_contract import OCRRequest
+        from vision_stack import runtime
+
+        image = np.full((80, 120, 3), 245, dtype=np.uint8)
+        root_sha256 = canonical_page_sha256(image)
+        request = OCRRequest(
+            run_id="run-terminal-error",
+            origin_execution_id="execution-terminal-error",
+            page_id="page_003",
+            page_source_sha256=root_sha256,
+            root_input_pixel_sha256=root_sha256,
+            invocation_id="final-qa:page_003:error",
+            provider_family="final-pixel-ocr",
+        )
+
+        class FailingEngine:
+            def recognize_page_with_evidence(self, _image, _blocks, *, request, **_kwargs):
+                del request
+                raise RuntimeError("OpenCV SHRT_MAX image is too large")
+
+            def recognize_batch(self, _crops):
+                raise AssertionError("request-scoped terminal OCR must not use recognize_batch")
+
+        with patch.object(runtime, "_get_ocr_engine", return_value=FailingEngine()):
+            result = runtime.run_final_pixel_ocr_probe(
+                image,
+                detected_blocks=[],
+                source_challenges=[],
+                page_id="page_003",
+                page_number=3,
+                source_language="en",
+                request_scoped=True,
+                root_input_pixel_sha256=root_sha256,
+                ocr_request=request,
+            )
+
+        self.assertFalse(result.coverage_complete)
+        self.assertIn("final_probe_ocr_error", result.coverage_failures)
+        self.assertEqual(result.ocr_attempts, ())
+        self.assertIsNone(result.ocr_invocation)
+
+    def test_request_scoped_final_probe_uses_one_native_page_and_sequential_region_variants(self):
+        from ownership.hash_contract import canonical_page_sha256
+        from ownership.ocr_contract import OCRRequest
+        from vision_stack import runtime
+        from vision_stack.ocr import OCREngine
+
+        image = np.full((80, 120, 3), 245, dtype=np.uint8)
+        root_sha256 = canonical_page_sha256(image)
+        request = OCRRequest(
+            run_id="run-terminal-success",
+            origin_execution_id="execution-terminal-success",
+            page_id="page_003",
+            page_source_sha256=root_sha256,
+            root_input_pixel_sha256=root_sha256,
+            invocation_id="final-qa:page_003:success",
+            provider_family="final-pixel-ocr",
+        )
+        received_shapes = []
+
+        class Model:
+            def ocr(self, pixels, det=True, rec=True, cls=False):
+                del det, rec, cls
+                received_shapes.append(tuple(pixels.shape))
+                return [[
+                    ([[1, 1], [12, 1], [12, 8], [1, 8]], ("SOURCE", 0.9))
+                ]]
+
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = Model()
+
+        with patch.object(runtime, "_get_ocr_engine", return_value=engine):
+            result = runtime.run_final_pixel_ocr_probe(
+                image,
+                detected_blocks=[],
+                source_challenges=[{"component_id": "component_a", "bbox_page": [10, 20, 50, 50]}],
+                page_id="page_003",
+                page_number=3,
+                source_language="en",
+                request_scoped=True,
+                root_input_pixel_sha256=root_sha256,
+                ocr_request=request,
+            )
+
+        self.assertEqual(received_shapes[0], (80, 120, 3))
+        self.assertEqual(received_shapes[1:], [(30, 40, 3)] * 3 + [(60, 80, 3)])
+        self.assertEqual(
+            [attempt.variant_id for attempt in result.ocr_invocation.attempts],
+            ["full_page", "native", "gray", "inverted", "scale_2x"],
+        )
+        self.assertTrue(result.coverage_complete)
+        self.assertFalse(any(shape[0] > 80 or shape[1] > 120 for shape in received_shapes))
+
+    def test_terminal_region_tiles_bound_scale_2x_inputs_before_materialization(self):
+        from vision_stack.runtime import _terminal_ocr_region_tiles
+
+        tiles = _terminal_ocr_region_tiles((0, 0, 9000, 9000))
+
+        self.assertGreater(len(tiles), 1)
+        self.assertEqual(tiles[0][:2], (0, 0))
+        self.assertEqual(tiles[-1][2:], (9000, 9000))
+        for x1, y1, x2, y2 in tiles:
+            width = x2 - x1
+            height = y2 - y1
+            self.assertLessEqual(max(width * 2, height * 2), 8192)
+            self.assertLessEqual((width * 2) * (height * 2), 16_777_216)
+
+    def test_request_scoped_final_probe_rejects_native_page_over_side_budget(self):
+        from ownership.hash_contract import canonical_page_sha256
+        from ownership.ocr_contract import OCRRequest
+        from vision_stack import runtime
+
+        image = np.full((1, 16_385, 3), 245, dtype=np.uint8)
+        root_sha256 = canonical_page_sha256(image)
+        request = OCRRequest(
+            run_id="run-terminal-budget",
+            origin_execution_id="execution-terminal-budget",
+            page_id="page_budget",
+            page_source_sha256=root_sha256,
+            root_input_pixel_sha256=root_sha256,
+            invocation_id="final-qa:page_budget",
+            provider_family="final-pixel-ocr",
+        )
+
+        with self.assertRaisesRegex(ValueError, "bounded OCR input budget"):
+            runtime.run_final_pixel_ocr_probe(
+                image,
+                detected_blocks=[],
+                source_challenges=[],
+                page_id="page_budget",
+                page_number=1,
+                source_language="en",
+                request_scoped=True,
+                root_input_pixel_sha256=root_sha256,
+                ocr_request=request,
+            )
+
+    def test_request_scoped_final_probe_discards_partial_invocation_when_region_provider_fails(self):
+        from ownership.hash_contract import canonical_page_sha256
+        from ownership.ocr_contract import OCRRequest
+        from vision_stack import runtime
+        from vision_stack.ocr import OCREngine
+
+        image = np.full((80, 120, 3), 245, dtype=np.uint8)
+        root_sha256 = canonical_page_sha256(image)
+        request = OCRRequest(
+            run_id="run-terminal-partial",
+            origin_execution_id="execution-terminal-partial",
+            page_id="page_003",
+            page_source_sha256=root_sha256,
+            root_input_pixel_sha256=root_sha256,
+            invocation_id="final-qa:page_003:partial",
+            provider_family="final-pixel-ocr",
+        )
+
+        class Model:
+            calls = 0
+
+            def ocr(self, pixels, det=True, rec=True, cls=False):
+                del pixels, det, rec, cls
+                self.calls += 1
+                if self.calls > 1:
+                    raise RuntimeError("OpenCV SHRT_MAX region failure")
+                return [[]]
+
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = Model()
+        with patch.object(runtime, "_get_ocr_engine", return_value=engine):
+            result = runtime.run_final_pixel_ocr_probe(
+                image,
+                detected_blocks=[],
+                source_challenges=[{"component_id": "component_a", "bbox_page": [10, 20, 50, 50]}],
+                page_id="page_003",
+                page_number=3,
+                source_language="en",
+                request_scoped=True,
+                root_input_pixel_sha256=root_sha256,
+                ocr_request=request,
+            )
+
+        self.assertIsNone(result.ocr_invocation)
+        self.assertFalse(result.coverage_complete)
+        self.assertIn("final_probe_ocr_error", result.coverage_failures)
+
+    def test_request_scoped_final_probe_executes_shared_detector_challenge_bbox_once(self):
+        from ownership.hash_contract import canonical_page_sha256
+        from ownership.ocr_contract import OCRRequest
+        from vision_stack import runtime
+        from vision_stack.ocr import OCREngine
+
+        image = np.full((80, 120, 3), 245, dtype=np.uint8)
+        root_sha256 = canonical_page_sha256(image)
+        request = OCRRequest(
+            run_id="run-terminal-shared",
+            origin_execution_id="execution-terminal-shared",
+            page_id="page_003",
+            page_source_sha256=root_sha256,
+            root_input_pixel_sha256=root_sha256,
+            invocation_id="final-qa:page_003:shared",
+            provider_family="final-pixel-ocr",
+        )
+        calls = []
+
+        class Model:
+            def ocr(self, pixels, det=True, rec=True, cls=False):
+                del det, rec, cls
+                calls.append(tuple(pixels.shape))
+                return [[
+                    ([[1, 1], [12, 1], [12, 8], [1, 8]], ("SOURCE", 0.9))
+                ]]
+
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = Model()
+        with patch.object(runtime, "_get_ocr_engine", return_value=engine):
+            result = runtime.run_final_pixel_ocr_probe(
+                image,
+                detected_blocks=[{"component_id": "detector_a", "bbox": [10, 20, 50, 50]}],
+                source_challenges=[{"component_id": "challenge_a", "bbox_page": [10, 20, 50, 50]}],
+                page_id="page_003",
+                page_number=3,
+                source_language="en",
+                request_scoped=True,
+                root_input_pixel_sha256=root_sha256,
+                ocr_request=request,
+            )
+
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(result.ocr_invocation.attempts), 5)
+        self.assertTrue(result.coverage_complete)
+
     def test_runtime_never_reads_last_full_page_side_channel(self):
         image = np.full((80, 140, 3), 245, dtype=np.uint8)
         current = SimpleNamespace(
@@ -4139,6 +4374,26 @@ class VisionStackRuntimeTests(unittest.TestCase):
         self.assertEqual(len(kept_texts), 1)
         self.assertEqual(kept_texts[0]["bbox"], [473, 2764, 644, 2797])
         self.assertEqual(kept_blocks, [{"bbox": [473, 2764, 644, 2797]}])
+
+    def test_overlapping_divergent_ocr_texts_are_preserved_and_flagged_for_review(self):
+        page_texts = [
+            {"text": "OPEN THE DOOR", "bbox": [10, 10, 110, 60], "confidence": 0.9},
+            {"text": "CLOSE THE WINDOW", "bbox": [12, 12, 108, 58], "confidence": 0.8},
+        ]
+        vision_blocks = [{"bbox": text["bbox"]} for text in page_texts]
+
+        kept_texts, kept_blocks = _drop_contained_duplicate_ocr_texts(
+            page_texts, vision_blocks, page_number=4
+        )
+
+        self.assertEqual(len(kept_texts), 2)
+        self.assertEqual(len(kept_blocks), 2)
+        self.assertTrue(
+            all(
+                "overlapping_ocr_text_divergence_review" in text.get("qa_flags", [])
+                for text in kept_texts
+            )
+        )
 
     def test_drop_contained_duplicate_ocr_texts_removes_overmerged_container_with_real_children(self):
         page_texts = [

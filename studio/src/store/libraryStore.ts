@@ -17,6 +17,7 @@ export interface AddLibraryWorkInput {
   title: string;
   aliases: string[];
   coverPath?: string | null;
+  description?: string;
   publicationStatus?: PublicationStatus;
   external?: ExternalWorkLink;
 }
@@ -84,13 +85,14 @@ export function createLibraryStore(backend: LibraryBackend): StoreApi<LibrarySto
       document: normalizeLibrary(null),
 
       load: async () => {
+        const revision = ++latestRevision;
         set({ status: "loading", error: null });
         try {
           const loaded = backend.loadWithMetadata
             ? await backend.loadWithMetadata()
             : { document: await backend.load(), recoveredFromBackup: false };
+          if (revision !== latestRevision) return;
           const document = normalizeLibrary(loaded.document);
-          latestRevision += 1;
           set({
             document,
             status: "ready",
@@ -99,7 +101,9 @@ export function createLibraryStore(backend: LibraryBackend): StoreApi<LibrarySto
             hasUnsavedChanges: false,
           });
         } catch (error) {
-          set({ status: "error", error: errorMessage(error) });
+          if (revision === latestRevision) {
+            set({ status: "error", error: errorMessage(error) });
+          }
         }
       },
 
@@ -110,6 +114,7 @@ export function createLibraryStore(backend: LibraryBackend): StoreApi<LibrarySto
           title: input.title,
           aliases: input.aliases,
           ...(input.coverPath === undefined ? {} : { coverPath: input.coverPath }),
+          ...(input.description === undefined ? {} : { description: input.description }),
           publicationStatus: input.publicationStatus ?? "unknown",
           external: input.external ?? {},
           chapters: [],

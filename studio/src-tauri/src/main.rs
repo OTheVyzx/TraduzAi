@@ -4,19 +4,26 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use dafont::{FcFontCache, PatternMatch};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use tauri::Manager;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::{timeout, Duration};
 
+#[path = "../../../src-tauri/src/commands/project_schema.rs"]
+mod project_schema;
 #[path = "../../../src-tauri/src/commands/studio_lite.rs"]
 mod studio_lite;
 
 mod chapter_import;
+mod integration_runtime_adapter;
+mod integration_v1;
 mod library;
+mod source_runtime;
 mod work_tracking;
 
 #[derive(Debug, Deserialize)]
@@ -221,7 +228,44 @@ fn studio_load_project(config: ProjectPathConfig) -> Result<Value, String> {
     recover_project_backup_if_needed(&project_file)?;
     let payload = std::fs::read_to_string(&project_file)
         .map_err(|error| format!("Falha ao ler project.json: {error}"))?;
-    parse_project_payload(&payload)
+    let mut project = parse_project_payload(&payload)?;
+    ensure_runtime_project_identity(&mut project, &project_file)?;
+    Ok(project)
+}
+
+pub(crate) fn ensure_runtime_project_identity(
+    project: &mut Value,
+    project_file: &Path,
+) -> Result<(), String> {
+    let object = project
+        .as_object_mut()
+        .ok_or_else(|| "project.json precisa ser um objeto".to_string())?;
+    let existing = object
+        .get("project_id")
+        .or_else(|| object.get("id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    let project_id = match existing {
+        Some(value) => value,
+        None => {
+            let canonical = project_file
+                .canonicalize()
+                .unwrap_or_else(|_| project_file.to_path_buf())
+                .to_string_lossy()
+                .into_owned();
+            let encoded = serde_json::to_vec(&Value::String(canonical))
+                .map_err(|error| format!("Falha ao gerar identidade do projeto: {error}"))?;
+            let digest = format!("{:x}", Sha256::digest(encoded));
+            format!("project:{}", &digest[..32])
+        }
+    };
+    object.insert("project_id".into(), Value::String(project_id.clone()));
+    object.insert("id".into(), Value::String(project_id));
+    if !object.get("project_revision").is_some_and(Value::is_u64) {
+        object.insert("project_revision".into(), Value::from(0_u64));
+    }
+    Ok(())
 }
 
 fn parse_project_payload(payload: &str) -> Result<Value, String> {
@@ -236,7 +280,9 @@ fn studio_save_project(config: SaveProjectConfig) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("Falha ao criar pasta do projeto: {error}"))?;
     }
-    let payload = serde_json::to_string_pretty(&config.project_json)
+    let mut project_json = config.project_json;
+    ensure_runtime_project_identity(&mut project_json, &project_file)?;
+    let payload = serde_json::to_string_pretty(&project_json)
         .map_err(|error| format!("Falha ao serializar project.json: {error}"))?;
     write_project_json_atomically(&project_file, &payload)
 }
@@ -1641,6 +1687,74 @@ fn sanitize_file_name(value: &str) -> Result<String, String> {
 fn main() {
     tauri::Builder::default()
         .manage(FluxWorkerManager::default())
+        .manage(source_runtime::SourceRuntimeManager::default())
+        .register_uri_scheme_protocol("traduzai-reader", |context, request| {
+            let not_found = || {
+                tauri::http::Response::builder()
+                    .status(404)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Vec::<u8>::new())
+                    .unwrap()
+            };
+            let parts: Vec<_> = request
+                .uri()
+                .path()
+                .trim_start_matches('/')
+                .split('/')
+                .collect();
+            if parts.len() != 2
+                || uuid::Uuid::parse_str(parts[0]).is_err()
+                || parts[1].is_empty()
+                || Path::new(parts[1]).components().count() != 1
+            {
+                return not_found();
+            }
+            let Ok(app_data) = context.app_handle().path().app_data_dir() else {
+                return not_found();
+            };
+            let base = app_data.join("source-runtime").join("staging");
+            let target = base.join(parts[0]).join(parts[1]);
+            let Ok(canonical_base) = std::fs::canonicalize(&base) else {
+                return not_found();
+            };
+            let Ok(metadata) = std::fs::symlink_metadata(&target) else {
+                return not_found();
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return not_found();
+            }
+            let Ok(canonical_target) = std::fs::canonicalize(&target) else {
+                return not_found();
+            };
+            if !canonical_target.starts_with(canonical_base) {
+                return not_found();
+            }
+            let Ok(bytes) = std::fs::read(&canonical_target) else {
+                return not_found();
+            };
+            let mime = match canonical_target
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "webp" => "image/webp",
+                "gif" => "image/gif",
+                "avif" => "image/avif",
+                _ => return not_found(),
+            };
+            tauri::http::Response::builder()
+                .status(200)
+                .header("Content-Type", mime)
+                .header("Cache-Control", "private, max-age=31536000, immutable")
+                .header("Access-Control-Allow-Origin", "*")
+                .header("X-Content-Type-Options", "nosniff")
+                .body(bytes)
+                .unwrap()
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
@@ -1648,7 +1762,57 @@ fn main() {
             library::studio_save_library,
             work_tracking::studio_search_tracking_works,
             work_tracking::studio_sync_tracking_work,
+            source_runtime::manager::studio_source_runtime_status,
+            source_runtime::manager::studio_source_runtime_start,
+            source_runtime::manager::studio_source_runtime_shutdown,
+            source_runtime::manager::studio_source_repository_preview,
+            source_runtime::manager::studio_source_repository_add,
+            source_runtime::manager::studio_source_repository_list,
+            source_runtime::manager::studio_source_repository_refresh,
+            source_runtime::manager::studio_source_repository_remove,
+            source_runtime::manager::studio_source_extension_list,
+            source_runtime::manager::studio_source_extension_install,
+            source_runtime::manager::studio_source_extension_set_enabled,
+            source_runtime::manager::studio_source_extension_uninstall,
+            source_runtime::manager::studio_source_extension_rollback,
+            source_runtime::manager::studio_source_search,
+            source_runtime::manager::studio_source_filters,
+            source_runtime::manager::studio_source_popular,
+            source_runtime::manager::studio_source_latest,
+            source_runtime::manager::studio_source_manga_details,
+            source_runtime::manager::studio_source_chapters,
+            source_runtime::manager::studio_source_pages,
+            source_runtime::manager::studio_reader_library_list,
+            source_runtime::manager::studio_reader_library_add,
+            source_runtime::manager::studio_reader_library_update,
+            source_runtime::manager::studio_reader_library_remove,
+            source_runtime::manager::studio_reader_history,
+            source_runtime::manager::studio_reader_progress,
+            source_runtime::manager::studio_reader_categories,
+            source_runtime::manager::studio_reader_automation_get,
+            source_runtime::manager::studio_reader_automation_set,
+            source_runtime::manager::studio_reader_automation_run_now,
+            source_runtime::manager::studio_reader_download_enqueue,
+            source_runtime::manager::studio_reader_download_pause,
+            source_runtime::manager::studio_reader_download_resume,
+            source_runtime::manager::studio_reader_download_retry,
+            source_runtime::manager::studio_reader_download_remove,
+            source_runtime::manager::studio_reader_download_list,
+            source_runtime::manager::studio_reader_translate_chapter,
             chapter_import::studio_prepare_manual_chapter,
+            integration_v1::start_consumer_fast,
+            integration_v1::cancel_consumer_fast,
+            integration_v1::pause_consumer_fast,
+            integration_v1::resume_consumer_fast,
+            integration_v1::retry_consumer_fast,
+            integration_v1::persist_project_event,
+            integration_v1::retypeset_owner,
+            integration_v1::submit_review_decision,
+            integration_v1::read_renderer_preference_comparison,
+            integration_v1::decide_export,
+            integration_v1::approve_final_review,
+            integration_v1::export_final,
+            integration_v1::export_diagnostic,
             studio_load_project,
             studio_save_project,
             studio_save_recovery_snapshot,
@@ -1700,6 +1864,22 @@ mod tests {
         let payload = "\u{feff}{\"app\":\"traduzai\",\"paginas\":[]}";
         let value = parse_project_payload(payload).expect("project json should parse with BOM");
         assert_eq!(value["app"], "traduzai");
+    }
+
+    #[test]
+    fn gives_legacy_projects_a_stable_runtime_identity_and_zero_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let project_file = root.path().join("project.json");
+        std::fs::write(&project_file, r#"{"app":"traduzai","paginas":[]}"#).unwrap();
+        let mut first: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&project_file).unwrap()).unwrap();
+        super::ensure_runtime_project_identity(&mut first, &project_file).unwrap();
+        let mut second = serde_json::json!({"app":"traduzai","paginas":[]});
+        super::ensure_runtime_project_identity(&mut second, &project_file).unwrap();
+
+        assert_eq!(first["project_id"], second["project_id"]);
+        assert_eq!(first["id"], first["project_id"]);
+        assert_eq!(first["project_revision"], 0);
     }
 
     #[test]
@@ -1848,6 +2028,66 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["project.json"]);
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn saves_and_reopens_renderer_recipe_and_preference_without_loss() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("traduzai-studio-roundtrip-{nonce}"));
+        let project_file = root.join("project.json");
+        let project = serde_json::json!({
+            "app": "traduzai",
+            "versao": "2.0",
+            "project_revision": 17,
+            "paginas": [{
+                "numero": 1,
+                "text_layers": [{
+                    "id": "text-1",
+                    "translated": "Escolha persistida",
+                    "render_recipe": {
+                        "contract_version": "renderer.recipe.v1",
+                        "font_family": "Bangers",
+                        "font_size": 31.5,
+                        "layout_hash": "sha256:recipe"
+                    },
+                    "render_preference": {
+                        "candidate_a": "candidate-a",
+                        "candidate_b": "candidate-b",
+                        "selected": "candidate-b",
+                        "origin": "test_actor",
+                        "recorded_at": "2026-09-27T12:00:00Z"
+                    }
+                }]
+            }]
+        });
+
+        super::studio_save_project(super::SaveProjectConfig {
+            project_path: project_file.to_string_lossy().to_string(),
+            project_json: project.clone(),
+        })
+        .expect("project with renderer metadata should save");
+        let reopened = super::studio_load_project(super::ProjectPathConfig {
+            project_path: project_file.to_string_lossy().to_string(),
+        })
+        .expect("saved project should reopen");
+
+        assert_eq!(
+            reopened["paginas"][0]["text_layers"][0]["render_recipe"],
+            project["paginas"][0]["text_layers"][0]["render_recipe"]
+        );
+        assert_eq!(
+            reopened["paginas"][0]["text_layers"][0]["render_preference"],
+            project["paginas"][0]["text_layers"][0]["render_preference"]
+        );
+        assert_eq!(reopened["project_revision"], 17);
+        assert_eq!(reopened["id"], reopened["project_id"]);
+        assert!(reopened["project_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("project:")));
         std::fs::remove_dir_all(root).unwrap();
     }
 

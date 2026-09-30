@@ -235,6 +235,15 @@ class DetectStripBalloonsTests(unittest.TestCase):
             candidates = detect_strip_balloons(strip, detector=detector)
 
         self.assertEqual(len(candidates), 1)
+        self.assertEqual(
+            (
+                candidates[0].strip_bbox.x1,
+                candidates[0].strip_bbox.y1,
+                candidates[0].strip_bbox.x2,
+                candidates[0].strip_bbox.y2,
+            ),
+            (76, 52, 240, 126),
+        )
         self._assert_dark_candidate_contract(candidates[0])
 
     def test_detect_strip_balloons_full_page_env_runs_one_detection_per_source_page(self):
@@ -361,6 +370,97 @@ class DetectStripBalloonsTests(unittest.TestCase):
         self.assertGreaterEqual(balloon.x2, 190)
         self.assertLessEqual(balloon.y1, 245)
         self.assertGreaterEqual(balloon.y2, 268)
+
+    def test_detect_strip_balloons_keeps_tall_white_balloon_scan_candidate_on_second_page(self):
+        from unittest.mock import MagicMock, patch
+
+        import cv2
+        import numpy as np
+
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+
+        image = np.full((562, 420, 3), 32, dtype=np.uint8)
+        cv2.ellipse(image, (210, 418), (180, 130), 0, 0, 360, (255, 255, 255), -1)
+        cv2.ellipse(image, (210, 418), (180, 130), 0, 0, 360, (0, 0, 0), 3)
+        for index, line in enumerate(["HONESTLY", "NO ONE", "CAN BEAT ME"]):
+            cv2.putText(
+                image,
+                line,
+                (120, 370 + index * 32),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.75,
+                (90, 55, 145),
+                2,
+                cv2.LINE_AA,
+            )
+
+        detector = MagicMock()
+        detector.detect.return_value = []
+        strip = VerticalStrip(
+            image=image,
+            width=420,
+            height=562,
+            source_page_breaks=[0, 274, 562],
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TRADUZAI_STRIP_DARK_BALLOON_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_DETECT_FULL_PAGE": "1",
+                "TRADUZAI_STRIP_UI_LAYOUT_BAND_SCAN": "0",
+                "TRADUZAI_STRIP_NEGATIVE_DETECT_MERGE": "0",
+            },
+        ):
+            balloons = detect_strip_balloons(strip, detector=detector)
+
+        self.assertEqual(len(balloons), 1)
+        self.assertEqual(balloons[0].metadata["candidate_kind"], "white_balloon_text_region")
+        self.assertGreaterEqual(balloons[0].strip_bbox.y1, 274)
+        self.assertGreater(balloons[0].strip_bbox.height, int(562 * 0.25))
+
+    def test_detect_strip_balloons_keeps_tall_primary_text_region_inside_white_balloon(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        import cv2
+        import numpy as np
+
+        from strip.detect_balloons import detect_strip_balloons
+        from strip.types import VerticalStrip
+
+        image = np.full((288, 420, 3), 32, dtype=np.uint8)
+        cv2.ellipse(image, (210, 140), (180, 125), 0, 0, 360, (255, 255, 255), -1)
+        cv2.ellipse(image, (210, 140), (180, 125), 0, 0, 360, (0, 0, 0), 3)
+        for index, line in enumerate(["HONESTLY", "NO ONE", "CAN BEAT ME"]):
+            cv2.putText(
+                image,
+                line,
+                (120, 95 + index * 32),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.75,
+                (45, 35, 110),
+                2,
+                cv2.LINE_AA,
+            )
+
+        detector = MagicMock()
+        detector.detect.return_value = [
+            SimpleNamespace(x1=86, y1=67, x2=338, y2=204, confidence=0.95)
+        ]
+        strip = VerticalStrip(
+            image=image,
+            width=420,
+            height=288,
+            source_page_breaks=[0, 288],
+        )
+
+        balloons = detect_strip_balloons(strip, detector=detector)
+
+        self.assertEqual(len(balloons), 1)
+        self.assertEqual([balloons[0].strip_bbox.x1, balloons[0].strip_bbox.y1], [86, 67])
+        self.assertGreater(balloons[0].strip_bbox.height, int(288 * 0.25))
 
     def test_detect_strip_balloons_adds_perspective_ui_panel_band_candidate(self):
         from unittest.mock import MagicMock

@@ -26,7 +26,9 @@ def _payload():
 
 def test_valid_json_response_restores_placeholders_and_used_glossary():
     payload = _payload()
-    response = {"segments": [{"id": "p033_r001", "translation": "⟦TA_TERM_001⟧!", "confidence": 0.94, "used_glossary": ["ORCS"], "warnings": []}]}
+    protected_source = payload["segments"][0]["protected_source"]
+    assert protected_source == "__TZN_NAME_0__!"
+    response = {"segments": [{"id": "p033_r001", "translation": protected_source, "confidence": 0.94, "used_glossary": ["ORCS"], "warnings": []}]}
 
     result = translate_contextual(payload, MockTranslator(response=response))
 
@@ -67,5 +69,13 @@ def test_placeholder_warning_is_preserved():
 
     result = translate_contextual(payload, MockTranslator(response=response))
 
-    assert "placeholder_missing" in result["segments"][0]["warnings"]
+    assert "unrestored_placeholder" in result["segments"][0]["warnings"]
     assert "low_confidence" in result["segments"][0]["warnings"]
+    assert result["segments"][0]["qa_flags"] == ["blocked"]
+
+
+def test_obsolete_placeholder_cannot_pass_as_restored_translation():
+    response = {"segments": [{"id": "p033_r001", "translation": "⟦TA_TERM_001⟧!"}]}
+    result = translate_contextual(_payload(), MockTranslator(response=response))
+    assert result["segments"][0]["qa_flags"] == ["blocked"]
+    assert "unrestored_placeholder" in result["segments"][0]["warnings"]

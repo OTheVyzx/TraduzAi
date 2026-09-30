@@ -200,6 +200,11 @@ def valid_owner_style_raster_contract_v2(
         style_decision=style_decision,
     ).to_dict()
     raw_intent = resolved_style_intent or {}
+    approved_attributes = dict(raw_intent.get("approved_attributes") or {})
+    attribute_provenance = dict(raw_intent.get("attribute_provenance") or {})
+    if resolved_style_intent is None:
+        approved_attributes = {"fill": "#fff"}
+        attribute_provenance = {"fill": {"evidence_id": "fixture-fill"}}
     intent = build_resolved_style_intent(
         owner_id=str(raw_intent.get("owner_id") or owner_id),
         page_id=str(raw_intent.get("page_id") or page_id),
@@ -211,12 +216,9 @@ def valid_owner_style_raster_contract_v2(
         group_resolution_sha256=str(
             raw_intent.get("group_resolution_sha256") or "b" * 64
         ),
-        approved=dict(raw_intent.get("approved_attributes") or {"fill": "#fff"}),
+        approved=approved_attributes,
         approved_abstentions=dict(raw_intent.get("approved_abstentions") or {}),
-        attribute_provenance=dict(
-            raw_intent.get("attribute_provenance")
-            or {"fill": {"evidence_id": "fixture-fill"}}
-        ),
+        attribute_provenance=attribute_provenance,
     )
     if materialization_plan is not None:
         plan = materialization_plan_from_dict(materialization_plan)

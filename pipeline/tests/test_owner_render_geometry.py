@@ -116,6 +116,37 @@ def test_owner_render_geometry_contains_complete_page_space_owner_evidence():
     assert len(geometry.geometry_sha256) == 64
 
 
+def test_discovery_envelope_does_not_swallow_separate_foreign_owner_or_layout_slot():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    graph = _graph()
+    graph.components[0] = replace(
+        graph.components[0], bbox_page=(0, 0, 100, 120),
+        polygon_page=_polygon((0, 0, 100, 120)),
+    )
+    graph.components.append(SourceTextComponent(
+        "foreign_top", "page_1", (20, 0, 80, 24), _polygon((20, 0, 80, 24)),
+        ("detector",), evidence_ids=("foreign",),
+    ))
+    graph.observations.append(TextObservation(
+        "foreign_reading", "page_1", ("foreign_top",), "AT THIS", 0.9,
+        "paddle", (25, 2, 75, 20), polygons_page=(_polygon((25, 2, 75, 20)),),
+    ))
+    graph.owners.append(TextOwner(
+        "foreign_owner", "page_1", ["foreign_top"], ["foreign_reading"],
+        ["foreign_reading"], "dialogue", "AT THIS", None, "owned", "observed", "translate", None,
+    ))
+    geometry = build_owner_render_geometry(
+        graph, "owner_a", page_width=100, page_height=120,
+        container_evidence={"evidence_id": "lower_balloon", "source": "full_page_visual_container",
+                            "bbox_page": (10, 25, 95, 100), "confidence": .9},
+    )
+    assert geometry.semantic_body_bbox_page == (22, 32, 82, 86)
+    assert geometry.layout_container_bbox_page == (10, 25, 95, 100)
+    assert geometry.status == "ready"
+    assert len(geometry.connected_subregions) == 1
+
+
 def test_verified_container_is_partitioned_away_from_adjacent_foreign_owner():
     from ownership.render_geometry import build_owner_render_geometry
 
@@ -445,6 +476,50 @@ def test_verified_container_expands_only_through_protected_mask_safe_pixels():
     assert geometry.layout_container_bbox_page == (10, 15, 80, 88)
     assert geometry.layout_container_polygon_page == _polygon((10, 15, 80, 88))
     assert geometry.layout_container_source.endswith(":protected_mask_safe")
+
+
+def test_recovered_full_page_container_cannot_bridge_separate_speech_components():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    graph = _graph()
+    graph.components[0] = replace(graph.components[0], bbox_page=(10, 10, 90, 40), polygon_page=_polygon((10, 10, 90, 40)))
+    graph.components[1] = replace(graph.components[1], bbox_page=(10, 130, 90, 160), polygon_page=_polygon((10, 130, 90, 160)))
+    graph.observations[0] = replace(graph.observations[0], bbox_page=(20, 15, 80, 155),
+                                     polygons_page=(_polygon((20, 15, 80, 35)), _polygon((20, 135, 80, 155))))
+    recovered = {"evidence_id": "weak_page", "source": "full_page_visual_container",
+                 "bbox_page": (5, 5, 95, 175), "confidence": .8}
+    geometry = build_owner_render_geometry(graph, "owner_a", page_width=100, page_height=200,
+                                           container_evidence=recovered, protected_art_mask_sha256="a" * 64)
+    assert geometry.status == "review_required"
+    assert geometry.reason == "recovered_container_bridges_disjoint_components"
+
+
+def test_recovered_page_envelope_cannot_expand_tiny_source_slot_over_art():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    graph = _graph()
+    graph.observations[0] = replace(graph.observations[0], bbox_page=(40, 45, 60, 60),
+                                     polygons_page=(_polygon((40, 45, 60, 60)),))
+    recovered = {"evidence_id": "weak_page", "source": "full_page_visual_container",
+                 "bbox_page": (0, 0, 100, 110), "confidence": .8}
+    geometry = build_owner_render_geometry(graph, "owner_a", page_width=100, page_height=120,
+                                           container_evidence=recovered, protected_art_mask_sha256="a" * 64)
+    assert geometry.status == "review_required"
+    assert geometry.reason == "recovered_container_exceeds_source_slot"
+
+
+def test_large_independent_balloon_is_not_rejected_by_recovery_guard():
+    from ownership.render_geometry import build_owner_render_geometry
+
+    graph = _graph()
+    graph.observations[0] = replace(graph.observations[0], bbox_page=(40, 45, 60, 60),
+                                     polygons_page=(_polygon((40, 45, 60, 60)),))
+    evidence = {"evidence_id": "real_balloon", "source": "balloon_inner_polygon",
+                "bbox_page": (0, 0, 100, 110), "confidence": .95}
+    geometry = build_owner_render_geometry(graph, "owner_a", page_width=100, page_height=120,
+                                           container_evidence=evidence, protected_art_mask_sha256="a" * 64)
+    assert geometry.status == "ready"
+    assert geometry.layout_container_source == "balloon_inner_polygon"
 
 
 def test_protected_art_inside_source_slot_keeps_authenticated_typography_slot():

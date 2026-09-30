@@ -1,4 +1,4 @@
-import { Grid3X3, List, Pencil, Search } from "lucide-react";
+import { Bell, Grid3X3, List, Pencil, Search } from "lucide-react";
 
 export function LibraryToolbar({
   title,
@@ -10,6 +10,7 @@ export function LibraryToolbar({
   onSetView,
   onSetThumbnailSize,
   onEditWork,
+  onOpenUpdates,
 }: {
   title: string;
   chapterCount: number;
@@ -20,6 +21,7 @@ export function LibraryToolbar({
   onSetView: (view: "grid" | "list") => void;
   onSetThumbnailSize: (size: number) => void;
   onEditWork?: () => void;
+  onOpenUpdates: () => void;
 }) {
   return (
     <header className="studio-library-toolbar">
@@ -75,6 +77,15 @@ export function LibraryToolbar({
           <List size={17} />
         </button>
       </div>
+      <button
+        type="button"
+        className="studio-library-updates-trigger"
+        aria-label="Atualizações"
+        title="Atualizações"
+        onClick={onOpenUpdates}
+      >
+        <Bell size={17} aria-hidden="true" />
+      </button>
     </header>
   );
 }

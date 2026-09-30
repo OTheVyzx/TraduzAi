@@ -32,6 +32,16 @@ def _snapshot(value: Any) -> dict[str, Any]:
     return dict(fields) if isinstance(fields, dict) else {}
 
 
+def _coverage_snapshot(value: Any) -> dict[str, Any]:
+    """Return the canonical coverage payload plus its content hash."""
+    encoded = getattr(value, "canonical_json_bytes", None)
+    if isinstance(encoded, bytes):
+        payload = json.loads(encoded.decode("utf-8"))
+        payload["sha256"] = str(getattr(value, "sha256", ""))
+        return payload
+    return _snapshot(value)
+
+
 def _field(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, Mapping):
         return value.get(key, default)
@@ -141,15 +151,108 @@ class OwnerArtifactPublisher:
     def __init__(self, recorder: Any) -> None:
         self.recorder = recorder
 
+    def publish_enforce_failure(
+        self,
+        *,
+        graph: Any,
+        violations: Iterable[Any],
+        boundary: str,
+    ) -> dict[str, Any]:
+        """Persist the rejected graph without feeding it back into control flow."""
+        graph_snapshot = _snapshot(graph)
+        page_id = str(graph_snapshot.get("page_id") or "unknown_page")
+        violation_snapshots = [_snapshot(item) for item in violations]
+        payload = {
+            **_base_row(
+                page_id=page_id,
+                owner_id=None,
+                event="enforce_failure",
+                hashes={"graph_sha256": _canonical_sha256(graph_snapshot)},
+                offenders=[
+                    offender
+                    for violation in violation_snapshots
+                    for offender in violation.get("offenders") or []
+                ],
+            ),
+            "boundary": str(boundary),
+            "graph": graph_snapshot,
+            "violations": violation_snapshots,
+        }
+        self.recorder.write_json(
+            "04_text_normalization_router/enforce_failures/"
+            f"{_safe_owner_segment(page_id)}.json",
+            payload,
+        )
+        return payload
+
     def publish(
         self,
         *,
+        coverages: Mapping[str, Any] | None = None,
         graphs: Mapping[str, Any] | None = None,
         executions: Iterable[Any] | None = None,
         compositions: Mapping[str, Any] | None = None,
         final_pixel_reports: Iterable[Mapping[str, Any]] | None = None,
         export_gate: Mapping[str, Any] | None = None,
     ) -> dict[str, int]:
+        coverage_snapshots = {
+            str(page_id): _coverage_snapshot(coverage)
+            for page_id, coverage in dict(coverages or {}).items()
+        }
+        coverage_blockers: list[dict[str, Any]] = []
+        for page_id, coverage in sorted(coverage_snapshots.items()):
+            history = [
+                item for item in coverage.get("ledger_history") or []
+                if isinstance(item, dict)
+            ]
+            latest = history[-1] if history else {}
+            ledger = latest.get("payload") if isinstance(latest.get("payload"), dict) else latest
+            components_by_id = {
+                str(item.get("component_id") or ""): item
+                for item in coverage.get("components") or []
+                if isinstance(item, dict)
+            }
+            for entry in ledger.get("entries") or []:
+                if not isinstance(entry, dict):
+                    continue
+                component_id = str(entry.get("component_id") or "")
+                observation_ids = list(entry.get("observation_ids") or [])
+                if str(entry.get("materiality") or "") != "material" or observation_ids:
+                    continue
+                component = components_by_id.get(component_id) or {}
+                coverage_blockers.append(
+                    {
+                        **_base_row(
+                            page_id=page_id,
+                            owner_id=None,
+                            event=f"coverage_blocker:{component_id}",
+                            hashes={
+                                "coverage_sha256": coverage.get("sha256"),
+                                "ledger_sha256": latest.get("sha256"),
+                            },
+                            offenders=([component_id] if component_id else []),
+                        ),
+                        "component_id": component_id,
+                        "bbox_page": entry.get("bbox_page") or component.get("bbox_page"),
+                        "polygon_page": entry.get("polygon_page") or component.get("polygon_page"),
+                        "detector_sources": list(component.get("detector_sources") or []),
+                        "materiality": entry.get("materiality"),
+                        "ocr_attempt_ids": list(entry.get("ocr_attempt_ids") or []),
+                        "observation_ids": observation_ids,
+                        "state": entry.get("state"),
+                        "reason": "material_component_without_observation",
+                    }
+                )
+
+        if coverages is not None:
+            self.recorder.write_json(
+                "03_ocr/page_owner_coverage.json",
+                {"pages": [coverage_snapshots[key] for key in sorted(coverage_snapshots)]},
+            )
+            self.recorder.write_jsonl_replace(
+                "03_ocr/page_owner_coverage_blockers.jsonl", coverage_blockers
+            )
+
         graph_snapshots = {
             str(page_id): _snapshot(graph)
             for page_id, graph in dict(graphs or {}).items()
@@ -475,6 +578,8 @@ class OwnerArtifactPublisher:
                 },
             )
         return {
+            "coverage_count": len(coverage_snapshots),
+            "coverage_blocker_count": len(coverage_blockers),
             "graph_count": len(graph_snapshots),
             "component_count": len(components),
             "observation_count": len(observations),

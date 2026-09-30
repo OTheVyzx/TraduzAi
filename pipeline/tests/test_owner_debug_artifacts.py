@@ -164,6 +164,91 @@ def test_rolled_back_execution_publishes_inpaint_evidence_for_diagnosis(tmp_path
     assert (root / "candidate_after_inpaint.png").is_file()
 
 
+def test_owner_artifacts_persist_blocking_coverage_before_graph_exists(tmp_path):
+    from debug_tools import DebugRecorder
+    from ownership.artifacts import OwnerArtifactPublisher
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-coverage")
+    coverage = {
+        "run_id": "run-coverage",
+        "origin_execution_id": "execution-coverage",
+        "page_id": "page_001",
+        "page_source_sha256": "a" * 64,
+        "sha256": "b" * 64,
+        "ledger_history": [
+            {
+                "sha256": "c" * 64,
+                "entries": [
+                    {
+                        "component_id": "component_missing_ocr",
+                        "bbox_page": [10, 20, 40, 50],
+                        "materiality": "material",
+                        "ocr_attempt_ids": ["attempt-1"],
+                        "observation_ids": [],
+                        "state": "challenged",
+                    }
+                ],
+            }
+        ],
+        "observations": [],
+        "ocr_invocations": [],
+    }
+
+    OwnerArtifactPublisher(recorder).publish(coverages={"page_001": coverage})
+
+    root = tmp_path / "debug" / "e2e" / "03_ocr"
+    snapshot = json.loads((root / "page_owner_coverage.json").read_text("utf-8"))
+    blockers = _jsonl(root / "page_owner_coverage_blockers.jsonl")
+    assert snapshot["pages"][0]["page_id"] == "page_001"
+    assert blockers[0]["component_id"] == "component_missing_ocr"
+    assert blockers[0]["reason"] == "material_component_without_observation"
+
+
+def test_publish_enforce_failure_preserves_invalid_graph_and_all_violations(tmp_path):
+    from debug_tools import DebugRecorder
+    from ownership.artifacts import OwnerArtifactPublisher
+    from ownership.model import OwnerViolation
+
+    recorder = DebugRecorder(tmp_path, enabled=True, run_id="run-enforce-failure")
+    graph = _graph()
+    violations = (
+        OwnerViolation(
+            code="owner_state_legacy_in_enforce",
+            severity="critical",
+            message="legacy state leaked",
+            offenders=("owner_review",),
+        ),
+        OwnerViolation(
+            code="review_terminal_forbidden_in_enforce",
+            severity="critical",
+            message="review terminal leaked",
+            offenders=("owner_review",),
+        ),
+    )
+
+    OwnerArtifactPublisher(recorder).publish_enforce_failure(
+        graph=graph,
+        violations=violations,
+        boundary="execute_page_before_result_build",
+    )
+
+    path = (
+        tmp_path
+        / "debug"
+        / "e2e"
+        / "04_text_normalization_router"
+        / "enforce_failures"
+        / "page_001.json"
+    )
+    payload = json.loads(path.read_text("utf-8"))
+    assert payload["boundary"] == "execute_page_before_result_build"
+    assert payload["graph"]["owners"][1]["state"] == "review_required"
+    assert [item["code"] for item in payload["violations"]] == [
+        "owner_state_legacy_in_enforce",
+        "review_terminal_forbidden_in_enforce",
+    ]
+
+
 def test_source_evidence_ledger_is_derived_and_hash_linked(tmp_path):
     rows = _jsonl(
         _publish(tmp_path)

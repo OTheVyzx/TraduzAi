@@ -183,16 +183,27 @@ export class TauriStudioEditorBackend implements StudioEditorBackend {
     layer_id: string;
     patch: Record<string, unknown>;
   }): Promise<StudioTextLayer> {
-    const { result } = await this.mutateProject({
+    const { project } = await this.mutateProject({
       project_path: config.project_path,
       mutate: (project) => {
         const page = pageAt(project, config.page_index);
         const index = page.text_layers.findIndex((layer) => layer.id === config.layer_id);
         if (index < 0) throw new Error(`Camada nao encontrada: ${config.layer_id}`);
         const next = { ...page.text_layers[index], ...config.patch } as StudioTextLayer;
-        const translated = next.translated ?? next.traduzido ?? "";
-        next.translated = translated;
-        next.traduzido = translated;
+        if (typeof config.patch.original === "string" || typeof config.patch.texto === "string") {
+          const original = typeof config.patch.original === "string"
+            ? config.patch.original
+            : config.patch.texto as string;
+          next.original = original;
+          next.texto = original;
+        }
+        if (typeof config.patch.translated === "string" || typeof config.patch.traduzido === "string") {
+          const translated = typeof config.patch.translated === "string"
+            ? config.patch.translated
+            : config.patch.traduzido as string;
+          next.translated = translated;
+          next.traduzido = translated;
+        }
         const style = Object.keys(next.style ?? {}).length > 0 ? next.style : next.estilo;
         next.style = style ?? {};
         next.estilo = style ?? {};
@@ -201,7 +212,9 @@ export class TauriStudioEditorBackend implements StudioEditorBackend {
         return JSON.parse(JSON.stringify(next)) as StudioTextLayer;
       },
     });
-    return result;
+    const persisted = pageAt(project, config.page_index).text_layers.find((layer) => layer.id === config.layer_id);
+    if (!persisted) throw new Error(`Camada nao encontrada apos patch: ${config.layer_id}`);
+    return JSON.parse(JSON.stringify(persisted)) as StudioTextLayer;
   }
 
   async deleteEditorTextLayer(config: { project_path: string; page_index: number; layer_id: string }): Promise<void> {

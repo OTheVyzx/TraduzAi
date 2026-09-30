@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ocr.text_router import route_text
 
 
-def test_shadow_repeated_cover_text_routes_as_noise_skip_processing():
+def test_shadow_repeated_cover_text_is_not_discarded_by_cover_heuristic():
     result = route_text(
         "Shadow Erian Shadow",
         text_id="ocr_cover_shadow",
@@ -16,15 +16,16 @@ def test_shadow_repeated_cover_text_routes_as_noise_skip_processing():
         page_height=1000,
     )
 
-    assert result["route"] == "noise"
-    assert result["content_class"] == "noise"
-    assert result["skip_processing"] is True
-    assert result["translate_policy"] == "skip_translation"
-    assert result["render_policy"] == "skip"
-    assert "cover_repeated_words_noise" in result["rules_applied"]
+    assert result["route"] == "text"
+    assert result["content_class"] == "text"
+    assert result["skip_processing"] is False
+    assert result["translate_policy"] == "translate"
+    assert result["render_policy"] == "normal"
+    assert result["input"] == "Shadow Erian Shadow"
+    assert "cover_repeated_words_noise" not in result["rules_applied"]
 
 
-def test_short_ornamental_cover_text_routes_as_noise_skip_processing():
+def test_short_cover_text_is_not_discarded_without_evidence():
     result = route_text(
         "NTEEM",
         text_id="ocr_cover_ornament",
@@ -34,13 +35,14 @@ def test_short_ornamental_cover_text_routes_as_noise_skip_processing():
         page_height=1000,
     )
 
-    assert result["route"] == "noise"
-    assert result["content_class"] == "noise"
-    assert result["skip_processing"] is True
-    assert "cover_short_ornamental_noise" in result["rules_applied"]
+    assert result["route"] == "text"
+    assert result["content_class"] == "text"
+    assert result["skip_processing"] is False
+    assert result["input"] == "NTEEM"
+    assert "cover_short_ornamental_noise" not in result["rules_applied"]
 
 
-def test_cover_scanlator_roles_route_as_scanlator_credit_not_dialogue():
+def test_cover_scanlator_roles_do_not_trigger_erase_only():
     result = route_text(
         "TL Kiki PR Mars TS Luna CL Sol",
         text_id="ocr_cover_credit",
@@ -50,15 +52,16 @@ def test_cover_scanlator_roles_route_as_scanlator_credit_not_dialogue():
         page_height=1000,
     )
 
-    assert result["route"] == "scanlator_credit"
-    assert result["content_class"] == "scanlator_credit"
-    assert result["route_action"] == "inpaint_only"
+    assert result["route"] == "text"
+    assert result["content_class"] == "text"
+    assert result["route_action"] == "translate_inpaint_render"
     assert result["skip_processing"] is False
-    assert result["translate_policy"] == "skip_translation"
-    assert result["render_policy"] == "preserve"
+    assert result["translate_policy"] == "translate"
+    assert result["render_policy"] == "normal"
+    assert result["input"] == "TL Kiki PR Mars TS Luna CL Sol"
 
 
-def test_cover_title_defaults_to_cover_credit_review_not_dialogue():
+def test_cover_title_without_user_title_uses_neutral_route():
     result = route_text(
         "DARLING KARAOKE",
         text_id="ocr_cover_title",
@@ -68,12 +71,13 @@ def test_cover_title_defaults_to_cover_credit_review_not_dialogue():
         page_height=1000,
     )
 
-    assert result["route"] == "cover_credit"
-    assert result["content_class"] == "cover_credit"
-    assert result["route_action"] == "review_required"
+    assert result["route"] == "text"
+    assert result["content_class"] == "text"
+    assert result["route_action"] == "translate_inpaint_render"
     assert result["skip_processing"] is False
-    assert result["needs_review"] is True
-    assert result["render_policy"] == "preserve"
+    assert result["needs_review"] is False
+    assert result["render_policy"] == "normal"
+    assert result["input"] == "DARLING KARAOKE"
 
 
 def test_cover_region_keeps_plausible_english_dialogue_for_translation():
@@ -86,7 +90,7 @@ def test_cover_region_keeps_plausible_english_dialogue_for_translation():
         page_height=1000,
     )
 
-    assert result["route"] == "speech"
-    assert result["content_class"] == "dialogue"
+    assert result["route"] == "text"
+    assert result["content_class"] == "text"
     assert result["skip_processing"] is False
     assert result["translate_policy"] == "translate"

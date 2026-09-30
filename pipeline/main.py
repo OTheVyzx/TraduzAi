@@ -19,6 +19,7 @@ import logging
 import contextlib
 import importlib.util
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Adiciona o diretório da pipeline ao path para resolver imports locais no Pyright/Linter
@@ -341,29 +342,179 @@ def _remove_inline_sfx_noise_from_layer_texts(layer: dict) -> dict:
 
 
 class _PipelineTiming:
-    def __init__(self) -> None:
-        self._started = time.perf_counter()
+    def __init__(
+        self,
+        *,
+        work_dir: Path | None = None,
+        run_id: str | None = None,
+        clock=None,
+    ) -> None:
+        self._clock = clock or time.perf_counter
+        self._started = self._clock()
+        self._started_at = datetime.now(timezone.utc).isoformat()
+        self._work_dir = Path(work_dir) if work_dir is not None else None
+        self._run_id = str(run_id or "")
         self._durations: dict[str, float] = {}
         self._events: list[dict] = []
+        self._stages: dict[str, dict] = {}
+        self._pages: dict[str, dict] = {}
+        self._models: dict[str, dict] = {}
+        self._counters: dict[str, int | float] = {}
+        self._measure_depth = 0
+        self._instrumented_sec = 0.0
+        self._status = "running"
+        self._failed_stage: str | None = None
+        self._failure_exception: BaseException | None = None
+        self._exception_type: str | None = None
+        self._exception_message: str | None = None
+        self._final_payload: dict | None = None
 
     @contextlib.contextmanager
     def measure(self, stage: str):
-        started = time.perf_counter()
+        started = self._clock()
+        depth_before = self._measure_depth
+        self._measure_depth += 1
+        stage_record = self._stages.setdefault(
+            stage,
+            {"status": "running", "duration_sec": 0.0, "calls": 0},
+        )
+        stage_record["status"] = "running"
+        self._persist_partial()
         try:
             yield
+        except BaseException as exc:
+            stage_record["status"] = "failed"
+            if self._failure_exception is not exc:
+                self._failed_stage = stage
+                self._failure_exception = exc
+            self._exception_type = type(exc).__name__
+            self._exception_message = str(exc)
+            raise
         finally:
-            self.add(stage, time.perf_counter() - started)
+            self._measure_depth = max(0, self._measure_depth - 1)
+            terminal_status = str(stage_record.get("status") or "")
+            if terminal_status == "running":
+                terminal_status = "completed"
+            self.add(
+                stage,
+                self._clock() - started,
+                status=terminal_status or "completed",
+                top_level=depth_before == 0,
+            )
+            self._persist_partial()
 
-    def add(self, stage: str, seconds: float) -> None:
+    def add(
+        self,
+        stage: str,
+        seconds: float,
+        *,
+        status: str = "completed",
+        top_level: bool = True,
+    ) -> None:
         self._durations[stage] = self._durations.get(stage, 0.0) + float(seconds)
+        if top_level:
+            self._instrumented_sec += float(seconds)
         self._events.append({"stage": stage, "seconds": round(float(seconds), 4)})
+        stage_record = self._stages.setdefault(
+            stage,
+            {"status": status, "duration_sec": 0.0, "calls": 0},
+        )
+        stage_record["status"] = status
+        stage_record["duration_sec"] = round(
+            float(stage_record.get("duration_sec", 0.0)) + float(seconds),
+            4,
+        )
+        stage_record["calls"] = int(stage_record.get("calls", 0)) + 1
+
+    def mark_failed(self, exc: BaseException) -> None:
+        self._status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+        self._failed_stage = self._failed_stage or "pipeline"
+        self._exception_type = type(exc).__name__
+        self._exception_message = str(exc)
+
+    def increment_counter(self, name: str, amount: int | float = 1) -> None:
+        self._counters[name] = self._counters.get(name, 0) + amount
+
+    def ensure_counter(self, name: str, value: int | float = 0) -> None:
+        self._counters.setdefault(name, value)
+
+    def record_page(self, page_id: str, **values) -> None:
+        page_key = str(page_id)
+        if page_key not in self._pages:
+            self._pages[page_key] = {}
+            self.increment_counter("pages")
+        self._pages[page_key].update(values)
+
+    def record_model(self, model_id: str, **values) -> None:
+        model_key = str(model_id)
+        record = self._models.setdefault(model_key, {"load_count": 0})
+        record.update(values)
+
+    def record_model_load(self, model_id: str, **values) -> None:
+        model_key = str(model_id)
+        record = self._models.setdefault(model_key, {"load_count": 0})
+        record["load_count"] = int(record.get("load_count", 0)) + 1
+        record.update(values)
+
+    def record_translation_attempt(self, attempt, *, latency_sec: float = 0.0) -> None:
+        if self._work_dir is None:
+            return
+        payload = attempt.to_dict()
+        verdict = payload.get("language_verdict")
+        verdict = verdict if isinstance(verdict, dict) else {}
+        metadata = payload.get("provider_metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        row = {
+            "schema_version": 1,
+            "run_id": payload.get("run_id"),
+            "page_id": payload.get("page_id"),
+            "owner_id": payload.get("owner_id"),
+            "attempt_id": payload.get("attempt_id"),
+            "provider": payload.get("backend"),
+            "variant": payload.get("variant"),
+            "model": payload.get("provider_model"),
+            "provider_metadata": metadata,
+            "source_text_hash": payload.get("source_payload_sha256"),
+            "request_payload_hash": payload.get("request_sha256"),
+            "response_hash": payload.get("response_sha256"),
+            "response_present": bool(payload.get("response_sha256")),
+            "latency_sec": round(max(0.0, float(latency_sec)), 4),
+            "validation_result": payload.get("status"),
+            "validator_code": verdict.get("policy_id") or payload.get("error_code"),
+            "reason_code": verdict.get("reason") or payload.get("error_code"),
+            "retryable": payload.get("status") != "accepted",
+            "fallback_used": str(payload.get("variant") or "") != "primary",
+            "provider_called": bool(payload.get("provider_called")),
+            "cache_hit": bool(payload.get("cache_hit")),
+            "attempt_sha256": payload.get("attempt_sha256"),
+        }
+        path = self._work_dir / "translation_attempts.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def snapshot(self, *, total_seconds: float | None = None, extra: dict | None = None) -> dict:
-        total = float(total_seconds) if total_seconds is not None else time.perf_counter() - self._started
+        total = float(total_seconds) if total_seconds is not None else self._clock() - self._started
         durations = {stage: round(seconds, 4) for stage, seconds in sorted(self._durations.items())}
-        instrumented = round(sum(durations.values()), 4)
+        instrumented = round(self._instrumented_sec, 4)
         payload = {
+            "schema_version": 1,
+            "run_id": self._run_id,
+            "status": self._status,
+            "started_at": self._started_at,
+            "finished_at": None,
             "total_sec": round(total, 4),
+            "failed_stage": self._failed_stage,
+            "failed_page": None,
+            "failed_owner": None,
+            "exception_type": self._exception_type,
+            "exception_message": self._exception_message,
+            "stages": {key: dict(value) for key, value in sorted(self._stages.items())},
+            "pages": {key: dict(value) for key, value in sorted(self._pages.items())},
+            "models": {key: dict(value) for key, value in sorted(self._models.items())},
+            "counters": dict(sorted(self._counters.items())),
             "instrumented_sec": instrumented,
             "unattributed_sec": round(max(0.0, total - instrumented), 4),
             "durations_sec": durations,
@@ -371,6 +522,44 @@ class _PipelineTiming:
         }
         if extra:
             payload.update(extra)
+        return payload
+
+    def _write_atomic(self, path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(path.name + ".tmp")
+        with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+
+    def _persist_partial(self) -> None:
+        if self._work_dir is None or self._final_payload is not None:
+            return
+        try:
+            self._write_atomic(
+                self._work_dir / "performance_timing.partial.json",
+                self.snapshot(),
+            )
+        except Exception as exc:
+            logger.warning("Falha ao escrever performance_timing.partial.json: %s", exc)
+
+    def finalize(self) -> dict:
+        if self._final_payload is not None:
+            return dict(self._final_payload)
+        if self._status == "running":
+            self._status = "completed"
+        payload = self.snapshot()
+        payload["finished_at"] = datetime.now(timezone.utc).isoformat()
+        if self._work_dir is not None:
+            self._write_atomic(self._work_dir / "performance_timing.json", payload)
+            partial_path = self._work_dir / "performance_timing.partial.json"
+            try:
+                partial_path.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning("Falha ao remover performance_timing.partial.json: %s", exc)
+        self._final_payload = dict(payload)
         return payload
 
 
@@ -702,6 +891,8 @@ def resolve_runner_config_from_cli(args, *, loaded_config: dict) -> dict:
         str(Path(replay).resolve()) if replay not in (None, "") else None
     )
     return resolved
+
+
 def _list_input_images(source_path: Path) -> list[Path]:
     image_exts = {".jpg", ".jpeg", ".png", ".webp"}
     if source_path.is_file() and source_path.suffix.lower() in image_exts:
@@ -8835,9 +9026,35 @@ def _qa_translated_final_crops_against_layers(recorder, project_data: dict, work
 
     rows: list[dict] = []
     if verified_page_owner_composition:
+        from qa.final_pixel_qa import is_verified_target_language_no_repaint
+
         for layer in project_layers:
             owner_id = str(layer.get("owner_id") or "").strip()
             if not owner_id:
+                continue
+            if is_verified_target_language_no_repaint(layer):
+                rows.append(
+                    {
+                        "band_id": str(layer.get("band_id") or ""),
+                        "page_id": str(layer.get("page_id") or ""),
+                        "owner_id": owner_id,
+                        "translated_output_page": str(
+                            layer.get("translated_output_page") or ""
+                        ),
+                        "trace_ids": [
+                            str(layer.get("trace_id") or f"owner:{owner_id}:page_space")
+                        ],
+                        "status": "pass",
+                        "flags": [],
+                        "metrics": {
+                            "coordinate_space": "page",
+                            "verification_route": "verified_target_language_no_repaint",
+                            "no_repaint_policy_id": str(
+                                layer.get("no_repaint_policy_id") or ""
+                            ),
+                        },
+                    }
+                )
                 continue
             quality = layer.get("owner_render_quality")
             if not isinstance(quality, dict):
@@ -9552,7 +9769,41 @@ def _run_pipeline_runner_cli(config: dict) -> int:
     }
     config_path = work_dir / "runner_config.json"
     config_path.write_text(json.dumps(runtime_config, ensure_ascii=False, indent=2), encoding="utf-8")
-    _run_pipeline(str(config_path))
+    run_id = str(config.get("run_id") or f"pipeline-{time.time_ns()}")
+    performance_recorder = _PipelineTiming(work_dir=work_dir, run_id=run_id)
+    try:
+        _run_pipeline(str(config_path), pipeline_timing=performance_recorder)
+    except BaseException as exc:
+        technical_gate_exit = False
+        if isinstance(exc, SystemExit) and exc.code == 2:
+            try:
+                persisted_project = json.loads(
+                    (work_dir / "project.json").read_text(encoding="utf-8")
+                )
+                gate_status = str(
+                    ((persisted_project.get("qa") or {}).get("export_gate") or {}).get(
+                        "status"
+                    )
+                    or ""
+                ).upper()
+                technical_gate_exit = gate_status in {"PASS", "REVIEW", "BLOCK"}
+            except (OSError, ValueError, TypeError, AttributeError):
+                technical_gate_exit = False
+        if not technical_gate_exit:
+            performance_recorder.mark_failed(exc)
+        try:
+            performance_recorder.finalize()
+        except Exception as timing_exc:
+            logger.warning(
+                "Falha ao finalizar performance_timing.json apos erro do pipeline: %s",
+                timing_exc,
+            )
+        raise
+    else:
+        try:
+            performance_recorder.finalize()
+        except Exception as timing_exc:
+            logger.warning("Falha ao finalizar performance_timing.json: %s", timing_exc)
     return 0
 
 
@@ -9766,7 +10017,11 @@ def _build_connected_reasoner_config(config: dict, *, ollama_status: dict | None
     return result
 
 
-def _run_pipeline(config_path: str):
+def _run_pipeline(
+    config_path: str,
+    *,
+    pipeline_timing: _PipelineTiming | None = None,
+):
     from corpus.runtime import extract_expected_terms, load_corpus_bundle, merge_corpus_into_context
     from extractor.extractor import cleanup, extract
     from inpainter.lama import run_inpainting
@@ -9778,7 +10033,7 @@ def _run_pipeline(config_path: str):
     from typesetter.renderer import run_typesetting
     from vision_stack.engine_presets import resolve_engine_preset
 
-    pipeline_timing = _PipelineTiming()
+    pipeline_timing = pipeline_timing or _PipelineTiming()
     start_time = time.time()
     with pipeline_timing.measure("load_config"):
         config = _load_json_file(config_path)
@@ -9913,6 +10168,18 @@ def _run_pipeline(config_path: str):
                     run_sample=False,
                     lang=config.get("idioma_origem", "en"),
                 )
+            pipeline_timing.record_model_load(
+                "detector",
+                backend="comic-text-detector",
+            )
+            pipeline_timing.record_model_load(
+                "ocr",
+                backend="paddleocr",
+            )
+            pipeline_timing.record_model_load(
+                "font_detector",
+                backend="font-detector",
+            )
         else:
             logger.info(
                 "Warmup visual opcional desativado pelo perfil runtime=%s",
@@ -9950,6 +10217,7 @@ def _run_pipeline(config_path: str):
                 page_surface_geometry,
                 request_scoped=False,
                 root_input_pixel_sha256="",
+                ocr_request=None,
             ):
                 return run_final_pixel_ocr_probe(
                     img,
@@ -9961,6 +10229,7 @@ def _run_pipeline(config_path: str):
                     page_surface_geometry=page_surface_geometry,
                     request_scoped=bool(request_scoped),
                     root_input_pixel_sha256=str(root_input_pixel_sha256 or ""),
+                    ocr_request=ocr_request,
                 )
 
             def run_ocr_stage(
@@ -10066,7 +10335,7 @@ def _run_pipeline(config_path: str):
 
         strip_detector = StripDetector()
         strip_runtime = StripRuntime()
-        strip_chapter_telemetry: dict = {}
+        strip_chapter_telemetry: dict = {"_performance_recorder": pipeline_timing}
         effective_owner_graph_mode = _automatic_owner_graph_mode(config)
         verified_owner_source_manifest = None
         verified_owner_private_root = None
@@ -10142,6 +10411,7 @@ def _run_pipeline(config_path: str):
                 artifact_root=verified_owner_private_root,
                 owner_content_replay=verified_owner_replay,
             )
+        strip_chapter_telemetry.pop("_performance_recorder", None)
         strip_chapter_telemetry["internal_unattributed_sec"] = round(
             max(
                 0.0,
@@ -10868,9 +11138,22 @@ def _run_pipeline(config_path: str):
             output_pages,
             private_execution_root=verified_owner_private_root,
         )
+        final_qa_report_payload = None
+        qa_report_path = work_dir / "qa_report.json"
+        if qa_report_path.is_file():
+            try:
+                loaded_qa_report = json.loads(
+                    qa_report_path.read_text(encoding="utf-8")
+                )
+                if isinstance(loaded_qa_report, dict):
+                    final_qa_report_payload = loaded_qa_report
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                final_qa_report_payload = None
         bundle = _wrap_up_verified_owner_pages(
             verified_inputs,
             source_private_execution_root=verified_owner_private_root,
+            final_project_payload=project_data,
+            final_qa_report_payload=final_qa_report_payload,
         )
         publication = PublicationTransaction.for_bundle(work_dir, bundle)
         publication.stage(bundle)
@@ -16494,8 +16777,8 @@ def _write_page_artifacts(evidence, *, generation_root: Path):
         if stage.pixel_sha256 != stage.artifact_ref.pixel_sha256:
             raise PageArtifactIntegrityError("canonical visual stage hash mismatch")
         if pixels.shape[:2] != (
-            result.request.original_page.height,
-            result.request.original_page.width,
+            result.final_page.artifact_ref.height,
+            result.final_page.artifact_ref.width,
         ):
             raise PageArtifactIntegrityError("canonical visual stage dimensions mismatch")
         if stage.alias_of is not None:
@@ -16636,6 +16919,8 @@ def _wrap_up_verified_owner_pages(
     inputs,
     *,
     source_private_execution_root: Path,
+    final_project_payload: dict | None = None,
+    final_qa_report_payload: dict | None = None,
 ):
     """Freeze one self-contained publication generation from verified page evidence."""
 
@@ -16714,7 +16999,9 @@ def _wrap_up_verified_owner_pages(
                 existing_project = loaded_project
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             existing_project = {}
-    project_payload = dict(existing_project)
+    project_payload = copy.deepcopy(
+        final_project_payload if isinstance(final_project_payload, dict) else existing_project
+    )
     project_payload.update(
         {
             "schema_version": 1,
@@ -16728,6 +17015,7 @@ def _wrap_up_verified_owner_pages(
     )
     existing_pages = list(project_payload.get("paginas") or [])
     verified_project_pages = []
+    published_final_artifacts = {}
     for ordinal, page in enumerate(inputs.pages, 1):
         payload = (
             dict(existing_pages[ordinal - 1])
@@ -16748,12 +17036,51 @@ def _wrap_up_verified_owner_pages(
                 "terminal_proof_sha256": page.terminal_proof_sha256,
             }
         )
+        image_layers = payload.get("image_layers")
+        if isinstance(image_layers, dict):
+            image_layers = copy.deepcopy(image_layers)
+            rendered = image_layers.get("rendered")
+            if isinstance(rendered, dict):
+                rendered = dict(rendered)
+                rendered["path"] = page.final_artifact.relative_path
+                image_layers["rendered"] = rendered
+                payload["image_layers"] = image_layers
+        published_final_artifacts[page.page_id] = page.final_artifact
         verified_project_pages.append(payload)
     project_payload["paginas"] = verified_project_pages
+    qa_payload = project_payload.get("qa")
+    if isinstance(qa_payload, dict):
+        qa_payload = copy.deepcopy(qa_payload)
+        final_pixel_reports = qa_payload.get("final_pixel_reports")
+        if isinstance(final_pixel_reports, list):
+            rebound_reports = []
+            for report in final_pixel_reports:
+                if not isinstance(report, dict):
+                    rebound_reports.append(report)
+                    continue
+                rebound = dict(report)
+                final_artifact = published_final_artifacts.get(
+                    str(rebound.get("page_id") or "")
+                )
+                if final_artifact is not None:
+                    rebound["artifact_path"] = final_artifact.relative_path
+                    rebound["persisted_sha256"] = final_artifact.file_sha256
+                rebound_reports.append(rebound)
+            qa_payload["final_pixel_reports"] = rebound_reports
+        project_payload["qa"] = qa_payload
     project_path = staging_root / "project.json"
     project_path.write_bytes(
         json.dumps(project_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     )
+    if isinstance(final_qa_report_payload, dict):
+        (staging_root / "qa_report.json").write_bytes(
+            json.dumps(
+                final_qa_report_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
     reopened_inputs = VerifiedProjectInputs.read_verified(staging_root)
     if reopened_inputs.sha256 != inputs.sha256:
         raise ValueError("staged verified inputs changed during wrap-up")

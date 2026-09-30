@@ -8,6 +8,11 @@ import {
 
 export type TranslationQueueFilter = "all" | TranslationStatus;
 
+export interface TranslationQueueQuery {
+  query?: string;
+  textClass?: string;
+}
+
 export interface TranslationQueueItem {
   pageIndex: number;
   pageNumber: number;
@@ -16,6 +21,8 @@ export interface TranslationQueueItem {
   original: string;
   translated: string;
   status: TranslationStatus;
+  textClass: string;
+  qaFlags: string[];
   notes?: string;
 }
 
@@ -37,11 +44,23 @@ export function resolveTranslationStatus(layer: StudioTextLayer): TranslationSta
 export function buildTranslationQueue(
   project: StudioProject,
   filter: TranslationQueueFilter = "all",
+  options: TranslationQueueQuery = {},
 ): TranslationQueueItem[] {
+  const query = normalizeSearch(options.query ?? "");
+  const requestedClass = normalizeSearch(options.textClass ?? "");
   return project.paginas.flatMap((page, pageIndex) => (
     page.text_layers.flatMap((layer, blockIndex) => {
       const status = resolveTranslationStatus(layer);
       if (filter !== "all" && status !== filter) return [];
+      const textClass = String(layer.content_class ?? layer.tipo ?? "sem classe").trim() || "sem classe";
+      const notes = typeof layer.translation_notes === "string" ? layer.translation_notes : undefined;
+      const qaFlags = Array.isArray(layer.qa_flags)
+        ? layer.qa_flags.filter((flag): flag is string => typeof flag === "string" && flag.trim().length > 0)
+        : [];
+      if (requestedClass && normalizeSearch(textClass) !== requestedClass) return [];
+      if (query && !normalizeSearch([layer.original, layer.translated, notes, textClass, ...qaFlags].filter(Boolean).join(" ")).includes(query)) {
+        return [];
+      }
       return [{
         pageIndex,
         pageNumber: page.numero,
@@ -50,10 +69,16 @@ export function buildTranslationQueue(
         original: layer.original,
         translated: layer.translated,
         status,
-        ...(typeof layer.translation_notes === "string" ? { notes: layer.translation_notes } : {}),
+        textClass,
+        qaFlags,
+        ...(notes ? { notes } : {}),
       }];
     })
   ));
+}
+
+function normalizeSearch(value: string) {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLocaleLowerCase("pt-BR").trim();
 }
 
 export function calculatePageTranslationProgress(page: StudioPage): TranslationProgress {

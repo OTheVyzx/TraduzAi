@@ -52,6 +52,15 @@ export function TranslationInspector({
         />
       </label>
 
+      {!layer.original.trim() && (
+        <p
+          role="alert"
+          className="rounded-md border border-status-warning/30 bg-status-warning/10 px-2.5 py-2 text-[10px] leading-4 text-status-warning"
+        >
+          Texto de origem vazio — revise o OCR ou a região antes de confirmar.
+        </p>
+      )}
+
       <label className="block">
         <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.12em] text-accent-cyan">Tradução</span>
         <textarea

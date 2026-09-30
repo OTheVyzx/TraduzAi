@@ -457,6 +457,167 @@ def test_component_without_band_gets_anchored_ocr_before_owner_resolution() -> N
     assert set(coverage.ledger.entries[0].ocr_attempt_ids) <= physical_attempt_ids
 
 
+def test_anchored_ocr_is_rebound_to_tight_nested_component_without_duplicate_owner() -> None:
+    import numpy as np
+
+    page = np.full((120, 160, 3), 230, dtype=np.uint8)
+    broad = SourceTextComponent(
+        component_id="component-broad-detector-envelope",
+        page_id=PAGE_ID,
+        bbox_page=(20, 20, 140, 100),
+        polygon_page=((20, 20), (140, 20), (140, 100), (20, 100)),
+        detector_sources=("primary_region_detector",),
+        confidence=0.70,
+        evidence_ids=("broad-region",),
+    )
+    tight = SourceTextComponent(
+        component_id="component-tight-detector-text",
+        page_id=PAGE_ID,
+        bbox_page=(50, 40, 90, 60),
+        polygon_page=((50, 40), (90, 40), (90, 60), (50, 60)),
+        detector_sources=("primary_region_detector",),
+        confidence=0.35,
+        evidence_ids=("tight-region",),
+    )
+
+    class BroadCropPaddleModel:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del det, rec, cls
+            if image.shape[:2] != (80, 120):
+                return [[]]
+            return [
+                [
+                    (
+                        [[30, 20], [70, 20], [70, 40], [30, 40]],
+                        ("TEXT", 0.96),
+                    )
+                ]
+            ]
+
+    engine = OCREngine.__new__(OCREngine)
+    engine._backend = "paddleocr"
+    engine._model = BroadCropPaddleModel()
+
+    def runner(page_rgb, *, request, bbox_page, variants):
+        if bbox_page is None:
+            return engine.recognize_page_with_evidence(
+                page_rgb, [], request=request, force_full_page=True
+            )
+        return engine.recognize_region_with_evidence(
+            page_rgb,
+            bbox_page=bbox_page,
+            request=request,
+            variants=variants,
+        )
+
+    coverage = complete_page_coverage(
+        page,
+        run_id=RUN_ID,
+        origin_execution_id=EXECUTION_ID,
+        page_id=PAGE_ID,
+        page_source_sha256=canonical_page_sha256(page),
+        components=(broad, tight),
+        band_evidence=(),
+        ocr_runner=runner,
+    )
+
+    entries = {entry.component_id: entry for entry in coverage.entries}
+    text_observations = tuple(
+        item for item in coverage.observations if item.text == "TEXT"
+    )
+    assert text_observations
+    assert all(
+        item.component_ids == (tight.component_id,) for item in text_observations
+    )
+    assert entries[tight.component_id].observation_ids == tuple(
+        item.observation_id for item in text_observations
+    )
+    assert entries[broad.component_id].materiality == "non_text"
+    assert entries[broad.component_id].preserve_policy == (
+        "policy:explicit_visual_non_text"
+    )
+    complete_container_coverage(page, coverage).require_ready_for_ownership()
+
+
+def test_full_page_ocr_prefers_smallest_containing_component_once() -> None:
+    import numpy as np
+
+    page = np.full((120, 160, 3), 230, dtype=np.uint8)
+    broad = SourceTextComponent(
+        component_id="component-broad-full-page-envelope",
+        page_id=PAGE_ID,
+        bbox_page=(20, 20, 140, 100),
+        polygon_page=((20, 20), (140, 20), (140, 100), (20, 100)),
+        detector_sources=("primary_region_detector",),
+        confidence=0.70,
+        evidence_ids=("broad-full-page-region",),
+    )
+    tight = SourceTextComponent(
+        component_id="component-tight-full-page-text",
+        page_id=PAGE_ID,
+        bbox_page=(50, 40, 90, 60),
+        polygon_page=((50, 40), (90, 40), (90, 60), (50, 60)),
+        detector_sources=("primary_region_detector",),
+        confidence=0.35,
+        evidence_ids=("tight-full-page-region",),
+    )
+
+    class FullPagePaddleModel:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del det, rec, cls
+            if image.shape[:2] != (120, 160):
+                return [[]]
+            return [
+                [
+                    (
+                        [[50, 40], [90, 40], [90, 60], [50, 60]],
+                        ("TEXT", 0.96),
+                    )
+                ]
+            ]
+
+    engine = OCREngine.__new__(OCREngine)
+    engine._backend = "paddleocr"
+    engine._model = FullPagePaddleModel()
+
+    def runner(page_rgb, *, request, bbox_page, variants):
+        if bbox_page is None:
+            return engine.recognize_page_with_evidence(
+                page_rgb, [], request=request, force_full_page=True
+            )
+        return engine.recognize_region_with_evidence(
+            page_rgb,
+            bbox_page=bbox_page,
+            request=request,
+            variants=variants,
+        )
+
+    coverage = complete_page_coverage(
+        page,
+        run_id=RUN_ID,
+        origin_execution_id=EXECUTION_ID,
+        page_id=PAGE_ID,
+        page_source_sha256=canonical_page_sha256(page),
+        components=(broad, tight),
+        band_evidence=(),
+        ocr_runner=runner,
+    )
+
+    entries = {entry.component_id: entry for entry in coverage.entries}
+    text_observations = tuple(
+        item for item in coverage.observations if item.text == "TEXT"
+    )
+    assert text_observations
+    assert all(
+        item.component_ids == (tight.component_id,) for item in text_observations
+    )
+    assert entries[broad.component_id].materiality == "non_text"
+    assert entries[broad.component_id].preserve_policy == (
+        "policy:explicit_visual_non_text"
+    )
+    complete_container_coverage(page, coverage).require_ready_for_ownership()
+
+
 def test_ocr_empty_near_uniform_false_glyph_gets_explicit_non_text_disposition() -> None:
     import cv2
     import numpy as np
@@ -579,6 +740,63 @@ def test_ocr_empty_tiny_isolated_false_glyph_gets_explicit_non_text_disposition(
     coverage.require_ready_for_ownership()
 
 
+def test_ocr_empty_edge_pattern_region_gets_explicit_non_text_disposition() -> None:
+    import cv2
+    import numpy as np
+
+    page = np.full((1152, 800, 3), (15, 15, 15), dtype=np.uint8)
+    for x in range(-30, 830, 42):
+        cv2.line(page, (x, 0), (x + 25, 72), (250, 185, 12), 14, cv2.LINE_AA)
+    component = SourceTextComponent(
+        component_id="component-top-edge-pattern",
+        page_id=PAGE_ID,
+        bbox_page=(52, 1, 696, 72),
+        polygon_page=((52, 1), (696, 1), (696, 72), (52, 72)),
+        detector_sources=("primary_region_detector",),
+        confidence=0.91,
+        evidence_ids=("primary-region-top-edge",),
+    )
+
+    class EmptyPaddleModel:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del image, det, rec, cls
+            return [[]]
+
+    engine = OCREngine.__new__(OCREngine)
+    engine._backend = "paddleocr"
+    engine._model = EmptyPaddleModel()
+
+    def runner(page_rgb, *, request, bbox_page, variants):
+        if bbox_page is None:
+            return engine.recognize_page_with_evidence(
+                page_rgb, [], request=request, force_full_page=True
+            )
+        return engine.recognize_region_with_evidence(
+            page_rgb,
+            bbox_page=bbox_page,
+            request=request,
+            variants=variants,
+        )
+
+    coverage = complete_page_coverage(
+        page,
+        run_id=RUN_ID,
+        origin_execution_id=EXECUTION_ID,
+        page_id=PAGE_ID,
+        page_source_sha256=canonical_page_sha256(page),
+        components=(component,),
+        band_evidence=(),
+        ocr_runner=runner,
+    )
+
+    entry = coverage.entries[0]
+    assert entry.materiality == "non_text"
+    assert entry.state == "explicit_non_dialogue_preserve"
+    assert entry.semantic_role == "visual_non_text"
+    assert entry.preserve_policy == "policy:explicit_visual_non_text"
+    coverage.require_ready_for_ownership()
+
+
 def test_ocr_empty_uncorroborated_glyph_scan_gets_terminal_non_text_disposition() -> None:
     import cv2
     import numpy as np
@@ -640,7 +858,16 @@ def test_ocr_empty_uncorroborated_glyph_scan_gets_terminal_non_text_disposition(
     coverage.require_ready_for_ownership()
 
 
-def test_ocr_empty_detector_region_with_visual_sfx_support_is_preserved_as_sfx() -> None:
+@pytest.mark.parametrize(
+    "detector_sources",
+    [
+        ("primary_region_detector",),
+        ("glyph_scan", "strip_region_detector"),
+    ],
+)
+def test_ocr_empty_detector_region_with_visual_sfx_support_is_preserved_as_sfx(
+    detector_sources: tuple[str, ...],
+) -> None:
     import cv2
     import numpy as np
 
@@ -670,7 +897,7 @@ def test_ocr_empty_detector_region_with_visual_sfx_support_is_preserved_as_sfx()
         page_id=PAGE_ID,
         bbox_page=(35, 0, 145, 70),
         polygon_page=((35, 0), (145, 0), (145, 70), (35, 70)),
-        detector_sources=("primary_region_detector",),
+        detector_sources=detector_sources,
         confidence=0.72,
         evidence_ids=("detector-region-sfx",),
     )
@@ -720,7 +947,7 @@ def test_ocr_empty_detector_region_with_visual_sfx_support_is_preserved_as_sfx()
     coverage.require_ready_for_ownership()
 
 
-def test_ocr_empty_plain_detector_region_without_sfx_support_remains_blocking() -> None:
+def test_ocr_empty_plain_detector_region_without_sfx_support_requires_review() -> None:
     import cv2
     import numpy as np
 
@@ -771,10 +998,191 @@ def test_ocr_empty_plain_detector_region_without_sfx_support_remains_blocking() 
         ocr_runner=runner,
     )
 
-    assert coverage.entries[0].materiality == "material"
-    assert coverage.entries[0].preserve_policy is None
-    with pytest.raises(CoverageInvariantError, match="lacks OCR observation"):
-        coverage.require_ready_for_ownership()
+    entry = coverage.entries[0]
+    assert entry.materiality == "uncertain"
+    assert entry.state == "review_required"
+    assert entry.owner_id is None
+    assert entry.observation_ids == ()
+    assert entry.preserve_policy is None
+    coverage.require_ready_for_ownership()
+
+
+def test_ambiguous_empty_primary_candidate_is_reviewed_without_owner() -> None:
+    import numpy as np
+    from ownership.owner_builder import build_owner_page_graph_from_coverage
+
+    class EmptyPaddleModel:
+        def ocr(self, image, **kwargs):
+            return [None]
+
+    page = np.full((1000, 690, 3), 225, dtype=np.uint8)
+    component = SourceTextComponent(
+        component_id="ambiguous-background-label",
+        page_id=PAGE_ID,
+        bbox_page=(128, 733, 171, 747),
+        polygon_page=((128, 733), (171, 733), (171, 747), (128, 747)),
+        detector_sources=("primary_region_detector",),
+        confidence=0.272705078125,
+        evidence_ids=("primary-detection",),
+    )
+    engine = OCREngine.__new__(OCREngine)
+    engine._backend = "paddleocr"
+    engine._model = EmptyPaddleModel()
+
+    def runner(page_rgb, *, request, bbox_page, variants):
+        if bbox_page is None:
+            return engine.recognize_page_with_evidence(
+                page_rgb, [], request=request, force_full_page=True
+            )
+        return engine.recognize_region_with_evidence(
+            page_rgb, bbox_page=bbox_page, request=request, variants=variants
+        )
+
+    coverage = complete_page_coverage(
+        page,
+        run_id=RUN_ID,
+        origin_execution_id=EXECUTION_ID,
+        page_id=PAGE_ID,
+        page_source_sha256=canonical_page_sha256(page),
+        components=(component,),
+        band_evidence=(),
+        ocr_runner=runner,
+    )
+    assert coverage.entries[0].materiality == "uncertain"
+    assert coverage.entries[0].state == "review_required"
+    assert not coverage.entries[0].observation_ids
+    coverage.ledger.require_complete()
+    graph = build_owner_page_graph_from_coverage(coverage)
+    assert not graph.owners
+    assert graph.component_dispositions[0].decision == "uncertain"
+    assert graph.component_dispositions[0].owner_id is None
+    assert graph.component_dispositions[0].policy_evidence_ids
+    assert graph.from_dict(graph.to_dict(), enforce=True).to_dict() == graph.to_dict()
+
+
+@pytest.mark.parametrize(
+    "case,detector_sources,confidence,script_evidence,has_ocr,preserve,expected_uncertain",
+    [
+        ("tiny_background_label", ("primary_region_detector",), 0.27, (), False, False, True),
+        ("ch57_page002", ("primary_region_detector",), 0.272705078125, (), False, False, True),
+        ("ch57_page005", ("primary_region_detector",), 0.68505859375, (), False, False, True),
+        ("ch57_page009", ("primary_region_detector",), 0.74609375, (), False, False, True),
+        ("ch57_page013", ("primary_region_detector",), 0.71923828125, (), False, False, True),
+        ("ch57_page022", ("primary_region_detector",), 0.3994140625, (), False, False, True),
+        ("ch57_page035", ("primary_region_detector",), 0.413818359375, (), False, False, True),
+        ("ch57_page039", ("primary_region_detector",), 0.79248046875, (), False, False, True),
+        ("ch57_page042", ("primary_region_detector",), 0.68017578125, (), False, False, True),
+        ("ch57_page043", ("primary_region_detector",), 0.8798828125, (), False, False, True),
+        ("missing_detector_confidence", ("primary_region_detector",), None, (), False, False, True),
+        ("small_legible_text", ("primary_region_detector",), 0.27, (), True, False, False),
+        ("high_confidence_legible_text", ("primary_region_detector",), 0.91, (), True, False, False),
+        ("legible_signage", ("primary_region_detector",), 0.28, (), True, False, False),
+        ("ambiguous_numeric_signage", ("primary_region_detector",), 0.29, (), False, False, True),
+        ("corroborated_sfx", ("primary_region_detector", "glyph_scan"), 0.25, (), False, False, False),
+        ("high_confidence_corroborated_sfx", ("primary_region_detector", "glyph_scan"), 0.90, (), False, False, False),
+        ("uncorroborated_sfx", ("primary_region_detector",), 0.25, (), False, False, True),
+        ("watermark_with_policy", ("primary_region_detector",), 0.20, (), False, True, False),
+        ("high_confidence_preserve_policy", ("primary_region_detector",), 0.95, (), False, True, False),
+        ("small_dialogue_fragment", ("primary_region_detector",), 0.20, (), True, False, False),
+        ("low_confidence_valid_ocr", ("primary_region_detector",), 0.10, (), True, False, False),
+        ("strong_script_evidence", ("primary_region_detector",), 0.20, ("latin",), False, False, False),
+        ("high_confidence_script_evidence", ("primary_region_detector",), 0.96, ("latin",), False, False, False),
+    ],
+)
+def test_empty_primary_candidate_evidence_corpus(
+    case, detector_sources, confidence, script_evidence, has_ocr, preserve, expected_uncertain
+) -> None:
+    from ownership.coverage import classify_empty_primary_candidate
+
+    component = SourceTextComponent(
+        component_id=case,
+        page_id=PAGE_ID,
+        bbox_page=(10, 20, 53, 34),
+        polygon_page=((10, 20), (53, 20), (53, 34), (10, 34)),
+        detector_sources=detector_sources,
+        confidence=confidence,
+        script_evidence=script_evidence,
+    )
+    assert classify_empty_primary_candidate(
+        component,
+        has_coverage_observation=has_ocr,
+        has_explicit_preserve_policy=preserve,
+    ) is expected_uncertain
+
+
+def test_ocr_empty_scanlation_banner_with_page_credit_evidence_is_preserved() -> None:
+    import numpy as np
+    from types import SimpleNamespace
+    from ownership.coverage import _ocr_empty_component_preserve_policy
+
+    page = np.full((1000, 690, 3), 25, dtype=np.uint8)
+    component = SourceTextComponent(
+        component_id="component-scanlation-logo",
+        page_id=PAGE_ID,
+        bbox_page=(130, 52, 445, 82),
+        polygon_page=((130, 52), (445, 52), (445, 82), (130, 82)),
+        detector_sources=("glyph_scan", "primary_region_detector"),
+        confidence=0.9,
+        evidence_ids=("region-credit-logo",),
+    )
+    observations = (
+        SimpleNamespace(text="TOON"),
+        SimpleNamespace(text="FOR FASTER UPDATE"),
+    )
+
+    assert _ocr_empty_component_preserve_policy(
+        page,
+        component,
+        page_observations=observations,
+    ) == ("visual_non_text", "policy:scanlation_credit_art")
+
+
+def test_ocr_empty_bottom_credit_banner_from_regional_detector_is_preserved() -> None:
+    import numpy as np
+    from types import SimpleNamespace
+    from ownership.coverage import _ocr_empty_component_preserve_policy
+
+    page = np.full((10000, 690, 3), 25, dtype=np.uint8)
+    component = SourceTextComponent(
+        component_id="component-bottom-credit-banner",
+        page_id=PAGE_ID,
+        bbox_page=(200, 9710, 555, 9934),
+        polygon_page=((200, 9710), (555, 9710), (555, 9934), (200, 9934)),
+        detector_sources=("primary_region_detector",),
+        confidence=0.9,
+        evidence_ids=("region-bottom-credit",),
+    )
+    observations = (
+        SimpleNamespace(text="RESET-SCAN.CO"),
+        SimpleNamespace(text="UTOON.NET"),
+    )
+
+    assert _ocr_empty_component_preserve_policy(
+        page,
+        component,
+        page_observations=observations,
+    ) == ("visual_non_text", "policy:scanlation_credit_art")
+
+
+def test_ocr_empty_small_region_corroborated_by_glyph_and_primary_is_sfx() -> None:
+    import numpy as np
+    from ownership.coverage import _ocr_empty_component_preserve_policy
+
+    page = np.full((10000, 690, 3), 225, dtype=np.uint8)
+    component = SourceTextComponent(
+        component_id="component-stylized-sfx",
+        page_id=PAGE_ID,
+        bbox_page=(553, 2393, 646, 2477),
+        polygon_page=((553, 2393), (646, 2393), (646, 2477), (553, 2477)),
+        detector_sources=("glyph_scan", "primary_region_detector"),
+        confidence=0.9,
+        evidence_ids=("region-stylized-sfx",),
+    )
+
+    assert _ocr_empty_component_preserve_policy(page, component) == (
+        "sfx",
+        "policy:ocr_empty_small_corroborated_sfx",
+    )
 
 
 def test_ocr_empty_unconfirmed_dark_balloon_heuristic_gets_visual_non_text_disposition() -> None:
@@ -874,6 +1282,84 @@ def test_two_unassociated_regions_materialize_distinct_hash_bound_components() -
     assert not any(item.rejection_reason == "suppressed" for item in result.observations)
 
 
+def test_unique_unassociated_observation_updates_component_coverage_ledger() -> None:
+    page, raw = _unassociated_coverage("WAIT")
+    component = SourceTextComponent(
+        component_id="component-wait",
+        page_id=PAGE_ID,
+        bbox_page=(8, 10, 55, 32),
+        polygon_page=((8, 10), (55, 10), (55, 32), (8, 32)),
+        detector_sources=("strip_region_detector",),
+    )
+    initial = PageCoverageResult.initialize(
+        run_id=raw.run_id,
+        origin_execution_id=raw.origin_execution_id,
+        page_id=raw.page_id,
+        page_source_sha256=raw.page_source_sha256,
+        components=(component,),
+    )
+    initial = PageCoverageResult.build_from(
+        initial,
+        observations=raw.observations,
+        ocr_requests=raw.ocr_requests,
+        ocr_invocations=raw.ocr_invocations,
+    )
+
+    result = recover_unassociated_observations(page, initial)
+
+    assert result.observations[0].component_ids == (component.component_id,)
+    assert result.entries[0].observation_ids == (
+        result.observations[0].observation_id,
+    )
+    assert result.entries[0].ocr_attempt_ids == (
+        result.observations[0].attempt_id,
+    )
+    assert result.ledger.parent_ledger_sha256 == initial.ledger.sha256
+    complete_container_coverage(page, result).require_ready_for_ownership()
+
+
+def test_ambiguous_region_observation_prefers_decisive_tight_component() -> None:
+    page, raw = _unassociated_coverage("WAIT")
+    components = (
+        SourceTextComponent(
+            component_id="component-coarse-container",
+            page_id=PAGE_ID,
+            bbox_page=(0, 0, 80, 50),
+            polygon_page=((0, 0), (80, 0), (80, 50), (0, 50)),
+            detector_sources=("strip_region_detector",),
+        ),
+        SourceTextComponent(
+            component_id="component-tight-text",
+            page_id=PAGE_ID,
+            bbox_page=(8, 10, 55, 32),
+            polygon_page=((8, 10), (55, 10), (55, 32), (8, 32)),
+            detector_sources=("strip_region_detector",),
+        ),
+    )
+    initial = PageCoverageResult.initialize(
+        run_id=raw.run_id,
+        origin_execution_id=raw.origin_execution_id,
+        page_id=raw.page_id,
+        page_source_sha256=raw.page_source_sha256,
+        components=components,
+    )
+    initial = PageCoverageResult.build_from(
+        initial,
+        observations=raw.observations,
+        ocr_requests=raw.ocr_requests,
+        ocr_invocations=raw.ocr_invocations,
+    )
+
+    result = recover_unassociated_observations(page, initial)
+
+    assert result.observations[0].component_ids == ("component-tight-text",)
+    assert result.pending_requests == ()
+    assert result.recovery_decisions[-1].status == "succeeded"
+    assert result.recovery_decisions[-1].reason == (
+        "associated_to_decisive_geometry_match"
+    )
+
+
 def test_ambiguous_full_page_observation_requests_anchored_recovery() -> None:
     page, raw = _unassociated_coverage("WAIT")
     components = (
@@ -916,6 +1402,106 @@ def test_ambiguous_full_page_observation_requests_anchored_recovery() -> None:
     assert result.observations[0].rejection_reason != "suppressed"
 
 
+def test_ambiguous_full_page_observation_can_materialize_for_owner_gate() -> None:
+    page, raw = _unassociated_coverage("WAIT")
+    components = (
+        SourceTextComponent(
+            component_id="component-left",
+            page_id=PAGE_ID,
+            bbox_page=(8, 10, 35, 30),
+            polygon_page=((8, 10), (35, 10), (35, 30), (8, 30)),
+            detector_sources=("glyph_scan",),
+        ),
+        SourceTextComponent(
+            component_id="component-right",
+            page_id=PAGE_ID,
+            bbox_page=(30, 10, 55, 30),
+            polygon_page=((30, 10), (55, 10), (55, 30), (30, 30)),
+            detector_sources=("glyph_scan",),
+        ),
+    )
+    initial = PageCoverageResult.initialize(
+        run_id=raw.run_id,
+        origin_execution_id=raw.origin_execution_id,
+        page_id=raw.page_id,
+        page_source_sha256=raw.page_source_sha256,
+        components=components,
+    )
+    initial = PageCoverageResult.build_from(
+        initial,
+        observations=raw.observations,
+        ocr_requests=raw.ocr_requests,
+        ocr_invocations=raw.ocr_invocations,
+    )
+
+    result = recover_unassociated_observations(
+        page,
+        initial,
+        materialize_ambiguous=True,
+    )
+
+    assert result.pending_requests == ()
+    assert len(result.components) == 3
+    assert result.observations[0].component_ids == (result.components[-1].component_id,)
+    assert result.recovery_decisions[-1].status == "succeeded"
+    assert result.recovery_decisions[-1].reason == (
+        "materialized_from_ambiguous_full_page_observation"
+    )
+    materialized_entry = result.entries[-1]
+    assert materialized_entry.component_id == result.components[-1].component_id
+    assert materialized_entry.ocr_attempt_ids == (
+        result.observations[0].attempt_id,
+    )
+    assert materialized_entry.observation_ids == (
+        result.observations[0].observation_id,
+    )
+
+
+def test_pending_ambiguous_recovery_is_reused_when_materialized() -> None:
+    page, raw = _unassociated_coverage("WAIT")
+    components = (
+        SourceTextComponent(
+            component_id="component-left",
+            page_id=PAGE_ID,
+            bbox_page=(8, 10, 35, 30),
+            polygon_page=((8, 10), (35, 10), (35, 30), (8, 30)),
+            detector_sources=("glyph_scan",),
+        ),
+        SourceTextComponent(
+            component_id="component-right",
+            page_id=PAGE_ID,
+            bbox_page=(30, 10, 55, 30),
+            polygon_page=((30, 10), (55, 10), (55, 30), (30, 30)),
+            detector_sources=("glyph_scan",),
+        ),
+    )
+    initial = PageCoverageResult.initialize(
+        run_id=raw.run_id,
+        origin_execution_id=raw.origin_execution_id,
+        page_id=raw.page_id,
+        page_source_sha256=raw.page_source_sha256,
+        components=components,
+    )
+    initial = PageCoverageResult.build_from(
+        initial,
+        observations=raw.observations,
+        ocr_requests=raw.ocr_requests,
+        ocr_invocations=raw.ocr_invocations,
+    )
+    pending = recover_unassociated_observations(page, initial)
+
+    result = recover_unassociated_observations(
+        page,
+        pending,
+        materialize_ambiguous=True,
+    )
+
+    assert result.pending_requests == ()
+    assert len(result.recovery_requests) == len(pending.recovery_requests)
+    assert result.recovery_decisions[-1].request_id == pending.pending_requests[0].request_id
+    assert result.recovery_decisions[-1].status == "succeeded"
+
+
 def test_ocr_confirmed_component_recovers_container_before_graph_build() -> None:
     coverage = _completed_coverage()
 
@@ -923,6 +1509,105 @@ def test_ocr_confirmed_component_recovers_container_before_graph_build() -> None
 
     assert recovered.entries[0].container_id
     assert recovered.entries[0].state == "observed"
+
+
+def test_container_recovery_uses_observed_text_geometry_not_broad_detector_box(
+    monkeypatch,
+) -> None:
+    page = _coverage_page()
+    coverage = complete_page_coverage(
+        page,
+        run_id=RUN_ID,
+        origin_execution_id=EXECUTION_ID,
+        page_id=PAGE_ID,
+        page_source_sha256=canonical_page_sha256(page),
+        components=(_coverage_component(),),
+        band_evidence=(),
+        ocr_runner=_coverage_runner(),
+    )
+    captured = {}
+
+    def fake_recover(
+        image_rgb,
+        *,
+        component_id,
+        glyph_bbox_page,
+        glyph_polygon_page,
+    ):
+        del glyph_polygon_page
+        captured[component_id] = tuple(glyph_bbox_page)
+        return {
+            "evidence_id": f"container:{component_id}",
+            "source": "conservative_support_local_container",
+            "bbox_page": tuple(glyph_bbox_page),
+            "semantic_bbox_page": tuple(glyph_bbox_page),
+            "page_shape": tuple(image_rgb.shape),
+            "confidence": 0.60,
+        }
+
+    monkeypatch.setattr(
+        "ownership.container_evidence.recover_component_visual_container",
+        fake_recover,
+    )
+
+    complete_container_coverage(page, coverage)
+
+    observations = [
+        observation
+        for observation in coverage.observations
+        if observation.observation_id in coverage.entries[0].observation_ids
+    ]
+    expected = (
+        min(item.bbox_page[0] for item in observations),
+        min(item.bbox_page[1] for item in observations),
+        max(item.bbox_page[2] for item in observations),
+        max(item.bbox_page[3] for item in observations),
+    )
+    assert captured[coverage.entries[0].component_id] == expected
+    assert expected != coverage.entries[0].bbox_page
+
+
+def test_explicit_preserve_component_does_not_claim_dialogue_visual_container() -> None:
+    page = _coverage_page()
+    coverage = complete_page_coverage(
+        page,
+        run_id=RUN_ID,
+        origin_execution_id=EXECUTION_ID,
+        page_id=PAGE_ID,
+        page_source_sha256=canonical_page_sha256(page),
+        components=(_coverage_component(),),
+        band_evidence=[],
+        ocr_runner=_coverage_runner(),
+    )
+    preserved_entry = replace(
+        coverage.entries[0],
+        state="explicit_non_dialogue_preserve",
+        semantic_role="non_text_false_glyph",
+        owner_id=None,
+        preserve_policy="policy:ocr_empty_tiny_isolated_false_glyph",
+    )
+    ledger = build_page_coverage_ledger(
+        run_id=coverage.run_id,
+        origin_execution_id=coverage.origin_execution_id,
+        page_id=coverage.page_id,
+        page_source_sha256=coverage.page_source_sha256,
+        inventory_version=coverage.ledger.inventory_version + 1,
+        parent_ledger_sha256=coverage.ledger.sha256,
+        component_inventory=coverage.ledger.component_inventory,
+        expected_observation_ids=coverage.ledger.expected_observation_ids,
+        entries=(preserved_entry,),
+        observation_dispositions=coverage.ledger.observation_dispositions,
+        recovery_requests=coverage.recovery_requests,
+        recovery_decisions=coverage.recovery_decisions,
+    )
+    coverage = PageCoverageResult.build_from(
+        coverage,
+        ledger_history=(*coverage.ledger_history, ledger),
+    )
+
+    recovered = complete_container_coverage(page, coverage)
+
+    assert recovered.entries[0].container_id is None
 
 
 def test_coverage_recovery_snapshot_never_drops_request_or_invocation_evidence() -> None:

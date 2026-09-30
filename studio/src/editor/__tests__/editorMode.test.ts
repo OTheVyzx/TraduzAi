@@ -11,6 +11,7 @@ describe("Studio editor mode", () => {
     expect(capabilities.showPipelineActions).toBe(true);
     expect(capabilities.showSourceLanguage).toBe(true);
     expect(capabilities.showBlockProcessingActions).toBe(true);
+    expect(capabilities.renderPreviewOnSave).toBe(true);
     expect(isEditorToolVisible("traduzai", "process")).toBe(true);
   });
 
@@ -20,6 +21,7 @@ describe("Studio editor mode", () => {
     expect(capabilities.showPipelineActions).toBe(false);
     expect(capabilities.showSourceLanguage).toBe(false);
     expect(capabilities.showBlockProcessingActions).toBe(false);
+    expect(capabilities.renderPreviewOnSave).toBe(false);
     expect(isEditorToolVisible("studio", "repairBrush")).toBe(false);
     expect(isEditorToolVisible("studio", "reinpaintBrush")).toBe(false);
     expect(isEditorToolVisible("studio", "process")).toBe(false);

@@ -2312,6 +2312,40 @@ class MainEmitTests(unittest.TestCase):
             self.assertIn("dark_text_underfilled_height_ratio", row["metrics"])
             self.assertIn("dark_text_underfilled_area_ratio", row["metrics"])
 
+    def test_final_rerender_visual_qa_accepts_verified_target_language_no_repaint_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from debug_tools import DebugRecorder
+
+            root = Path(tmp)
+            recorder = DebugRecorder(root, enabled=True, run_id="run-owner-no-repaint")
+            audit = main._qa_translated_final_crops_against_layers(
+                recorder,
+                {
+                    "owner_graph_status": "verified",
+                    "page_owner_graphs": [{"page_id": "page_001"}],
+                    "paginas": [{
+                        "numero": 1,
+                        "text_layers": [{
+                            "owner_id": "owner_ptbr",
+                            "state": "target_ready",
+                            "route_action": "translate_inpaint_render",
+                            "source_payload": "JA ESTAVA EM PORTUGUES",
+                            "translated_payload": "JA ESTAVA EM PORTUGUES",
+                            "no_repaint_policy_id": "already_target_language",
+                        }],
+                    }],
+                },
+                root,
+            )
+
+            self.assertEqual(audit["row_count"], 1)
+            self.assertEqual(audit["pass_count"], 1)
+            self.assertEqual(audit["fail_count"], 0)
+            self.assertEqual(
+                audit["rows"][0]["metrics"]["verification_route"],
+                "verified_target_language_no_repaint",
+            )
+
     def test_persist_real_bubble_mask_layer_rejects_bbox_fallback_source(self) -> None:
         import numpy as np
 
@@ -10516,6 +10550,8 @@ class MainEmitTests(unittest.TestCase):
 
         self.assertIn("page_surface_geometry,", bridge)
         self.assertIn("page_surface_geometry=page_surface_geometry", bridge)
+        self.assertIn("ocr_request=None", bridge)
+        self.assertIn("ocr_request=ocr_request", bridge)
 
 
     def test_automatic_owner_mode_rejects_implicit_legacy(self) -> None:

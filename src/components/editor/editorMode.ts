@@ -19,6 +19,7 @@ export interface EditorCapabilities {
   showBlockProcessingActions: boolean;
   useProfessionalLayersPresentation: boolean;
   showTypesettingControls: boolean;
+  renderPreviewOnSave: boolean;
 }
 
 const ALL_EDITOR_TOOLS: EditorToolKey[] = [
@@ -41,6 +42,7 @@ const TRADUZAI_CAPABILITIES: EditorCapabilities = {
   showBlockProcessingActions: true,
   useProfessionalLayersPresentation: false,
   showTypesettingControls: true,
+  renderPreviewOnSave: true,
 };
 
 const STUDIO_CAPABILITIES: EditorCapabilities = {
@@ -49,6 +51,7 @@ const STUDIO_CAPABILITIES: EditorCapabilities = {
   showBlockProcessingActions: false,
   useProfessionalLayersPresentation: true,
   showTypesettingControls: true,
+  renderPreviewOnSave: false,
 };
 
 const STUDIO_TRANSLATION_CAPABILITIES: EditorCapabilities = {

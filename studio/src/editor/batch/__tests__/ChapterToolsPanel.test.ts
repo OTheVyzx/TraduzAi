@@ -8,7 +8,10 @@ describe("ChapterToolsPanel", () => {
   it("exposes style, find/replace, review and chapter history controls", () => {
     const project = importStudioProject({
       versao: "1.0",
-      paginas: [{ numero: 1, textos: [{ id: "a", bbox: [0, 0, 10, 10], traduzido: "Ola", review_required: true }] }],
+      paginas: [{ numero: 1, textos: [
+        { id: "a", bbox: [0, 0, 10, 10], texto: "Hello", traduzido: "Ola", review_required: true },
+        { id: "b", bbox: [0, 10, 10, 20], texto: "Missing", traduzido: "" },
+      ] }],
     }).project;
     const html = renderToStaticMarkup(createElement(ChapterToolsPanel, {
       project,
@@ -24,5 +27,7 @@ describe("ChapterToolsPanel", () => {
     expect(html).toContain("Buscar e substituir");
     expect(html).toContain("Fila de revisão");
     expect(html).toContain("Desfazer lote");
+    expect(html).toContain("Concluir revisão humana");
+    expect(html).toContain("Corrija o conteúdo antes de concluir");
   });
 });

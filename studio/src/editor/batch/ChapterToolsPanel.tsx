@@ -241,14 +241,15 @@ export function ChapterToolsPanel({
                     <span className="block truncate text-[10px] text-text-primary">{item.translated || item.original}</span>
                     <span className="block truncate text-[9px] text-text-muted">{item.reasons.join(" · ")}</span>
                   </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void resolveReview(item.id)}
-                    className="mt-1.5 flex items-center gap-1 text-[9px] text-status-success disabled:opacity-30"
-                  >
-                    <Check size={10} /> Marcar resolvido
-                  </button>
+                  {item.canResolve ? <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void resolveReview(item.id)}
+                      className="mt-1.5 flex items-center gap-1 text-[9px] text-status-success disabled:opacity-30"
+                    >
+                      <Check size={10} /> Concluir revisão humana
+                    </button>
+                    : <span className="mt-1.5 block text-[9px] text-status-warning">Corrija o conteúdo antes de concluir</span>}
                 </div>
               ))}
             </div>

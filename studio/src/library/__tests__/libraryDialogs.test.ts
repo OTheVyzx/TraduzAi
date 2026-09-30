@@ -41,6 +41,20 @@ describe("WorkDialog", () => {
     expect(html).toContain("não apaga capítulos nem arquivos do disco");
     expect(html).toContain("Remover da biblioteca");
   });
+
+  it("keeps manual creation separate from extension discovery", () => {
+    const html = renderToStaticMarkup(createElement(WorkDialog, {
+      open: true,
+      onClose: () => undefined,
+      onSave: () => undefined,
+    }));
+
+    expect(html).toContain("Criar obra local manualmente");
+    expect(html).toContain('class="studio-dialog-backdrop studio-floating-layer"');
+    expect(html).not.toContain("Suwayomi");
+    expect(html).not.toContain("AniList ID");
+    expect(html).not.toContain("MangaDex ID");
+  });
 });
 
 describe("AttachProjectDialog", () => {

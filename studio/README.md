@@ -25,10 +25,12 @@ executável release, não um instalador MSI/NSIS.
 
 ## Biblioteca, obras e capítulos
 
-A tela inicial segue o modelo de uma biblioteca de produção:
+A navegação preserva papéis distintos para Home e Biblioteca:
 
-- a coluna esquerda contém as **obras**;
-- a área principal contém os **capítulos** da obra selecionada;
+- a **Home** mostra métricas compactas, obras editadas recentemente e ações
+  reais, sem repetir a lista lateral de obras;
+- na **Biblioteca**, a coluna esquerda contém as obras e a área principal
+  contém os capítulos da obra selecionada;
 - cada capítulo referencia um `project.json` local e pode ser pesquisado,
   aberto ou relocalizado.
 
@@ -61,8 +63,8 @@ Há duas formas de adicionar capítulos:
 A criação manual aceita PNG, JPEG e WebP, preserva subpastas seguras e aplica
 ordenação natural dos nomes. A importação é local e transacional; rejeita
 caminhos inseguros, links simbólicos e imagens inválidas. Os limites atuais são
-2.000 páginas, 100 MiB por arquivo, 2 GiB por importação e 10.000 entradas por
-arquivo compactado.
+2.000 páginas, 100 MiB por arquivo, 2 GiB por importação, 10.000 entradas por
+arquivo compactado, 65.535 px por dimensão e 64 milhões de pixels por imagem.
 
 ## Áreas de trabalho
 

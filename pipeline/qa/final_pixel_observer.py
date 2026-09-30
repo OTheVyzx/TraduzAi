@@ -5,27 +5,20 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from hashlib import sha256
-import json
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 import cv2
 import numpy as np
 
-from ownership.hash_contract import canonical_json_sha256, canonical_page_sha256, sha256_text
+from ownership.hash_contract import canonical_page_sha256
 from ownership.execution import (
     TerminalVerificationIdentityError,
     TerminalVerificationInfrastructureError,
 )
 from ownership.ocr_contract import (
-    OCRAttempt,
-    OCRDiagnostics,
     OCRInvocationResult,
-    OCRObservationRecord,
     OCRRequest,
-    OCRTransformOperation,
-    OCRTransformSpec,
-    normalize_ocr_payload_text,
 )
 from strip.page_surface_geometry import PageSurfaceGeometry
 
@@ -191,6 +184,22 @@ class DetectorOcrFinalPixelObserver:
             raise TypeError(
                 "final pixel OCR runtime has no callable run_final_pixel_ocr_probe method"
             )
+        normalized_page_id = str(page_id or f"page-{root_input_pixel_sha256[:16]}")
+        normalized_run_id = str(run_id or f"final-run-{root_input_pixel_sha256[:16]}")
+        normalized_execution_id = str(
+            execution_id or f"final-execution-{root_input_pixel_sha256[:16]}"
+        )
+        normalized_source_sha = str(page_source_sha256 or root_input_pixel_sha256)
+        invocation_id = f"final-qa:{normalized_page_id}:{root_input_pixel_sha256[:20]}"
+        terminal_ocr_request = OCRRequest(
+            run_id=normalized_run_id,
+            origin_execution_id=normalized_execution_id,
+            page_id=normalized_page_id,
+            page_source_sha256=normalized_source_sha,
+            root_input_pixel_sha256=root_input_pixel_sha256,
+            invocation_id=invocation_id,
+            provider_family="final-pixel-ocr",
+        )
         probe = run_probe(
             persisted_image_rgb.copy(),
             detected_blocks=[copy.deepcopy(block) for block in detected_blocks],
@@ -201,6 +210,7 @@ class DetectorOcrFinalPixelObserver:
             page_surface_geometry=(geometry.to_dict() if geometry is not None else None),
             request_scoped=True,
             root_input_pixel_sha256=root_input_pixel_sha256,
+            ocr_request=terminal_ocr_request,
         )
 
         def probe_field(name: str, default: Any) -> Any:
@@ -211,6 +221,24 @@ class DetectorOcrFinalPixelObserver:
             not isinstance(record, dict) for record in raw_records
         ):
             raise ValueError("fresh final pixel OCR returned malformed text records")
+        if geometry is not None:
+            projected_records = []
+            for raw_record in raw_records:
+                record = copy.deepcopy(dict(raw_record))
+                raw_bbox = record.get("bbox")
+                try:
+                    frame_bbox = tuple(int(value) for value in raw_bbox)
+                    logical_bbox = geometry.frame_bbox_to_logical(frame_bbox)
+                except (TypeError, ValueError):
+                    if isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) == 4:
+                        record["artifact_bbox_frame"] = [int(value) for value in raw_bbox]
+                        record["coordinate_space"] = "framed_page"
+                else:
+                    record["artifact_bbox_frame"] = list(frame_bbox)
+                    record["bbox"] = list(logical_bbox)
+                    record["coordinate_space"] = "logical_page"
+                projected_records.append(record)
+            raw_records = tuple(projected_records)
         attempts = probe_field("ocr_attempts", ())
         failures = probe_field("coverage_failures", ())
         probe_is_request_scoped = bool(probe_field("request_scoped", False))
@@ -238,135 +266,17 @@ class DetectorOcrFinalPixelObserver:
         ocr_request = None
         ocr_invocation = None
         if probe_is_request_scoped:
-            normalized_page_id = str(page_id or f"page-{root_input_pixel_sha256[:16]}")
-            normalized_run_id = str(run_id or f"final-run-{root_input_pixel_sha256[:16]}")
-            normalized_execution_id = str(
-                execution_id or f"final-execution-{root_input_pixel_sha256[:16]}"
-            )
-            normalized_source_sha = str(page_source_sha256 or root_input_pixel_sha256)
-            invocation_id = (
-                f"final-qa:{normalized_page_id}:{root_input_pixel_sha256[:20]}"
-            )
-            ocr_request = OCRRequest(
-                run_id=normalized_run_id,
-                origin_execution_id=normalized_execution_id,
-                page_id=normalized_page_id,
-                page_source_sha256=normalized_source_sha,
-                root_input_pixel_sha256=root_input_pixel_sha256,
-                invocation_id=invocation_id,
-                provider_family="final-pixel-ocr",
-            )
-            physical_attempts = []
-            attempt_by_variant = {}
-            for index, raw_attempt in enumerate(attempts):
-                variant_id = str(raw_attempt.get("variant_id") or "")
-                transform_json = raw_attempt.get("transform_spec_canonical_json")
-                if not variant_id or not isinstance(transform_json, str):
-                    continue
-                try:
-                    transform_payload = json.loads(transform_json)
-                    operations = []
-                    for raw_operation in transform_payload.get("operations") or ():
-                        operation = dict(raw_operation)
-                        for name in (
-                            "bbox_page",
-                            "output_size",
-                            "border_value_rgb",
-                            "affine_matrix_fixed_1e6",
-                        ):
-                            if operation.get(name) is not None:
-                                operation[name] = tuple(operation[name])
-                        operations.append(OCRTransformOperation(**operation))
-                    transform = OCRTransformSpec.build(tuple(operations))
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                    raise TerminalVerificationIdentityError(
-                        "final OCR attempt transform is invalid"
-                    ) from exc
-                if transform.sha256 != raw_attempt.get("transform_spec_sha256"):
-                    raise TerminalVerificationIdentityError(
-                        "final OCR attempt transform hash mismatch"
-                    )
-                attempt_id = f"{invocation_id}:{index}:{variant_id}"
-                attempt = OCRAttempt(
-                    attempt_id=attempt_id,
-                    run_id=ocr_request.run_id,
-                    origin_execution_id=ocr_request.origin_execution_id,
-                    page_id=ocr_request.page_id,
-                    page_source_sha256=ocr_request.page_source_sha256,
-                    root_input_pixel_sha256=ocr_request.root_input_pixel_sha256,
-                    invocation_id=ocr_request.invocation_id,
-                    provider_family=ocr_request.provider_family,
-                    variant_id=variant_id,
-                    input_pixel_sha256=str(raw_attempt.get("input_pixel_sha256") or ""),
-                    parent_input_pixel_sha256=str(
-                        raw_attempt.get("parent_input_pixel_sha256") or ""
-                    ),
-                    input_bbox_page=None,
-                    input_kind="full_page",
-                    transform_spec=transform,
-                    input_width=int(raw_attempt.get("input_width") or 0),
-                    input_height=int(raw_attempt.get("input_height") or 0),
-                    input_mode="RGB",
-                    provider_called=bool(raw_attempt.get("provider_called")),
-                    cache_hit=bool(raw_attempt.get("cache_hit")),
+            typed_invocation = probe_field("ocr_invocation", None)
+            if not isinstance(typed_invocation, OCRInvocationResult):
+                raise TerminalVerificationInfrastructureError(
+                    "request-scoped terminal OCR did not return typed invocation evidence"
                 )
-                physical_attempts.append(attempt)
-                attempt_by_variant[variant_id] = attempt
-            records = []
-            normalized_raw_records = []
-            for index, raw_record in enumerate(raw_records):
-                record = copy.deepcopy(dict(raw_record))
-                record["invocation_id"] = invocation_id
-                normalized_raw_records.append(record)
-                attempt = attempt_by_variant.get(str(record.get("final_probe_variant") or ""))
-                text = str(record.get("text") or "").strip()
-                bbox = record.get("bbox")
-                if attempt is None or not text or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-                    continue
-                canonical_bbox = tuple(int(value) for value in bbox)
-                observation_id = canonical_json_sha256(
-                    {
-                        "invocation_id": invocation_id,
-                        "attempt_id": attempt.attempt_id,
-                        "index": index,
-                        "text": normalize_ocr_payload_text(text),
-                        "bbox_page": list(canonical_bbox),
-                    }
+            if typed_invocation.request.identity != terminal_ocr_request.identity:
+                raise TerminalVerificationIdentityError(
+                    "terminal OCR invocation belongs to a different request"
                 )
-                records.append(
-                    OCRObservationRecord(
-                        observation_id=observation_id,
-                        attempt_id=attempt.attempt_id,
-                        run_id=ocr_request.run_id,
-                        origin_execution_id=ocr_request.origin_execution_id,
-                        page_id=ocr_request.page_id,
-                        page_source_sha256=ocr_request.page_source_sha256,
-                        root_input_pixel_sha256=ocr_request.root_input_pixel_sha256,
-                        input_pixel_sha256=attempt.input_pixel_sha256,
-                        invocation_id=ocr_request.invocation_id,
-                        provider_family=ocr_request.provider_family,
-                        variant_id=attempt.variant_id,
-                        payload_sha256=sha256_text(normalize_ocr_payload_text(text)),
-                        text=text,
-                        confidence=max(0.0, min(1.0, float(record.get("confidence", 1.0)))),
-                        bbox_page=canonical_bbox,
-                        polygon_page=(
-                            (canonical_bbox[0], canonical_bbox[1]),
-                            (canonical_bbox[2], canonical_bbox[1]),
-                            (canonical_bbox[2], canonical_bbox[3]),
-                            (canonical_bbox[0], canonical_bbox[3]),
-                        ),
-                        source="final_pixel_probe",
-                    )
-                )
-            raw_records = tuple(normalized_raw_records)
-            ocr_invocation = OCRInvocationResult.build(
-                request=ocr_request,
-                observations=tuple(records),
-                full_page_lines=tuple(records),
-                attempts=tuple(physical_attempts),
-                diagnostics=OCRDiagnostics("final-pixel-ocr"),
-            )
+            ocr_request = terminal_ocr_request
+            ocr_invocation = typed_invocation
         observed_blocks = list(detected_blocks)
         if geometry is not None:
             observed_blocks = []

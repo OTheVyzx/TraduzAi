@@ -1026,6 +1026,13 @@ def _attach_detector_support(
             if not detector.support_only:
                 unsupported_detectors.append(detector)
             continue
+        # Container-only evidence may suppress its own standalone proposal,
+        # but it must not upgrade a touched glyph into detector-confirmed
+        # source text.  Otherwise a tiny decorative fragment inside a broad
+        # balloon/card inherits the container evidence id and becomes a
+        # blocking material component after OCR is exhausted.
+        if detector.support_only:
+            continue
         detector_area = float(max(1, _bbox_area(detector.bbox_page)))
         matched_glyphs = [supported_glyphs[index] for index in matches]
         tight_single_match = (

@@ -32,7 +32,8 @@ export default defineConfig({
   publicDir: resolve(__dirname, "..", "public"),
   server: {
     host: "127.0.0.1",
-    port: 1430,
+    port: 17853,
+    strictPort: true,
     fs: {
       allow: [resolve(__dirname), resolve(__dirname, "..")],
     },

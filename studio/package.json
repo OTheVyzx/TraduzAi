@@ -6,7 +6,7 @@
   "type": "module",
   "license": "GPL-3.0-only",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 1430",
+    "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run --config vitest.config.ts",
     "tauri": "tauri",

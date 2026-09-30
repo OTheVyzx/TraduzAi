@@ -1,10 +1,20 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { StudioLibraryHome } from "./library/StudioLibraryHome";
+import { StudioHomeDashboard } from "./home/StudioHomeDashboard";
+import { StudioAppShell, type StudioShellView } from "./shell/StudioAppShell";
+import { StudioSettingsView } from "./settings/StudioSettingsView";
+import { ReaderView, type ReaderTranslationRequest } from "./reader/ReaderView";
+import { tauriSourceRuntimeClient } from "./reader/sourceRuntimeClient";
 import { createManualChapterFromImages } from "./backend/projectDialog";
 import { createDefaultLibraryBackend } from "./library/libraryBackend";
-import { findWorkForProjectRegistration } from "./library/projectRegistration";
+import {
+  findChapterByProjectPath,
+  findChapterForProjectRegistration,
+  findWorkForProjectRegistration,
+} from "./library/projectRegistration";
 import type { StudioProject } from "./project/studioProject";
 import { createLibraryStore } from "./store/libraryStore";
 import { useStudioProjectStore } from "./store/projectStore";
@@ -65,6 +75,9 @@ export function App() {
   const library = useStore(libraryStore, (state) => state);
   const registeredProjects = useRef(new Set<string>());
   const [lastOpenedChapterPath, setLastOpenedChapterPath] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<StudioShellView>("home");
+  const [pendingNewWorkRequest, setPendingNewWorkRequest] = useState(false);
+  const [notification, setNotification] = useState<string | null>(null);
 
   useEffect(() => {
     void libraryStore.getState().load();
@@ -115,7 +128,9 @@ export function App() {
 
     const register = async () => {
       const title = projectWorkTitle(project, projectPath);
+      const chapterLabel = projectChapterLabel(project, projectPath);
       const existingWork = findWorkForProjectRegistration(library.document.works, title, projectPath);
+      const existingChapter = findChapterForProjectRegistration(existingWork, projectPath, chapterLabel);
       const workId = existingWork?.id ?? stableId("work", title.toLocaleLowerCase("pt-BR"));
       if (!existingWork) {
         await libraryStore.getState().addWork({
@@ -126,8 +141,8 @@ export function App() {
         });
       }
       await libraryStore.getState().upsertChapter(workId, {
-        id: stableId("chapter", projectPath.toLocaleLowerCase("en-US")),
-        label: projectChapterLabel(project, projectPath),
+        id: existingChapter?.id ?? stableId("chapter", projectPath.toLocaleLowerCase("en-US")),
+        label: chapterLabel,
         projectPath,
         coverPath: catalogCoverPath(projectPath, project.paginas[0]?.arquivo_original),
         pageCount: project.paginas.length,
@@ -143,10 +158,42 @@ export function App() {
 
   if (project && projectPath) {
     return (
-      <Suspense fallback={<StudioBoot message="Carregando editor..." />}>
+      <Suspense fallback={(
+        <StudioAppShell
+          activeView="library"
+          onNavigate={() => undefined}
+          notification={notification}
+          onDismissNotification={() => setNotification(null)}
+        >
+          <StudioBoot message="Carregando editor..." />
+        </StudioAppShell>
+      )}>
         <StudioWorkspaceShell
           project={project}
           projectPath={projectPath}
+          onProjectPromoted={async (previousPath, promotedPath) => {
+            const linked = findChapterByProjectPath(
+              libraryStore.getState().document.works,
+              previousPath,
+            );
+            if (linked) {
+              await libraryStore.getState().relinkChapter(
+                linked.work.id,
+                linked.chapter.id,
+                promotedPath,
+              );
+              const chapterLabel = projectChapterLabel(project, promotedPath);
+              const refreshedWork = libraryStore.getState().document.works.find(
+                (work) => work.id === linked.work.id,
+              );
+              const duplicates = refreshedWork?.chapters.filter(
+                (chapter) => chapter.id !== linked.chapter.id && chapter.label === chapterLabel,
+              ) ?? [];
+              for (const duplicate of duplicates) {
+                await libraryStore.getState().removeChapter(linked.work.id, duplicate.id);
+              }
+            }
+          }}
           onBack={() => {
             if (projectHasUnsavedChanges && !window.confirm("Há alterações não salvas neste capítulo. Descartar e voltar para a biblioteca?")) return;
             closeProject(true);
@@ -156,8 +203,68 @@ export function App() {
     );
   }
 
-  return (
-    <StudioLibraryHome
+  const openLibraryWork = (workId: string) => {
+    void library.selectWork(workId);
+    setActiveView("library");
+  };
+
+  const translateReaderChapter = async ({ manga, chapter, download }: ReaderTranslationRequest) => {
+    const projectJsonPath = await saveDialog({
+      title: `Salvar ${manga.title} — ${chapter.name}`,
+      defaultPath: "project.json",
+      filters: [{ name: "Projeto TraduzAI", extensions: ["json"] }],
+    });
+    if (!projectJsonPath) return;
+    const prepared = await tauriSourceRuntimeClient.translateReaderChapter({ jobId: download.jobId, projectJsonPath });
+    const chapterLabel = chapter.chapterNumber !== undefined && chapter.chapterNumber >= 0
+      ? String(chapter.chapterNumber)
+      : chapter.name;
+    const result = await createManualChapterFromImages({
+      workTitle: manga.title,
+      chapterLabel,
+      chapterTitle: chapter.name,
+      sourceLanguage: "auto",
+      targetLanguage: "pt-BR",
+      sourcePath: projectJsonPath,
+      projectJsonPath,
+    }, undefined, prepared.preparedPages);
+    const currentLibrary = libraryStore.getState().document;
+    const existingWork = currentLibrary.works.find((work) => work.title.toLocaleLowerCase("pt-BR") === manga.title.toLocaleLowerCase("pt-BR"));
+    const workId = existingWork?.id ?? stableId("work", manga.title.toLocaleLowerCase("pt-BR"));
+    if (!existingWork) {
+      await libraryStore.getState().addWork({
+        id: workId,
+        title: manga.title,
+        aliases: [],
+        coverPath: manga.thumbnailUrl ?? null,
+        external: {
+          contentOrigin: {
+            kind: "mihon-extension",
+            runtimeRecordId: manga.id,
+            extensionPackage: manga.extensionPackage,
+            sourceId: manga.sourceId,
+            sourceName: manga.sourceName,
+          },
+        },
+      });
+    }
+    await libraryStore.getState().upsertChapter(workId, {
+      id: stableId("chapter", projectJsonPath.toLocaleLowerCase("en-US")),
+      label: chapterLabel,
+      title: chapter.name,
+      projectPath: projectJsonPath,
+      coverPath: catalogCoverPath(projectJsonPath, result.project.paginas[0]?.arquivo_original),
+      pageCount: result.project.paginas.length,
+      completedPages: 0,
+      workflowStatus: "pending",
+      lastOpenedAt: new Date().toISOString(),
+    });
+    await libraryStore.getState().selectWork(workId);
+    setLastOpenedChapterPath(projectJsonPath);
+    await loadProject(projectJsonPath);
+  };
+
+  const libraryView = <StudioLibraryHome
       document={library.document}
       status={library.status}
       error={library.error ?? projectError}
@@ -212,14 +319,39 @@ export function App() {
       onSetChapterView={(view) => void library.setChapterView(view)}
       onSetThumbnailSize={(size) => void library.setThumbnailSize(size)}
       onSetTrackingLanguage={(language) => void library.setTrackingLanguage(language)}
-    />
+      openWorkDialogRequest={pendingNewWorkRequest}
+      onConsumeWorkDialogRequest={() => setPendingNewWorkRequest(false)}
+    />;
+
+  return (
+    <StudioAppShell activeView={activeView} onNavigate={setActiveView} notification={notification} onDismissNotification={() => setNotification(null)}>
+      {activeView === "home" && <StudioHomeDashboard
+        document={library.document}
+        onOpenWork={openLibraryWork}
+        onCreateWork={() => { setPendingNewWorkRequest(true); setActiveView("library"); }}
+        onImportProject={() => void openProjectFromDialog()}
+        onOpenSettings={() => setActiveView("settings")}
+      />}
+      {activeView === "library" && libraryView}
+      {activeView === "reader" && <ReaderView onTranslateChapter={translateReaderChapter} onNotification={setNotification} />}
+      {activeView === "settings" && <StudioSettingsView
+        preferences={library.document.preferences}
+        saving={library.status === "saving"}
+        onSave={async (draft) => {
+          await library.setChapterView(draft.defaultChapterView);
+          await library.setThumbnailSize(draft.thumbnailSize);
+          await library.setTrackingLanguage(draft.trackingLanguage);
+        }}
+      />}
+    </StudioAppShell>
   );
 }
 
 function StudioBoot({ message, error }: { message: string; error?: string | null }) {
   return (
-    <main className="studio-boot">
+    <main className="studio-boot studio-boot-backdrop" role="status" aria-live="polite">
       <section className="studio-boot-panel">
+        <span className="studio-boot-spinner" aria-hidden="true" />
         <p className="eyebrow">TraduzAI Studio</p>
         <h1>Preparando editor</h1>
         <p>{message}</p>

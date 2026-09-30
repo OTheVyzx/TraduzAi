@@ -4510,11 +4510,14 @@ name = "traduzai_studio"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "dafont",
  "image",
+ "once_cell",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -4522,6 +4525,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

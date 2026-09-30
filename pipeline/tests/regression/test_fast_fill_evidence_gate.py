@@ -2,6 +2,30 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def explicit_fast_fill_policy(monkeypatch):
+    """Exercise legacy fill evidence gates without changing the pure default."""
+    monkeypatch.setenv("TRADUZAI_INPAINT_POLICY", "fast")
+
+
+@pytest.mark.parametrize("policy", [None, "pure"])
+def test_pure_policy_disables_fast_white_even_with_valid_evidence(monkeypatch, policy):
+    from inpainter import _apply_fast_white_balloon_fill
+
+    if policy is None:
+        monkeypatch.delenv("TRADUZAI_INPAINT_POLICY", raising=False)
+    else:
+        monkeypatch.setenv("TRADUZAI_INPAINT_POLICY", policy)
+    monkeypatch.setenv("TRADUZAI_STRIP_FAST_WHITE_INPAINT", "1")
+    image, text, page = _white_balloon_fixture(with_evidence=True)
+    result, remaining, stats = _apply_fast_white_balloon_fill(image, page, list(page["_vision_blocks"]))
+    assert stats["white_balloon_count"] == 0
+    assert remaining == [dict(text)]
+    assert page["_strip_fast_white_rejection_reasons"] == {"disabled": 1}
+    assert np.array_equal(result, image)
 
 
 def _allowed_mask_evidence(kind: str = "glyph_segmentation") -> dict:
@@ -26,6 +50,15 @@ def _blocked_mask_evidence(reason: str) -> dict:
     }
 
 
+def _fixture_bubble(text, image):
+    """Attach the explicit synthetic balloon segmentation used by this fixture."""
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    x1, y1, x2, y2 = text["balloon_bbox"]
+    mask[y1:y2, x1:x2] = 255
+    text["bubble_id"] = text["id"] + "_bubble"
+    text["bubble_mask"] = mask.tolist()
+
+
 def _white_balloon_fixture(*, with_evidence: bool = True, blocked_reason: str | None = None):
     image = np.full((120, 220, 3), 255, dtype=np.uint8)
     cv2.ellipse(image, (110, 60), (76, 40), 0, 0, 360, (255, 255, 255), -1)
@@ -48,6 +81,7 @@ def _white_balloon_fixture(*, with_evidence: bool = True, blocked_reason: str | 
         text["mask_evidence"] = _blocked_mask_evidence(blocked_reason)
     elif with_evidence:
         text["mask_evidence"] = _allowed_mask_evidence()
+        _fixture_bubble(text, image)
     return image, text, {"texts": [text], "_vision_blocks": [dict(text)]}
 
 
@@ -64,7 +98,7 @@ def test_fast_white_allows_simple_white_balloon_with_mask_evidence():
     assert np.any(result != image)
 
 
-def test_fast_white_rejects_missing_mask_evidence_before_local_geometry_fill():
+def test_fast_white_rejects_missing_bubble_before_local_geometry_fill():
     from inpainter import _apply_fast_white_balloon_fill
 
     image, text, page = _white_balloon_fixture(with_evidence=False)
@@ -74,7 +108,7 @@ def test_fast_white_rejects_missing_mask_evidence_before_local_geometry_fill():
 
     assert stats["white_balloon_count"] == 0
     assert remaining == [dict(text)]
-    assert page["_strip_fast_white_rejection_reasons"] == {"mask_evidence:missing": 1}
+    assert page["_strip_fast_white_rejection_reasons"] == {"missing_bubble_id": 1}
     assert np.array_equal(result, image)
 
 
@@ -92,7 +126,7 @@ def test_fast_white_rejects_translucent_mask_evidence_before_visual_heuristics()
     assert np.array_equal(result, image)
 
 
-def test_fast_white_mask_density_flag_cannot_bypass_missing_evidence_gate():
+def test_fast_white_mask_density_flag_cannot_bypass_missing_bubble_gate():
     from inpainter import _apply_fast_white_balloon_fill
 
     image, text, page = _white_balloon_fixture(with_evidence=False)
@@ -104,7 +138,7 @@ def test_fast_white_mask_density_flag_cannot_bypass_missing_evidence_gate():
 
     assert stats["white_balloon_count"] == 0
     assert remaining == [dict(text)]
-    assert page["_strip_fast_white_rejection_reasons"] == {"mask_evidence:missing": 1}
+    assert page["_strip_fast_white_rejection_reasons"] == {"missing_bubble_id": 1}
     assert np.array_equal(result, image)
 
 
@@ -180,6 +214,7 @@ def test_connected_white_geometry_fill_allows_explicit_mask_evidence():
         "skip_processing": False,
         "mask_evidence": _allowed_mask_evidence(),
     }
+    _fixture_bubble(text, image)
     page = {"texts": [text], "_vision_blocks": [dict(text)]}
 
     with patch.dict("os.environ", {"TRADUZAI_STRIP_FAST_WHITE_INPAINT": "1"}, clear=False):
@@ -304,6 +339,7 @@ def test_fast_solid_allows_black_and_colored_solid_regions_with_mask_evidence():
             "skip_processing": False,
             "mask_evidence": _allowed_mask_evidence(),
         }
+        _fixture_bubble(text, image)
         page = {"texts": [text], "_vision_blocks": [dict(text)]}
 
         with patch.dict(

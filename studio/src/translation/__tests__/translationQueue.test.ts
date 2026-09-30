@@ -13,8 +13,8 @@ function queueProject() {
       {
         numero: 1,
         textos: [
-          { id: "pending", bbox: [0, 0, 10, 10], texto: "A", traduzido: "" },
-          { id: "translated", bbox: [0, 10, 10, 20], texto: "B", traduzido: "Pronto" },
+          { id: "pending", bbox: [0, 0, 10, 10], texto: "A", traduzido: "", tipo: "fala" },
+          { id: "translated", bbox: [0, 10, 10, 20], texto: "B", traduzido: "Pronto", tipo: "sfx" },
         ],
       },
       {
@@ -27,6 +27,7 @@ function queueProject() {
             traduzido: "Revisar",
             translation_status: "review",
             translation_notes: "Checar contexto",
+            qa_flags: ["ocr_low_confidence"],
           },
           {
             id: "approved",
@@ -60,6 +61,22 @@ describe("translationQueue", () => {
       notes: "Checar contexto",
     });
     expect(JSON.stringify(project)).toBe(before);
+  });
+
+  it("filters the queue by text and content class without merging review states", () => {
+    const project = queueProject();
+
+    expect(buildTranslationQueue(project, "all", { query: "pronto" }).map((item) => item.layerId))
+      .toEqual(["translated"]);
+    expect(buildTranslationQueue(project, "all", { textClass: "sfx" }).map((item) => item.layerId))
+      .toEqual(["translated"]);
+    expect(buildTranslationQueue(project, "review", { query: "contexto" }).map((item) => item.layerId))
+      .toEqual(["review"]);
+    expect(buildTranslationQueue(project, "all", { query: "ocr_low" })[0]).toMatchObject({
+      layerId: "review",
+      qaFlags: ["ocr_low_confidence"],
+    });
+    expect(buildTranslationQueue(project, "pending", { textClass: "sfx" })).toEqual([]);
   });
 
   it("calculates block progress and keeps empty pages/projects at zero", () => {

@@ -32,10 +32,36 @@ def test_pt_br_rejects_pt_pt_mil_milhoes_scale() -> None:
     assert "pt_pt_long_scale_lexeme" in {issue.code for issue in result.issues}
 
 
+def test_pt_br_translation_normalizes_equivalent_long_scale_before_validation() -> None:
+    from translator.translate import _normalize_pt_br_numeric_scale
+
+    normalized, flags = _normalize_pt_br_numeric_scale(
+        "COM 4,6 MIL MILHÕES",
+        "pt-BR",
+    )
+
+    assert normalized == "COM 4,6 BILHÕES"
+    assert flags == ["pt_br_long_scale_normalized"]
+    result = _validate("WITH 4.6 BILLION", normalized)
+    assert result.status == "ok"
+    assert result.numeric_equivalent is True
+
+
 def test_pt_br_accepts_bilhoes_with_decimal_comma() -> None:
     result = _validate(
         "The reward is 1.5 billion coins.",
         "A recompensa é de 1,5 bilhão de moedas.",
+    )
+
+    assert result.status == "ok"
+    assert result.numeric_equivalent is True
+    assert not result.issues
+
+
+def test_pt_br_accepts_glued_source_magnitude_as_plural_milhoes() -> None:
+    result = _validate(
+        "TOTAL PURCHASE AMOUNT 200MILLION",
+        "VALOR TOTAL DA COMPRA 200 MILHÕES",
     )
 
     assert result.status == "ok"

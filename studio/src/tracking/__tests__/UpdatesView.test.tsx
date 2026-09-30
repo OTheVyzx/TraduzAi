@@ -54,6 +54,10 @@ describe("UpdatesView", () => {
     expect(html).toContain("Status manual");
     expect(html).toContain("Conflito");
     expect(html).toContain("Abrir obra");
+    expect(html).toContain('class="studio-updates-backdrop studio-floating-layer"');
+    expect(html).toContain('class="studio-updates-primary"');
+    expect(html).toContain('class="studio-updates-warning"');
+    expect(html).not.toContain("amber");
     expect(html).not.toContain("Baixar");
   });
 });

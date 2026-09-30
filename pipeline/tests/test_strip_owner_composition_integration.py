@@ -419,6 +419,422 @@ def test_owner_final_page_binding_preserves_composed_bytes_without_late_clamp():
     np.testing.assert_array_equal(page.original_image, original)
 
 
+def test_owner_finalization_passes_bound_frame_geometry_to_terminal_gate(tmp_path):
+    from strip.run import _finalize_bound_owner_output_page
+    from strip.page_surface_geometry import PageSurfaceGeometry
+    from strip.types import OutputPage
+
+    geometry = PageSurfaceGeometry.build(
+        logical_width=40,
+        logical_height=30,
+        frame_width=70,
+        frame_height=30,
+        content_origin_xy=(15, 0),
+    )
+    page = OutputPage(
+        y_top=0,
+        y_bottom=30,
+        image=np.full((30, 70, 3), 240, dtype=np.uint8),
+        original_image=np.full((30, 70, 3), 235, dtype=np.uint8),
+        inpainted_image=np.full((30, 70, 3), 245, dtype=np.uint8),
+        page_surface_geometry=geometry,
+    )
+    captured = {}
+
+    def finalizer(result, **kwargs):
+        captured.update(kwargs)
+        return result, "evidence-ref"
+
+    result, evidence_ref = _finalize_bound_owner_output_page(
+        page,
+        "candidate-result",
+        private_execution_root=tmp_path,
+        detector=object(),
+        runtime=object(),
+        source_language="en",
+        page_number=4,
+        finalizer=finalizer,
+    )
+
+    assert result == "candidate-result"
+    assert evidence_ref == "evidence-ref"
+    assert captured["page_surface_geometry"] is geometry
+    np.testing.assert_array_equal(captured["original_pixels"], page.original_image)
+
+
+def test_style_replay_recovers_logical_pixels_from_canonical_framed_original():
+    import strip.run as run
+    from ownership.hash_contract import canonical_page_sha256
+    from types import SimpleNamespace
+
+    logical = np.full((30, 40, 3), [17, 91, 203], dtype=np.uint8)
+    framed = np.full((30, 70, 3), 255, dtype=np.uint8)
+    framed[:, 15:55] = logical
+    source_entry = SimpleNamespace(
+        width=40,
+        height=30,
+        page_source_sha256=canonical_page_sha256(logical),
+    )
+
+    geometry, recovered = run._recover_style_replay_surface(
+        framed,
+        source_entry,
+    )
+
+    assert geometry.content_origin_xy == (15, 0)
+    assert geometry.logical_width == 40
+    assert geometry.frame_width == 70
+    np.testing.assert_array_equal(recovered, logical)
+
+
+def test_style_replay_strips_only_derived_visual_state_without_mutating_parent():
+    import copy
+
+    import strip.run as run
+
+    parent = {
+        "owner_id": "owner:style-replay",
+        "translated": "TEXTO TRADUZIDO",
+        "target_bbox": [11, 13, 47, 61],
+        "translation_binding_sha256": "a" * 64,
+        "render_layout_contract": {
+            "schema_version": 1,
+            "owner_id": "owner:style-replay",
+            "fit_status": "fit",
+            "font_size": 27,
+            "lines": ["TEXTO TRADUZIDO"],
+        },
+        "owner_render_quality": {"font_size_final": 27, "status": "ok"},
+        "owner_style_capture": {
+            "owner_id": "owner:style-replay",
+            "style_evidence_v2": {"source": "owner_source_pixels"},
+        },
+        "visual_profile_v2": {"owner_id": "owner:style-replay", "status": "applied"},
+        "visual_profile_sha256": "b" * 64,
+        "style_copy_status": "applied",
+        "style_group_resolution_v3": {"group_id": "old-group"},
+        "style_resolved_intent_v1": {"intent_sha256": "c" * 64},
+        "style_v2_raster_contract": {"rendered_patch_sha256": "d" * 64},
+    }
+    parent_before = copy.deepcopy(parent)
+
+    replay_record = run._strip_style_replay_derived_visual_state(parent)
+
+    assert parent == parent_before
+    assert replay_record["owner_id"] == parent["owner_id"]
+    assert replay_record["translated"] == parent["translated"]
+    assert replay_record["target_bbox"] == parent["target_bbox"]
+    assert replay_record["translation_binding_sha256"] == parent["translation_binding_sha256"]
+    assert replay_record["render_layout_contract"] == parent["render_layout_contract"]
+    assert replay_record["style_replay_max_font_size_px"] == 27
+    assert replay_record["owner_style_capture"] == parent["owner_style_capture"]
+    for field_name in (
+        "visual_profile_v2",
+        "visual_profile_sha256",
+        "style_copy_status",
+        "style_group_resolution_v3",
+        "style_resolved_intent_v1",
+        "style_v2_raster_contract",
+    ):
+        assert field_name not in replay_record
+
+
+def test_style_replay_renders_each_owner_with_explicit_projected_graph_and_composes_masks():
+    from types import SimpleNamespace
+
+    import strip.run as run
+
+    cleanup = np.full((8, 10, 3), 245, dtype=np.uint8)
+    records = [
+        {"owner_id": "owner-a", "translated": "ALVO A"},
+        {"owner_id": "owner-b", "translated": "ALVO B"},
+    ]
+    calls = []
+
+    class Typesetter:
+        def render_band_image(self, pixels, payload, *, owner_graph=None):
+            owner_id = payload["texts"][0]["owner_id"]
+            calls.append((owner_id, owner_graph, pixels.copy(), payload))
+            paint_mask = np.zeros(pixels.shape[:2], dtype=np.uint8)
+            x = 2 if owner_id == "owner-a" else 7
+            paint_mask[3, x] = 255
+            rendered = pixels.copy()
+            rendered[3, x] = (20, 40, 60) if owner_id == "owner-a" else (90, 110, 130)
+            return SimpleNamespace(
+                owner_id=owner_id,
+                paint_mask=paint_mask,
+                glyph_mask=paint_mask,
+                result_rgb=rendered,
+            )
+
+    rendered, patches = run._render_style_replay_owner_patches(
+        Typesetter(),
+        cleanup,
+        SimpleNamespace(page_id="page_001"),
+        records,
+        owner_ids=("owner-a", "owner-b"),
+        graph_projector=lambda _graph, owner_id: f"single:{owner_id}",
+    )
+
+    assert [item[0] for item in calls] == ["owner-a", "owner-b"]
+    assert [item[1] for item in calls] == ["single:owner-a", "single:owner-b"]
+    assert all(np.array_equal(item[2], cleanup) for item in calls)
+    assert all(len(item[3]["texts"]) == 1 for item in calls)
+    assert set(patches) == {"owner-a", "owner-b"}
+    np.testing.assert_array_equal(rendered[3, 2], [20, 40, 60])
+    np.testing.assert_array_equal(rendered[3, 7], [90, 110, 130])
+
+
+def test_style_replay_materialization_binds_new_execution_and_new_glyph_patch():
+    from types import SimpleNamespace
+
+    import strip.run as run
+    from ownership.execution import canonical_glyph_patch_sha256
+
+    pixels = np.full((6, 8, 3), 250, dtype=np.uint8)
+    rendered = pixels.copy()
+    rendered[2:4, 3:5] = 20
+    paint = np.zeros(pixels.shape[:2], dtype=np.uint8)
+    paint[2:4, 3:5] = 255
+    patch = SimpleNamespace(
+        owner_id="owner-a",
+        page_id="page_001",
+        coordinate_space="logical_page",
+        before_sha256="1" * 64,
+        after_sha256="2" * 64,
+        glyph_mask_sha256="3" * 64,
+        paint_mask_sha256="4" * 64,
+        component_geometry_sha256="5" * 64,
+        text_execution_authority_sha256="6" * 64,
+        delivery_contract=SimpleNamespace(contract_sha256="7" * 64),
+        style_raster_contract=SimpleNamespace(contract_sha256="8" * 64),
+        paint_mask=paint,
+        glyph_mask=paint,
+        result_rgb=rendered,
+    )
+    binding = SimpleNamespace(
+        run_id="content-run",
+        page_id="page_001",
+        page_source_sha256="9" * 64,
+        owner_id="owner-a",
+        translation_binding_sha256="a" * 64,
+        source_payload_sha256="b" * 64,
+        target_payload_sha256="c" * 64,
+    )
+
+    materialization = run._build_style_replay_target_materialization(
+        binding,
+        patch,
+        execution_id="render-execution",
+    )
+
+    assert materialization.execution_id == "render-execution"
+    assert materialization.run_id == "content-run"
+    assert materialization.target_glyph_patch_sha256 == canonical_glyph_patch_sha256(patch)
+    assert materialization.glyph_mask_sha256 == patch.glyph_mask_sha256
+    assert materialization.base_pixel_sha256 == patch.before_sha256
+    assert materialization.result_pixel_sha256 == patch.after_sha256
+
+
+def test_style_replay_record_persists_fresh_raster_evidence_from_new_patch():
+    from types import SimpleNamespace
+
+    import strip.run as run
+
+    record = {
+        "owner_id": "owner-a",
+        "translated": "ALVO",
+        "render_layout_contract": {"owner_id": "owner-a"},
+    }
+    patch = SimpleNamespace(
+        owner_id="owner-a",
+        render_completed=True,
+        fit_status="ok",
+        glyph_core_mask_sha256="1" * 64,
+        paint_mask_sha256="2" * 64,
+        style_raster_contract=SimpleNamespace(to_dict=lambda: {"contract_sha256": "3" * 64}),
+        render_quality_contract=SimpleNamespace(to_dict=lambda: {"quality_sha256": "4" * 64}),
+        delivery_contract=SimpleNamespace(to_dict=lambda: {"contract_sha256": "5" * 64}),
+    )
+
+    refreshed = run._attach_style_replay_patch_evidence(record, patch)
+
+    assert "style_v2_raster_contract" not in record
+    assert refreshed["translated"] == "ALVO"
+    assert refreshed["render_completed"] is True
+    assert refreshed["fit_status"] == "ok"
+    assert refreshed["glyph_core_mask_sha256"] == "1" * 64
+    assert refreshed["paint_mask_sha256"] == "2" * 64
+    assert refreshed["style_v2_raster_contract"]["contract_sha256"] == "3" * 64
+    assert refreshed["owner_render_quality"]["quality_sha256"] == "4" * 64
+    assert refreshed["owner_text_delivery_contract"]["contract_sha256"] == "5" * 64
+
+
+def test_style_replay_aligns_owner_id_list_order_only_when_membership_is_identical():
+    from types import SimpleNamespace
+
+    import pytest
+    import strip.run as run
+
+    owner = SimpleNamespace(
+        owner_id="owner-a",
+        component_ids=["component-a"],
+        observation_ids=["observation-a", "observation-b"],
+        selected_observation_ids=["observation-a", "observation-b"],
+    )
+    record = {
+        "owner_id": "owner-a",
+        "component_ids": ["component-a"],
+        "observation_ids": ["observation-b", "observation-a"],
+        "selected_observation_ids": ["observation-b", "observation-a"],
+        "translated": "ALVO",
+    }
+
+    aligned = run._align_style_replay_record_owner_lists(record, owner)
+
+    assert record["observation_ids"] == ["observation-b", "observation-a"]
+    assert aligned["observation_ids"] == owner.observation_ids
+    assert aligned["selected_observation_ids"] == owner.selected_observation_ids
+    assert aligned["translated"] == "ALVO"
+
+    divergent = dict(record, observation_ids=["observation-a", "observation-extra"])
+    with pytest.raises(ValueError, match="membership differs"):
+        run._align_style_replay_record_owner_lists(divergent, owner)
+
+
+def test_verified_output_adapter_exposes_authenticated_text_layer_snapshot():
+    from types import SimpleNamespace
+
+    from strip.page_pipeline import adapt_page_execution_result_to_output_page
+
+    pixels = np.full((5, 7, 3), 230, dtype=np.uint8)
+    layer = {
+        "owner_id": "owner-a",
+        "translation_binding_sha256": "a" * 64,
+        "original": "SOURCE",
+        "translated": "ALVO",
+    }
+    result = SimpleNamespace(
+        final_page=None,
+        request=SimpleNamespace(
+            original_page=SimpleNamespace(mutable_attempt_copy=lambda: pixels.copy())
+        ),
+        owner_graph=SimpleNamespace(read=lambda: SimpleNamespace(to_dict=lambda: {"page_id": "page_001"})),
+        page_id="page_001",
+        translations=(
+            SimpleNamespace(
+                owner_id="owner-a",
+                source_text="SOURCE",
+                target_text="ALVO",
+                target_locale="pt-BR",
+            ),
+        ),
+        text_layers_view=SimpleNamespace(read=lambda: {"texts": [layer]}),
+        page_composition=None,
+    )
+
+    output = adapt_page_execution_result_to_output_page(result)
+
+    assert output.text_layers == {"texts": [layer]}
+    assert output.text_layers["texts"][0]["translation_binding_sha256"] == "a" * 64
+
+
+def test_style_replay_builds_runtime_composition_with_frame_geometry_and_owner_maps():
+    from types import SimpleNamespace
+
+    import strip.run as run
+    from strip.page_surface_geometry import PageSurfaceGeometry
+
+    geometry = PageSurfaceGeometry.build(
+        logical_width=6,
+        logical_height=4,
+        frame_width=10,
+        frame_height=4,
+        content_origin_xy=(2, 0),
+    )
+    framed = np.full((4, 10, 3), 240, dtype=np.uint8)
+    cleanup_mask = np.zeros((4, 6), dtype=np.uint8)
+    cleanup_mask[1, 1] = 255
+    paint_mask = np.zeros((4, 6), dtype=np.uint8)
+    paint_mask[2, 4] = 255
+    authority = SimpleNamespace(
+        authority_sha256="a" * 64,
+        to_dict=lambda: {"authority_sha256": "a" * 64},
+    )
+    delivery = SimpleNamespace(
+        contract_sha256="b" * 64,
+        to_dict=lambda: {"contract_sha256": "b" * 64},
+    )
+    patch = SimpleNamespace(
+        owner_id="owner-a",
+        paint_mask=paint_mask,
+        glyph_mask=paint_mask,
+        text_execution_authority=authority,
+        delivery_contract=delivery,
+    )
+
+    composition = run._build_style_replay_runtime_composition(
+        page_id="page_001",
+        framed_original_rgb=framed.copy(),
+        framed_rendered_rgb=framed,
+        surface_geometry=geometry,
+        cleanup_masks_by_owner={"owner-a": cleanup_mask},
+        glyph_patches_by_owner={"owner-a": patch},
+    )
+
+    assert composition.committed is True
+    assert composition.coordinate_space == "framed_page"
+    assert composition.page_surface_geometry_sha256 == geometry.geometry_sha256
+    assert composition.cleanup_owner_map[1, 3] == "owner-a"
+    assert composition.glyph_owner_map[2, 6] == "owner-a"
+    assert composition.owner_text_execution_authorities["owner-a"]["authority_sha256"] == "a" * 64
+    assert composition.owner_text_delivery_contracts["owner-a"]["contract_sha256"] == "b" * 64
+
+    empty = run._build_style_replay_runtime_composition(
+        page_id="page_002",
+        framed_original_rgb=framed.copy(),
+        framed_rendered_rgb=framed.copy(),
+        surface_geometry=geometry,
+        cleanup_masks_by_owner={},
+        glyph_patches_by_owner={},
+    )
+    assert empty.write_counts["owner_count"] == 0
+    assert not np.any(empty.cleanup_owner_map != "")
+    assert not np.any(empty.glyph_owner_map != "")
+
+
+def test_style_replay_partitions_complete_cleanup_delta_without_gaps_or_overlap():
+    import pytest
+    import strip.run as run
+
+    delta = np.zeros((6, 12), dtype=np.uint8)
+    delta[2, 2] = 255
+    delta[2, 9] = 255
+    delta[4, 6] = 255  # feather pixel outside both component boxes
+
+    masks = run._partition_style_replay_cleanup_delta(
+        delta,
+        {
+            "owner-a": (1, 1, 4, 4),
+            "owner-b": (8, 1, 11, 4),
+        },
+    )
+
+    assert masks["owner-a"][2, 2] == 255
+    assert masks["owner-b"][2, 9] == 255
+    assert sum(mask[4, 6] > 0 for mask in masks.values()) == 1
+    union = np.zeros(delta.shape, dtype=np.uint8)
+    write_count = np.zeros(delta.shape, dtype=np.uint8)
+    for mask in masks.values():
+        union[mask > 0] = 255
+        write_count[mask > 0] += 1
+    np.testing.assert_array_equal(union, delta)
+    assert np.max(write_count) == 1
+
+    with pytest.raises(ValueError, match="lacks owners"):
+        run._partition_style_replay_cleanup_delta(delta, {})
+
+
 def test_run_chapter_uses_owner_compositor_as_only_final_pixel_authority(monkeypatch):
     import strip.run as run
 

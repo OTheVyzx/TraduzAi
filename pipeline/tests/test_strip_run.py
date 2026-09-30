@@ -2558,11 +2558,13 @@ class RunChapterSmokeTests(unittest.TestCase):
             tmp_path = Path(tmp)
             files = _write_pages(tmp_path, 2, page_height=300, page_width=200)
             output = tmp_path / "out"
+            source_band_tops = []
 
             def fake_process_band(band, **kw):
                 band.cleaned_slice = band.strip_slice.copy()
                 band.rendered_slice = band.strip_slice.copy()
                 if int(kw["source_page_number"]) == 2:
+                    source_band_tops.append(band.y_top)
                     band.ocr_result = {
                         "texts": [
                             {
@@ -2597,8 +2599,11 @@ class RunChapterSmokeTests(unittest.TestCase):
 
             texts = pages[1].text_layers["texts"]
             self.assertEqual(len(texts), 1)
-            self.assertEqual(texts[0]["bbox"], [20, 34, 120, 74])
-            self.assertEqual(texts[0]["balloon_bbox"], [10, 24, 150, 104])
+            self.assertEqual(len(source_band_tops), 1)
+            # Check the coordinate transform, independently of scheduler padding.
+            offset = source_band_tops[0] - pages[1].y_top
+            self.assertEqual(texts[0]["bbox"], [20, 120 + offset, 120, 160 + offset])
+            self.assertEqual(texts[0]["balloon_bbox"], [10, 110 + offset, 150, 190 + offset])
             self.assertEqual(texts[0]["coordinate_space"], "page")
             self.assertEqual(texts[0]["source_coordinate_space"], "page")
             self.assertEqual(texts[0]["page_id"], "page_002")

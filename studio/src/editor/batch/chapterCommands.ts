@@ -59,6 +59,7 @@ export interface ChapterReviewItem extends ChapterLayerRef {
   original: string;
   translated: string;
   reasons: string[];
+  canResolve: boolean;
 }
 
 function clone<T>(value: T): T {
@@ -253,6 +254,7 @@ export function buildChapterReviewQueue(project: StudioProject): ChapterReviewIt
         original: layer.original ?? "",
         translated: layer.translated ?? layer.traduzido ?? "",
         reasons,
+        canResolve: !(String(layer.original ?? "").trim() && !String(layer.translated ?? layer.traduzido ?? "").trim()),
       });
     });
   });
@@ -264,6 +266,9 @@ export function createResolveReviewCommand(
   items: ChapterReviewItem[],
   resolvedAt = new Date().toISOString(),
 ): ChapterCommand {
+  if (items.some((item) => !item.canResolve)) {
+    throw new Error("O conteúdo precisa ser corrigido antes de concluir a revisão");
+  }
   return createCommand(project, "Resolver itens de revisao", items, (draft) => {
     for (const item of items) {
       const layer = layerAt(draft, item);

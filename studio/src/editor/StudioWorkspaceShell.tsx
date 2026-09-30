@@ -54,12 +54,14 @@ export function StudioWorkspaceShell({
   project,
   projectPath,
   onBack,
+  onProjectPromoted,
   storage = typeof window === "undefined" ? null : window.localStorage,
   confirmDiscard = () => window.confirm("Há alterações não salvas. Descartar e voltar para a biblioteca?"),
 }: {
   project: StudioProject;
   projectPath: string;
   onBack: () => void;
+  onProjectPromoted?: (previousPath: string, promotedPath: string) => void | Promise<void>;
   storage?: Storage | null;
   confirmDiscard?: () => boolean;
 }) {
@@ -89,6 +91,7 @@ export function StudioWorkspaceShell({
       projectPath={projectPath}
       workspace={workspace}
       onBack={returnToLibrary}
+      onProjectPromoted={onProjectPromoted}
       workspaceSwitcher={<StudioWorkspaceSwitcher workspace={workspace} onChange={changeWorkspace} />}
     />
   );

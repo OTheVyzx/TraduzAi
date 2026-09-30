@@ -125,33 +125,32 @@ export function UpdatesView({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex bg-[#111217]/95 text-zinc-100" role="dialog" aria-modal="true" aria-labelledby="studio-updates-title">
-      <section className="mx-auto flex h-full w-full max-w-6xl flex-col p-6">
-        <header className="flex items-start justify-between border-b border-zinc-800 pb-5">
+    <div className="studio-updates-backdrop studio-floating-layer" role="dialog" aria-modal="true" aria-labelledby="studio-updates-title">
+      <section className="studio-updates-view">
+        <header className="studio-updates-header">
           <div>
-            <small className="uppercase tracking-[0.18em] text-zinc-500">Biblioteca local</small>
-            <h2 id="studio-updates-title" className="mt-1 text-2xl font-semibold">Atualizações</h2>
-            <p className="mt-1 text-sm text-zinc-400">Somente metadados das fontes vinculadas. Nenhuma página é baixada.</p>
+            <small>Biblioteca local</small>
+            <h2 id="studio-updates-title">Atualizações</h2>
+            <p>Somente metadados das fontes vinculadas. Nenhuma página é baixada.</p>
           </div>
-          <button type="button" aria-label="Fechar atualizações" className="rounded p-2 hover:bg-zinc-800" onClick={onClose}><X size={19} /></button>
+          <button type="button" aria-label="Fechar atualizações" className="studio-updates-close" onClick={onClose}><X size={19} /></button>
         </header>
 
-        <div className="flex flex-wrap items-center gap-3 border-b border-zinc-800 py-4">
+        <div className="studio-updates-controls">
           <button
             type="button"
             disabled={refreshing || trackedWorks.length === 0}
             onClick={() => void refresh()}
-            className="inline-flex items-center gap-2 rounded bg-amber-500 px-4 py-2 text-sm font-semibold text-zinc-950 disabled:opacity-50"
+            className="studio-updates-primary"
           >
             <RefreshCw size={15} className={refreshing ? "animate-spin" : ""} />
             {refreshing ? "Atualizando…" : "Atualizar agora"}
           </button>
-          <label className="flex items-center gap-2 text-sm text-zinc-400">
+          <label className="studio-updates-language">
             Idioma dos capítulos
             <select
               value={trackingLanguage}
               onChange={(event) => void onSetTrackingLanguage?.(event.currentTarget.value)}
-              className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-zinc-100"
             >
               <option value="en">Inglês</option>
               <option value="ja">Japonês</option>
@@ -160,14 +159,14 @@ export function UpdatesView({
               <option value="pt-br">Português (Brasil)</option>
             </select>
           </label>
-          <span className="ml-auto text-xs text-zinc-500">Atualização explícita válida por 30 minutos</span>
+          <span className="studio-updates-ttl">Atualização explícita válida por 30 minutos</span>
         </div>
 
-        {refreshError && <p className="mt-4 flex items-center gap-2 rounded border border-amber-700/40 bg-amber-950/30 p-3 text-sm text-amber-200"><AlertTriangle size={15} />{refreshError}</p>}
+        {refreshError && <p className="studio-updates-warning"><AlertTriangle size={15} />{refreshError}</p>}
 
-        <div className="mt-5 grid gap-3 overflow-y-auto pb-6">
+        <div className="studio-updates-list">
           {trackedWorks.length === 0 && (
-            <div className="rounded border border-dashed border-zinc-700 p-10 text-center text-zinc-400">
+            <div className="studio-updates-empty">
               Vincule uma obra ao AniList ou MangaDex para acompanhar atualizações.
             </div>
           )}
@@ -179,33 +178,33 @@ export function UpdatesView({
             const hasChapter = hasRemoteChapterUpdate(work.chapters.map((chapter) => chapter.label), chapterSnapshot?.latestChapter ?? null);
             const stale = isTrackingCacheStale(cache, now);
             return (
-              <article key={work.id} className="grid grid-cols-[64px_1fr_auto] gap-4 rounded border border-zinc-800 bg-zinc-900/60 p-4">
-                <div className="h-20 overflow-hidden rounded bg-zinc-800">
-                  {(work.coverPath || snapshots[0]?.coverUrl) && <img className="h-full w-full object-cover" src={work.coverPath ?? snapshots[0]?.coverUrl ?? undefined} alt="" />}
+              <article key={work.id} className="studio-updates-card">
+                <div className="studio-updates-cover">
+                  {(work.coverPath || snapshots[0]?.coverUrl) && <img src={work.coverPath ?? snapshots[0]?.coverUrl ?? undefined} alt="" />}
                 </div>
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="font-semibold">{work.title}</h3>
-                    {stale && <span className="rounded bg-amber-950 px-2 py-0.5 text-xs text-amber-300">Desatualizado</span>}
-                    {status.source === "manual" && <span className="rounded bg-sky-950 px-2 py-0.5 text-xs text-sky-300">Status manual</span>}
-                    {status.hasConflict && <span className="rounded bg-rose-950 px-2 py-0.5 text-xs text-rose-300">Conflito</span>}
+                <div className="studio-updates-body">
+                  <div className="studio-updates-heading">
+                    <h3>{work.title}</h3>
+                    {stale && <span className="studio-updates-warning">Desatualizado</span>}
+                    {status.source === "manual" && <span className="studio-updates-badge studio-updates-badge-manual">Status manual</span>}
+                    {status.hasConflict && <span className="studio-updates-badge studio-updates-badge-conflict">Conflito</span>}
                   </div>
-                  <p className="mt-1 text-sm text-zinc-400">{STATUS_LABELS[status.status]}</p>
-                  {hasChapter && <p className="mt-2 text-sm text-emerald-300">Capítulo {chapterSnapshot?.latestChapter} disponível na fonte.</p>}
-                  {!hasChapter && chapterSnapshot?.latestChapter && <p className="mt-2 text-sm text-zinc-500">Último capítulo remoto: {chapterSnapshot.latestChapter}</p>}
-                  {cache?.lastError && <p className="mt-2 text-xs text-amber-300">Offline: {cache.lastError}</p>}
+                  <p className="studio-updates-status">{STATUS_LABELS[status.status]}</p>
+                  {hasChapter && <p className="studio-updates-available">Capítulo {chapterSnapshot?.latestChapter} disponível na fonte.</p>}
+                  {!hasChapter && chapterSnapshot?.latestChapter && <p className="studio-updates-muted">Último capítulo remoto: {chapterSnapshot.latestChapter}</p>}
+                  {cache?.lastError && <p className="studio-updates-error">Offline: {cache.lastError}</p>}
                   {cache && (
-                    <p className="mt-1 text-xs text-zinc-500">
+                    <p className="studio-updates-meta">
                       Última atualização: <time dateTime={cache.fetchedAt}>{formatTrackingTime(cache.fetchedAt)}</time>
                     </p>
                   )}
-                  <div className="mt-2 flex gap-3 text-xs text-zinc-500">
+                  <div className="studio-updates-providers">
                     {snapshots.map((snapshot) => <span key={`${snapshot.provider}:${snapshot.providerId}`}>{snapshot.provider === "anilist" ? "AniList" : "MangaDex"}</span>)}
                   </div>
                 </div>
-                <div className="flex flex-col items-end gap-2">
-                  <button type="button" className="rounded border border-zinc-700 px-3 py-2 text-sm hover:bg-zinc-800" onClick={() => onOpenWork(work.id)}>Abrir obra</button>
-                  {chapterSnapshot?.siteUrl && <a className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-100" href={chapterSnapshot.siteUrl} target="_blank" rel="noreferrer">Ver fonte <ExternalLink size={12} /></a>}
+                <div className="studio-updates-actions">
+                  <button type="button" onClick={() => onOpenWork(work.id)}>Abrir obra</button>
+                  {chapterSnapshot?.siteUrl && <a href={chapterSnapshot.siteUrl} target="_blank" rel="noreferrer">Ver fonte <ExternalLink size={12} /></a>}
                 </div>
               </article>
             );

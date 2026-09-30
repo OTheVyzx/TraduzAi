@@ -354,6 +354,23 @@ def test_content_failures_reach_r3_deterministic_fill_and_commit(failure):
     assert result.final_page is not None
 
 
+def test_repeated_visual_residuals_create_unique_monotonic_repair_requests():
+    result = run_repair_ladder(
+        _case(
+            lambda **_kwargs: RepairExecutionFeedback.visual_residual(
+                "same-residual-evidence"
+            )
+        ),
+        scheduler=lambda _seconds: None,
+    )
+
+    request_ids = [request.request_id for request in result.repair_requests]
+    assert len(request_ids) == len(set(request_ids))
+    assert len({attempt.request_id for attempt in result.attempts}) == len(
+        result.attempts
+    )
+
+
 def test_r3_releases_confirmed_source_from_conservative_protection_only():
     case = _case()
     protected = np.array(case.protected_art_mask, copy=True)

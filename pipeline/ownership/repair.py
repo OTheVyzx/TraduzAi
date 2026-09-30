@@ -536,6 +536,7 @@ def _request_for(
     evidence_ids: tuple[str, ...],
     next_strategy: str,
     issue_id: str | None = None,
+    previous_attempt_sha256: str | None = None,
 ) -> OwnerRepairRequest:
     binding = case.translation
     request_id = canonical_json_sha256(
@@ -550,6 +551,7 @@ def _request_for(
             "evidence_ids": list(evidence_ids),
             "next_strategy": next_strategy,
             "issue_id": issue_id,
+            "previous_attempt_sha256": previous_attempt_sha256,
         }
     )
     return OwnerRepairRequest.build(
@@ -636,9 +638,12 @@ def run_repair_ladder(
                 feedback = raw_feedback
             if feedback.status == "transient":
                 transient_count += 1
-                attempts.append(
-                    _with_outcome(runtime, outcome="transient_failure", evidence_ids=feedback.evidence_ids)
+                transient_attempt = _with_outcome(
+                    runtime,
+                    outcome="transient_failure",
+                    evidence_ids=feedback.evidence_ids,
                 )
+                attempts.append(transient_attempt)
                 if transient_count >= selected_policy.max_transient_retries:
                     raise RepairInfrastructureExhausted(transient_count)
                 retry_request = _request_for(
@@ -647,6 +652,7 @@ def run_repair_ladder(
                     reason=feedback.reason,
                     evidence_ids=(f"transient-{transient_count}",),
                     next_strategy=selected.value,
+                    previous_attempt_sha256=transient_attempt.attempt_sha256,
                 )
                 requests.append(retry_request)
                 request = retry_request
@@ -685,6 +691,7 @@ def run_repair_ladder(
                         reason=feedback.reason,
                         evidence_ids=feedback.evidence_ids,
                         next_strategy="R3",
+                        previous_attempt_sha256=previous.attempt_sha256,
                     )
                     requests.append(request)
                     continue
@@ -694,6 +701,7 @@ def run_repair_ladder(
                     reason=feedback.reason,
                     evidence_ids=feedback.evidence_ids,
                     next_strategy="R3",
+                    previous_attempt_sha256=previous.attempt_sha256,
                 )
                 requests.append(request)
                 break
@@ -708,6 +716,7 @@ def run_repair_ladder(
                 reason=feedback.reason,
                 evidence_ids=feedback.evidence_ids,
                 next_strategy=next_strategy,
+                previous_attempt_sha256=previous.attempt_sha256,
             )
             requests.append(request)
             break

@@ -11206,6 +11206,47 @@ def _owner_non_rendering_record(
             "render_policy": "review_required",
         }
     )
+    if (
+        owner.disposition == "owned"
+        and owner.route_action in TRANSLATION_ROUTE_ACTIONS
+        and owner.state not in {"translated", "target_ready"}
+    ):
+        record.update(
+            {
+                "execution_rejected": True,
+                "derived_qa_status": "review_required",
+                "write_authority": "revoked",
+                "owner_execution_rejection_reason": "translation_unresolved",
+                "translation_unresolved": True,
+                "source_pixels_preserved": True,
+                "committed": False,
+                "blocking": True,
+                "qa_action": "BLOCK",
+            }
+        )
+    return record
+
+
+def _owner_execution_rejection_record(
+    graph: OwnerGraph,
+    owner,
+    *,
+    seed: dict[str, Any] | None = None,
+    enforce_graph: bool,
+) -> dict[str, Any]:
+    """Fail closed without introducing legacy review state into enforce graphs."""
+
+    if not enforce_graph:
+        _transition_owner_to_review(graph, owner.owner_id)
+    record = _owner_non_rendering_record(graph, owner, seed=seed)
+    if enforce_graph:
+        record.update(
+            {
+                "derived_qa_status": "review_required",
+                "execution_rejected": True,
+                "write_authority": "revoked",
+            }
+        )
     return record
 
 
@@ -11665,6 +11706,7 @@ def execute_owner_page_graph(
     enforce_graph: bool = False,
     translation_result_override: OwnerPageTranslationResult | None = None,
     style_copy_mode: str = "shadow",
+    performance_recorder: Any | None = None,
 ) -> OwnerPageExecution:
     """Execute every page owner once against canonical page pixels."""
 
@@ -11826,6 +11868,8 @@ def execute_owner_page_graph(
                 "selected_observation_ids": list(owner.selected_observation_ids),
             }
         )
+        if binding is not None:
+            record.update(_owner_translation_binding_fields(binding))
         evidence: list[OwnerMaskEvidence] = []
         source_effect_mask = np.zeros(source.shape[:2], dtype=np.uint8)
         component_bboxes: dict[str, tuple[int, int, int, int]] = {}
@@ -11999,7 +12043,6 @@ def execute_owner_page_graph(
                 owner.owner_id,
                 exc,
             )
-            _transition_owner_to_review(executed_graph, owner.owner_id)
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = str(exc)
             review_seed["qa_flags"] = sorted(
@@ -12009,10 +12052,11 @@ def execute_owner_page_graph(
                 }
             )
             final_records.append(
-                _owner_non_rendering_record(
+                _owner_execution_rejection_record(
                     executed_graph,
                     owner,
                     seed=review_seed,
+                    enforce_graph=enforce_graph,
                 )
             )
             continue
@@ -12026,15 +12070,22 @@ def execute_owner_page_graph(
             for observation in selected_observations
             if observation.layout_bbox_page is not None
         ]
-        owner_render_geometry = build_owner_render_geometry(
-            executed_graph,
-            owner.owner_id,
-            page_width=int(source.shape[1]),
-            page_height=int(source.shape[0]),
-            container_evidence=container_evidence,
-            protected_art_mask=protected_mask,
-            protected_art_mask_sha256=_owner_array_sha256(protected_mask),
+        geometry_timing = (
+            performance_recorder.measure("owner_geometry")
+            if performance_recorder is not None
+            and callable(getattr(performance_recorder, "measure", None))
+            else nullcontext()
         )
+        with geometry_timing:
+            owner_render_geometry = build_owner_render_geometry(
+                executed_graph,
+                owner.owner_id,
+                page_width=int(source.shape[1]),
+                page_height=int(source.shape[0]),
+                container_evidence=container_evidence,
+                protected_art_mask=protected_mask,
+                protected_art_mask_sha256=_owner_array_sha256(protected_mask),
+            )
         if owner_render_geometry.reason in {
             "missing_independent_dialogue_container",
             "missing_verified_card_container",
@@ -12069,14 +12120,18 @@ def execute_owner_page_graph(
                 owner.owner_id,
                 owner_render_geometry.reason,
             )
-            _transition_owner_to_review(executed_graph, owner.owner_id)
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = owner_render_geometry.reason
             review_seed["qa_flags"] = sorted(
                 {*list(review_seed.get("qa_flags") or []), "owner_render_geometry_review"}
             )
             final_records.append(
-                _owner_non_rendering_record(executed_graph, owner, seed=review_seed)
+                _owner_execution_rejection_record(
+                    executed_graph,
+                    owner,
+                    seed=review_seed,
+                    enforce_graph=enforce_graph,
+                )
             )
             continue
         if normalized_style_mode == "off":
@@ -12166,14 +12221,21 @@ def execute_owner_page_graph(
             "protected_pixels": int(np.count_nonzero(protected_mask)),
         }
         try:
-            plan = build_owner_mask_plan(
-                source,
-                single_owner,
-                evidence,
-                owner_component_bboxes_page=component_bboxes,
-                expected_line_ids=expected_line_ids,
-                owner_render_geometry_sha256=owner_render_geometry.geometry_sha256,
+            mask_timing = (
+                performance_recorder.measure("owner_mask_creation")
+                if performance_recorder is not None
+                and callable(getattr(performance_recorder, "measure", None))
+                else nullcontext()
             )
+            with mask_timing:
+                plan = build_owner_mask_plan(
+                    source,
+                    single_owner,
+                    evidence,
+                    owner_component_bboxes_page=component_bboxes,
+                    expected_line_ids=expected_line_ids,
+                    owner_render_geometry_sha256=owner_render_geometry.geometry_sha256,
+                )
         except UnsafeOwnerMaskError as exc:
             logger.warning(
                 "owner mask rejected: page_id=%s owner_id=%s reason=%s",
@@ -12181,7 +12243,6 @@ def execute_owner_page_graph(
                 owner.owner_id,
                 exc,
             )
-            _transition_owner_to_review(executed_graph, owner.owner_id)
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = str(exc)
             review_seed["qa_flags"] = sorted(
@@ -12191,10 +12252,11 @@ def execute_owner_page_graph(
                 }
             )
             final_records.append(
-                _owner_non_rendering_record(
+                _owner_execution_rejection_record(
                     executed_graph,
                     owner,
                     seed=review_seed,
+                    enforce_graph=enforce_graph,
                 )
             )
             continue
@@ -12206,7 +12268,6 @@ def execute_owner_page_graph(
                 owner.owner_id,
                 plan.uncovered_source_ink_pixels,
             )
-            _transition_owner_to_review(executed_graph, owner.owner_id)
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = (
                 "owner mask coverage is incomplete"
@@ -12215,10 +12276,11 @@ def execute_owner_page_graph(
                 {*list(review_seed.get("qa_flags") or []), "owner_mask_unsafe"}
             )
             final_records.append(
-                _owner_non_rendering_record(
+                _owner_execution_rejection_record(
                     executed_graph,
                     owner,
                     seed=review_seed,
+                    enforce_graph=enforce_graph,
                 )
             )
             continue
@@ -12278,11 +12340,18 @@ def execute_owner_page_graph(
                 "offset_xy": [0, 0],
             },
         }
-        mutation = inpainter.inpaint_band_image(
-            source,
-            inpaint_page,
-            owner_mask_plan=plan,
+        inpaint_timing = (
+            performance_recorder.measure("owner_inpaint")
+            if performance_recorder is not None
+            and callable(getattr(performance_recorder, "measure", None))
+            else nullcontext()
         )
+        with inpaint_timing:
+            mutation = inpainter.inpaint_band_image(
+                source,
+                inpaint_page,
+                owner_mask_plan=plan,
+            )
         if not isinstance(mutation, OwnerMutation):
             raise ValueError("owner inpainter did not return an OwnerMutation")
         mutation = replace(
@@ -12294,27 +12363,41 @@ def execute_owner_page_graph(
         single_owner.state = "inpainted"
         owner.state = "inpainted"
         record.update({"state": "inpainted", "action_mask_ref": plan.action_mask_ref})
-        layout_page = enrich_page_layout(
-            {
-                "page_id": owner.page_id,
-                "width": int(source.shape[1]),
-                "height": int(source.shape[0]),
-                "texts": [record],
-            },
-            owner_graph=single,
-            layout_regions=owner_layout_regions,
+        typesetting_timing = (
+            performance_recorder.measure("owner_typesetting")
+            if performance_recorder is not None
+            and callable(getattr(performance_recorder, "measure", None))
+            else nullcontext()
         )
+        with typesetting_timing:
+            layout_page = enrich_page_layout(
+                {
+                    "page_id": owner.page_id,
+                    "width": int(source.shape[1]),
+                    "height": int(source.shape[0]),
+                    "texts": [record],
+                },
+                owner_graph=single,
+                layout_regions=owner_layout_regions,
+            )
         layout_page["texts"][0]["_owner_component_bboxes_page"] = {
             key: list(value) for key, value in component_bboxes.items()
         }
         layout_page["texts"][0]["owner_style_capture"] = copy.deepcopy(
             record["owner_style_capture"]
         )
-        glyph_patch = typesetter.render_band_image(
-            mutation.result_rgb,
-            layout_page,
-            owner_graph=single,
+        render_timing = (
+            performance_recorder.measure("owner_final_render")
+            if performance_recorder is not None
+            and callable(getattr(performance_recorder, "measure", None))
+            else nullcontext()
         )
+        with render_timing:
+            glyph_patch = typesetter.render_band_image(
+                mutation.result_rgb,
+                layout_page,
+                owner_graph=single,
+            )
         layout_record = layout_page["texts"][0]
         visual_profile = layout_record.get("visual_profile_v2")
         visual_profile = visual_profile if isinstance(visual_profile, dict) else {}
@@ -12528,11 +12611,42 @@ def execute_owner_page_graph(
                     positive_residual_mask=source_effect_mask,
                     attempt_executor=_execute_repair_attempt,
                 )
-                ladder = run_repair_ladder(
-                    repair_case,
-                    start_strategy=_owner_repair_start_strategy(owner),
-                    scheduler=lambda _seconds: None,
-                )
+                try:
+                    ladder = run_repair_ladder(
+                        repair_case,
+                        start_strategy=_owner_repair_start_strategy(owner),
+                        scheduler=lambda _seconds: None,
+                    )
+                except UnsafeOwnerMaskError as exc:
+                    logger.warning(
+                        "owner repair mask rejected: page_id=%s owner_id=%s reason=%s",
+                        owner.page_id,
+                        owner.owner_id,
+                        exc,
+                    )
+                    if replacement.repair_request not in repair_requests:
+                        repair_requests.append(replacement.repair_request)
+                    owner.state = "repair_pending"
+                    single_owner.state = "repair_pending"
+                    review_seed = _owner_execution_review_seed(
+                        record,
+                        f"repair_mask_unsafe:{str(exc)}",
+                    )
+                    review_seed["qa_flags"] = sorted(
+                        {
+                            *list(review_seed.get("qa_flags") or []),
+                            "owner_mask_unsafe",
+                        }
+                    )
+                    final_records.append(
+                        _owner_execution_rejection_record(
+                            executed_graph,
+                            owner,
+                            seed=review_seed,
+                            enforce_graph=enforce_graph,
+                        )
+                    )
+                    continue
                 repair_requests.extend(ladder.repair_requests)
                 repair_history.extend(ladder.attempts)
                 repair_budget_policy_sha256 = ladder.repair_budget_policy_sha256
@@ -12553,12 +12667,20 @@ def execute_owner_page_graph(
                     )
                     owner.state = "repair_pending"
                     single_owner.state = "repair_pending"
-                    review_seed = copy.deepcopy(record)
-                    review_seed["owner_execution_rejection_reason"] = (
-                        replacement.repair_request.reason
+                    review_seed = _owner_execution_review_seed(
+                        record,
+                        "owner_repair_ladder_exhausted:"
+                        f"{replacement.repair_request.reason}",
                     )
                     review_seed["state"] = "repair_pending"
-                    final_records.append(review_seed)
+                    final_records.append(
+                        _owner_execution_rejection_record(
+                            executed_graph,
+                            owner,
+                            seed=review_seed,
+                            enforce_graph=enforce_graph,
+                        )
+                    )
                     continue
                 replacement = repair_capture["replacement"]
                 mutation = repair_capture["mutation"]
@@ -12679,7 +12801,6 @@ def execute_owner_page_graph(
             ]
             final_records.append(rendered_record)
         else:
-            _transition_owner_to_review(executed_graph, owner.owner_id)
             review_seed = _owner_execution_review_seed(
                 record,
                 commit.reason,
@@ -12692,14 +12813,15 @@ def execute_owner_page_graph(
                 commit.reason,
             )
             final_records.append(
-                _owner_non_rendering_record(
+                _owner_execution_rejection_record(
                     executed_graph,
                     owner,
                     seed=review_seed,
+                    enforce_graph=enforce_graph,
                 )
             )
 
-    executed_graph.require_valid()
+    executed_graph.require_valid(mode="enforce" if enforce_graph else "legacy")
     return OwnerPageExecution(
         graph=executed_graph,
         commits=tuple(commits),

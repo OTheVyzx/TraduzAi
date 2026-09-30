@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
 import math
@@ -49,6 +49,7 @@ class OwnerMaskEvidence:
     component_id: str
     glyph_mask: np.ndarray | None = None
     line_mask: np.ndarray | None = None
+    effect_support_mask: np.ndarray | None = None
     protected_art_mask: np.ndarray | None = None
     observation_id: str | None = None
     line_index: int | None = None
@@ -513,6 +514,13 @@ def _stroke_expansion_radii(mask: np.ndarray) -> tuple[int, ...]:
         for index in range(1, component_count)
         if int(stats[index, cv2.CC_STAT_AREA]) >= 4
     ]
+    # Detached dialogue glyphs expose the low-contrast edge of a white
+    # outline beyond the captured core.  A three-pixel halo leaves that edge
+    # as AOT context and the model propagates it into conspicuous white
+    # letter-shaped patches.  Connected script remains conservative because
+    # it produces only a few joined components.
+    if len(component_dimensions) >= 8 and proportional_radius <= 2:
+        proportional_radius = 5
     if len(component_dimensions) >= 2:
         minor_axes = [min(width, height) for width, height in component_dimensions]
         major_axes = [max(width, height) for width, height in component_dimensions]
@@ -672,6 +680,84 @@ def build_repair_cleanup_mask(
     result = np.ascontiguousarray(result)
     result.setflags(write=False)
     return result
+
+
+def build_repair_owner_mask_plan(
+    plan: OwnerMaskPlan,
+    cleanup_mask: Any,
+    *,
+    evidence_id: str,
+) -> OwnerMaskPlan:
+    """Rebind one bounded repair mask to the existing component authority."""
+
+    _validated_plan_masks(plan)
+    action = np.asarray(cleanup_mask)
+    if action.ndim == 3:
+        action = action[:, :, 0]
+    if action.shape != plan.action_mask.shape:
+        raise UnsafeOwnerMaskError("repair action mask geometry mismatch")
+    action = np.where(action > 0, 255, 0).astype(np.uint8)
+    if not np.any(action):
+        raise UnsafeOwnerMaskError("repair action mask is empty")
+    protected = np.ascontiguousarray(plan.protected_art_mask, dtype=np.uint8)
+    if np.any((action > 0) & (protected > 0)):
+        raise UnsafeOwnerMaskError("repair action mask overlaps protected art")
+    canonical_evidence_id = _canonical_identity(
+        evidence_id,
+        label="repair evidence_id",
+    )
+    component_actions: list[tuple[str, tuple[int, int, int, int]]] = []
+    for component_id, bbox in plan.component_bboxes_page:
+        x1, y1, x2, y2 = bbox
+        local = action[y1:y2, x1:x2]
+        ys, xs = np.nonzero(local)
+        if xs.size <= 0:
+            raise UnsafeOwnerMaskError(
+                f"repair action mask lost owner component: {component_id}"
+            )
+        component_actions.append(
+            (
+                component_id,
+                (
+                    x1 + int(xs.min()),
+                    y1 + int(ys.min()),
+                    x1 + int(xs.max()) + 1,
+                    y1 + int(ys.max()) + 1,
+                ),
+            )
+        )
+    evidence_ids = tuple(sorted({*plan.evidence_ids, canonical_evidence_id}))
+    action_ref, protected_ref = _safe_owner_ref(
+        plan.owner_id,
+        plan.page_id,
+        plan.source_sha256,
+        plan.execution_tile_id,
+        action,
+        protected,
+        evidence_ids,
+        plan.protected_evidence_ids,
+        plan.observation_ids,
+        tuple(component_actions),
+        plan.component_bboxes_page,
+        plan.owner_bbox_page,
+        plan.component_geometry_sha256,
+        True,
+        plan.expected_line_ids,
+        plan.covered_line_ids,
+        plan.uncovered_source_ink_pixels,
+        plan.coverage_complete,
+    )
+    repaired = replace(
+        plan,
+        action_mask_ref=action_ref,
+        protected_art_mask_ref=protected_ref,
+        action_mask=np.ascontiguousarray(action),
+        protected_art_mask=protected.copy(),
+        evidence_ids=evidence_ids,
+        component_action_bboxes_page=tuple(component_actions),
+    )
+    _validated_plan_masks(repaired)
+    return repaired
 
 
 def _validated_component_geometry(
@@ -969,6 +1055,10 @@ def build_owner_mask_plan(
             component_id: np.zeros(shape, dtype=np.uint8)
             for component_id in owned_components
         }
+        component_effects = {
+            component_id: np.zeros(shape, dtype=np.uint8)
+            for component_id in owned_components
+        }
         protected = np.zeros(shape, dtype=np.uint8)
         used_evidence_ids: list[str] = []
         protected_evidence_ids: list[str] = []
@@ -1032,6 +1122,11 @@ def build_owner_mask_plan(
                 "line_mask",
                 "line_geometry_mask",
             )
+            effect_support = _evidence_mask(
+                record,
+                shape,
+                "effect_support_mask",
+            )
             positive: np.ndarray | None = None
             for positive_part in (glyph_positive, line_positive):
                 if positive_part is not None:
@@ -1058,6 +1153,10 @@ def build_owner_mask_plan(
                         "owner stroke raster escapes its polygon evidence support"
                     )
             if positive is None or not np.any(positive):
+                if effect_support is not None and np.any(effect_support):
+                    raise UnsafeOwnerMaskError(
+                        "owner effect support requires a positive source-text core"
+                    )
                 continue
             component_ids = _evidence_component_ids(record)
             if not component_ids:
@@ -1114,6 +1213,25 @@ def build_owner_mask_plan(
                     "owner mask evidence references an unexpected line identity"
                 )
             component_id = next(iter(component_ids))
+            if effect_support is not None and np.any(effect_support):
+                if np.any((positive > 0) & (effect_support == 0)):
+                    raise UnsafeOwnerMaskError(
+                        "owner effect support must contain its positive source-text core"
+                    )
+                if component_id in verified_component_bboxes:
+                    effect_bbox = _mask_bbox_page(effect_support)
+                    component_bbox = verified_component_bboxes[component_id]
+                    if not (
+                        component_bbox[0] <= effect_bbox[0] < effect_bbox[2] <= component_bbox[2]
+                        and component_bbox[1] <= effect_bbox[1] < effect_bbox[3] <= component_bbox[3]
+                    ):
+                        raise UnsafeOwnerMaskError(
+                            "owner effect support escapes authoritative component geometry"
+                        )
+                component_effects[component_id] = np.maximum(
+                    component_effects[component_id],
+                    effect_support,
+                )
             verified_line = _positive_mask_is_verified_text_line(
                 positive,
                 verified_component_bboxes.get(component_id),
@@ -1201,6 +1319,13 @@ def build_owner_mask_plan(
                     # false background sample.
                     component_mask = expanded
                     break
+            effect_support = component_effects[component_id]
+            if np.any(effect_support):
+                if not np.any((effect_support > 0) & (component_mask > 0)):
+                    raise UnsafeOwnerMaskError(
+                        "owner effect support is detached from its source-text core"
+                    )
+                component_mask = np.maximum(component_mask, effect_support)
             allowed_component = component_mask.copy()
             allowed_component[protected > 0] = 0
             allowed_pixels = int(np.count_nonzero(allowed_component))
@@ -1892,8 +2017,9 @@ def _uniform_context_guard_fill(
         return None
     fill_distance = np.linalg.norm(fill - context_median, axis=1)
     catastrophic_fill = float(np.median(fill_distance)) > 72.0
+    visible_uniform_seam = float(np.median(fill_distance)) > 28.0
     localized_artifact = float(np.mean(fill_distance > 72.0)) >= 0.01
-    if not (catastrophic_fill or localized_artifact):
+    if not (catastrophic_fill or visible_uniform_seam or localized_artifact):
         return None
     return np.clip(np.rint(context_median), 0, 255).astype(np.uint8)
 

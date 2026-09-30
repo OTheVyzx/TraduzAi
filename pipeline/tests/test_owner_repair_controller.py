@@ -244,11 +244,18 @@ def test_final_observer_materializes_request_scoped_ocr_journal(tmp_path):
         def detect(self, _pixels):
             return []
 
-    class EmptyEngine:
-        def recognize_batch(self, inputs):
-            return [None for _item in inputs]
+    class EmptyModel:
+        def ocr(self, image, det=True, rec=True, cls=False):
+            del image, det, rec, cls
+            return [[]]
 
-    with patch.object(runtime, "_get_ocr_engine", return_value=EmptyEngine()):
+    from vision_stack.ocr import OCREngine
+
+    empty_engine = OCREngine.__new__(OCREngine)
+    empty_engine._backend = "paddleocr"
+    empty_engine._model = EmptyModel()
+
+    with patch.object(runtime, "_get_ocr_engine", return_value=empty_engine):
         observation = DetectorOcrFinalPixelObserver(
             detector=EmptyDetector(), runtime=runtime
         ).observe(
@@ -262,13 +269,7 @@ def test_final_observer_materializes_request_scoped_ocr_journal(tmp_path):
 
     assert observation.ocr_request == observation.ocr_invocation.request
     assert observation.ocr_request.run_id == "run-journal"
-    assert {attempt.variant_id for attempt in observation.ocr_invocation.attempts} == {
-        "full_page",
-        "native",
-        "gray",
-        "inverted",
-        "scale_2x",
-    }
+    assert {attempt.variant_id for attempt in observation.ocr_invocation.attempts} == {"full_page"}
     assert all(attempt.qualifies_as_fresh_physical_inference for attempt in observation.ocr_invocation.attempts)
 
 

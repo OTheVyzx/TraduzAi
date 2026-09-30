@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import json
+from pathlib import Path
 
 import pytest
 
-from ownership.consensus_v2 import independent_origins, select_consensus_observation
+from ownership.consensus_v2 import independent_origins, select_consensus_observation, select_ordered_consensus_body, select_ordered_consensus_body_with_decisions
 from ownership.evidence import OwnerObservationCollisionError, merge_observation_strict
 from ownership.hash_contract import sha256_text
 from ownership.model import (
@@ -100,6 +102,87 @@ def test_wrappers_from_one_ocr_invocation_count_as_one_consensus_vote() -> None:
     assert independent_origins(observations[:3]) == frozenset({"infer-stale"})
     selected = select_consensus_observation(observations)
     assert selected.text == "CURRENT ENGLISH BODY"
+
+
+def test_overlapping_compatible_readings_from_one_invocation_are_not_repeated() -> None:
+    full = _observation("WAIT, WHAT DO YOU MEAN", observation_id="full", invocation_id="scan", provider="paddle")
+    fragment = dataclasses.replace(_observation("WAIT, WHAT DO", observation_id="part", invocation_id="scan", provider="paddle"), bbox_page=(10, 20, 110, 70))
+    selected, payload = select_ordered_consensus_body(((full, fragment),))
+    assert payload == "WAIT, WHAT DO YOU MEAN"
+    assert [item.observation_id for item in selected] == ["full"]
+
+
+def test_spatially_separate_repetition_and_multiline_remain() -> None:
+    first = _observation("WAIT", observation_id="first", invocation_id="scan", provider="paddle")
+    second = dataclasses.replace(_observation("WAIT", observation_id="second", invocation_id="scan", provider="paddle"), bbox_page=(10, 100, 180, 150))
+    third = dataclasses.replace(_observation("WHAT DO", observation_id="third", invocation_id="scan", provider="paddle"), bbox_page=(10, 155, 180, 200))
+    selected, payload = select_ordered_consensus_body(((first, second, third),))
+    assert [item.observation_id for item in selected] == ["first", "second", "third"]
+    assert payload == "WAIT WAIT WHAT DO"
+
+def test_cross_invocation_spatial_repeat_is_not_a_duplicate_when_boxes_are_separate() -> None:
+    first = _observation("WAIT", observation_id="first", invocation_id="full", provider="paddle_full_page")
+    second = dataclasses.replace(
+        _observation("WAIT", observation_id="second", invocation_id="native", provider="paddle_anchored_native"),
+        bbox_page=(10, 110, 180, 160),
+    )
+    selected, payload = select_ordered_consensus_body(((first,), (second,)))
+    assert [item.observation_id for item in selected] == ["first", "second"]
+    assert payload == "WAIT WAIT"
+
+
+def test_cross_invocation_alternative_records_winner_and_reason() -> None:
+    full = _observation("WAIT, WHAT DO", observation_id="full", invocation_id="full-pass", provider="paddle_full_page")
+    native = dataclasses.replace(
+        _observation("WA!T, WHAT DO", observation_id="native", invocation_id="native-pass", provider="paddle_anchored_native", component_ids=("different-component",)),
+        bbox_page=(13, 19, 178, 69), confidence=0.99,
+    )
+    selected, payload, decisions = select_ordered_consensus_body_with_decisions(((full,), (native,)))
+    assert payload == "WAIT, WHAT DO"
+    assert [item.observation_id for item in selected] == ["full"]
+    assert decisions["native"] == {"decision": "alternate_same_physical_line", "selected_observation_id": "full"}
+
+
+def test_incompatible_readings_at_same_location_are_marked_ambiguous() -> None:
+    first = _observation("YES", observation_id="first", invocation_id="full", provider="paddle_full_page")
+    second = _observation("NO", observation_id="second", invocation_id="native", provider="paddle_anchored_native")
+    _, _, decisions = select_ordered_consensus_body_with_decisions(((first,), (second,)))
+    assert {item["decision"] for item in decisions.values()} == {
+        "selected", "ambiguous_same_physical_line"
+    }
+
+
+def test_multiline_block_alternative_does_not_duplicate_its_lines() -> None:
+    block = dataclasses.replace(
+        _observation("WAIT WHAT DO YOU", observation_id="block", invocation_id="block-pass", provider="block"),
+        bbox_page=(10, 10, 180, 90),
+    )
+    first = dataclasses.replace(
+        _observation("WAIT WHAT", observation_id="line-1", invocation_id="line-pass", provider="line"),
+        bbox_page=(20, 20, 165, 40),
+    )
+    second = dataclasses.replace(
+        _observation("DO YOU", observation_id="line-2", invocation_id="line-pass", provider="line"),
+        bbox_page=(20, 55, 165, 75),
+    )
+    selected, payload, decisions = select_ordered_consensus_body_with_decisions(((block,), (first, second)))
+    assert [item.observation_id for item in selected] == ["line-1", "line-2"]
+    assert payload == "WAIT WHAT DO YOU"
+    assert decisions["block"]["decision"] == "alternate_block_covered_by_lines"
+
+
+def test_conflicting_multiline_block_is_marked_ambiguous() -> None:
+    block = dataclasses.replace(
+        _observation("SOMETHING ELSE", observation_id="block", invocation_id="block-pass", provider="block"),
+        bbox_page=(10, 10, 180, 90),
+    )
+    lines = [
+        dataclasses.replace(_observation(text, observation_id=f"line-{index}", invocation_id="line-pass", provider="line"), bbox_page=box)
+        for index, (text, box) in enumerate((("WAIT WHAT", (20, 20, 165, 40)), ("DO YOU", (20, 55, 165, 75))), 1)
+    ]
+    selected, _, decisions = select_ordered_consensus_body_with_decisions(((block,), tuple(lines)))
+    assert [item.observation_id for item in selected] == ["line-1", "line-2"]
+    assert decisions["block"]["decision"] == "ambiguous_block_line_overlap"
 
 
 def test_previous_page_hash_is_rejected_before_consensus() -> None:

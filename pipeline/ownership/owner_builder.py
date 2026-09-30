@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from .consensus_v2 import (
     independent_origins,
     select_consensus_observation,
-    select_ordered_consensus_body,
+    select_ordered_consensus_body_with_decisions,
 )
 from .coverage import CoverageEntry, CoverageInvariantError, PageCoverageResult
 from .evidence import merge_observation_strict
@@ -36,6 +36,9 @@ _AUDITED_PRESERVE_POLICY_IDS = frozenset(
         "ocr_empty_near_uniform_false_glyph",
         "ocr_empty_tiny_isolated_false_glyph",
         "ocr_empty_uncorroborated_glyph_scan",
+        "ocr_empty_small_corroborated_sfx",
+        "scanlation_credit_art",
+        "scanlation_apparatus",
     }
 )
 
@@ -167,6 +170,27 @@ def _entry_page_order(entry: CoverageEntry) -> tuple[int, int, int, int, str]:
     return (y1, x1, y2, x2, entry.component_id)
 
 
+def _weak_container_neighbours(left: CoverageEntry, right: CoverageEntry) -> bool:
+    """Return whether two components are locally supported as one weak container."""
+    ax1, ay1, ax2, ay2 = left.bbox_page
+    bx1, by1, bx2, by2 = right.bbox_page
+    left_width, left_height = ax2 - ax1, ay2 - ay1
+    right_width, right_height = bx2 - bx1, by2 - by1
+    x_overlap = max(0, min(ax2, bx2) - max(ax1, bx1))
+    y_overlap = max(0, min(ay2, by2) - max(ay1, by1))
+    x_gap = max(0, max(ax1, bx1) - min(ax2, bx2))
+    y_gap = max(0, max(ay1, by1) - min(ay2, by2))
+    same_line = (
+        y_overlap >= 0.40 * min(left_height, right_height)
+        and x_gap <= 2.0 * max(left_height, right_height)
+    )
+    stacked_lines = (
+        x_overlap >= 0.15 * min(left_width, right_width)
+        and y_gap <= max(8.0, 1.35 * min(left_height, right_height))
+    )
+    return bool(same_line or stacked_lines)
+
+
 def _semantic_role(entries: Sequence[CoverageEntry]) -> str:
     roles = tuple(
         dict.fromkeys(
@@ -178,6 +202,35 @@ def _semantic_role(entries: Sequence[CoverageEntry]) -> str:
     if any("dialogue" in role for role in roles):
         return "dialogue_body"
     return roles[0] if len(roles) == 1 else "dialogue_body"
+
+
+def _is_scanlation_credit_page(observations: Sequence[TextObservation]) -> bool:
+    """Recognize page-level scan credits without matching ordinary dialogue."""
+
+    compact_texts = tuple(
+        "".join(character for character in str(item.text).casefold() if character.isalnum())
+        for item in observations
+        if float(item.confidence) >= 0.60
+    )
+    strong_marker = any(
+        any(marker in text for marker in ("wescanlate", "scanspresents", "nonstopscans"))
+        for text in compact_texts
+    )
+    weak_families = {
+        family
+        for family, markers in (
+            ("discord", ("joinourdiscord", "discordcominvite")),
+            ("patreon", ("patreon",)),
+            ("support", ("supportourwork", "supportusat", "donatetous")),
+            ("contact", ("contactus",)),
+            ("recruiting", ("scansisrecruiting", "translatorsopen")),
+        )
+        if any(marker in text for text in compact_texts for marker in markers)
+    }
+    return bool(
+        strong_marker
+        or len(weak_families) >= 3
+    )
 
 
 def _owner_id(
@@ -216,13 +269,30 @@ def _group_material_entries(
         if left_root != right_root:
             parents[max(left_root, right_root)] = min(left_root, right_root)
 
-    by_container: dict[str, int] = {}
+    by_container: dict[str, list[int]] = {}
     by_observation: dict[str, int] = {}
     for index, entry in enumerate(ordered):
         container_id = str(entry.container_id or "")
         if container_id:
-            previous = by_container.setdefault(container_id, index)
-            union(previous, index)
+            previous_indices = by_container.setdefault(container_id, [])
+            if container_id.startswith("full_page_visual_container_group:"):
+                roots: dict[int, list[int]] = {}
+                for previous in previous_indices:
+                    roots.setdefault(find(previous), []).append(previous)
+                matching_roots = [
+                    root
+                    for root, members in roots.items()
+                    if all(
+                        _weak_container_neighbours(entry, ordered[member])
+                        for member in members
+                    )
+                ]
+                if len(matching_roots) == 1:
+                    root_members = roots[matching_roots[0]]
+                    union(root_members[0], index)
+            elif previous_indices:
+                union(previous_indices[0], index)
+            previous_indices.append(index)
         for observation_id in entry.observation_ids:
             previous = by_observation.setdefault(observation_id, index)
             union(previous, index)
@@ -266,10 +336,15 @@ def build_owner_page_graph_from_coverage(
         observation.observation_id: observation
         for observation in coverage.observations
     }
+    scanlation_credit_page = _is_scanlation_credit_page(coverage.observations)
     material_entries: list[CoverageEntry] = []
     preserved_entries: list[CoverageEntry] = []
+    uncertain_entries: list[CoverageEntry] = []
     for entry in coverage.entries:
-        if entry.state == "explicit_non_dialogue_preserve":
+        if entry.materiality == "uncertain":
+            uncertain_entries.append(entry)
+            continue
+        if entry.state == "explicit_non_dialogue_preserve" or scanlation_credit_page:
             preserved_entries.append(entry)
             continue
         if entry.materiality != "material":
@@ -307,7 +382,22 @@ def build_owner_page_graph_from_coverage(
             observation_groups.append(candidates)
             all_observation_ids.extend(item.observation_id for item in candidates)
 
-        selected, source_payload = select_ordered_consensus_body(observation_groups)
+        selected, source_payload, selection_decisions = (
+            select_ordered_consensus_body_with_decisions(observation_groups)
+        )
+        ambiguous_observations = sorted(
+            observation_id
+            for observation_id, decision in selection_decisions.items()
+            if decision.get("decision") in {
+                "ambiguous_block_line_overlap",
+                "ambiguous_same_physical_line",
+            }
+        )
+        if ambiguous_observations:
+            raise CoverageInvariantError(
+                "competing_ocr_readings_require_review: "
+                + ", ".join(ambiguous_observations)
+            )
         owner_id = _owner_id(coverage, entries, container_id=container_id)
         component_ids = [entry.component_id for entry in entries]
         owner = TextOwner(
@@ -336,7 +426,10 @@ def build_owner_page_graph_from_coverage(
         )
 
     for entry in sorted(preserved_entries, key=_entry_page_order):
-        policy = str(entry.preserve_policy or "")
+        policy = str(
+            entry.preserve_policy
+            or ("policy:scanlation_apparatus" if scanlation_credit_page else "")
+        )
         if not policy.startswith("policy:"):
             raise CoverageInvariantError(
                 f"preserved component lacks explicit policy: {entry.component_id}"
@@ -378,6 +471,35 @@ def build_owner_page_graph_from_coverage(
                 policy_evidence_ids=evidence_ids,
                 policy_reason=(
                     f"explicit non-dialogue preservation authorized by {policy}"
+                ),
+            )
+        )
+
+    for entry in sorted(uncertain_entries, key=_entry_page_order):
+        component = next(
+            item for item in coverage.components if item.component_id == entry.component_id
+        )
+        evidence_ids = tuple(
+            dict.fromkeys(
+                (*component.evidence_ids, *entry.ocr_attempt_ids,
+                 *entry.protection_evidence_ids)
+            )
+        )
+        if not evidence_ids or entry.state != "review_required":
+            raise CoverageInvariantError(
+                f"uncertain component lacks review evidence: {entry.component_id}"
+            )
+        dispositions.append(
+            ComponentDisposition(
+                component_id=entry.component_id,
+                decision="uncertain",
+                reason="coverage:empty_uncorroborated_primary_candidate",
+                policy_id="coverage_ambiguous_candidate",
+                policy_bbox_page=entry.bbox_page,
+                policy_evidence_ids=evidence_ids,
+                policy_reason=(
+                    "Coverage OCR empty; primary visual hypothesis lacks independent "
+                    "glyph or script corroboration; human review required"
                 ),
             )
         )

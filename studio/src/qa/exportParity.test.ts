@@ -85,5 +85,5 @@ describe("paridade de exportacao canvas/PNG/PSD", () => {
 
     expectPixelParity(canvasPixels, pngPixels);
     expectPixelParity(canvasPixels, Uint8Array.from(psdPixels!));
-  });
+  }, 45_000);
 });

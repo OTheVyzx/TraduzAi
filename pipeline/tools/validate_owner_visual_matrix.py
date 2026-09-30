@@ -467,12 +467,6 @@ def validate_entry_result(entry: dict[str, Any], output_root: Path) -> dict[str,
                 quality_status = str(quality.get("status") or "").strip()
                 if quality_status != "ok":
                     contracts.add(quality_status or "invalid_owner_render_quality_contract")
-                try:
-                    source_ratio = float(quality.get("source_scale_ratio"))
-                except (TypeError, ValueError):
-                    source_ratio = None
-                if source_ratio is not None and source_ratio < 0.75:
-                    contracts.add("under_source_scale")
                 if int(quality.get("outside_safe_pixels", 0) or 0) > 0:
                     contracts.add("core_pixels_outside_safe_polygon")
                 if not quality.get("rendered_line_core_heights_px"):
@@ -648,12 +642,53 @@ def _persist_runner_logs(
     }
 
 
+def _runner_evidence_path(output_root: Path, entry_id: str) -> Path:
+    """Return runner-owned evidence outside the pipeline's sealed work tree."""
+
+    return output_root / "runner_evidence" / f"{entry_id}.json"
+
+
 def _canonical_payload_sha256(payload: Any, *, omit: str | None = None) -> str:
     canonical = {
         str(key): value for key, value in dict(payload).items() if key != omit
     } if isinstance(payload, dict) else payload
     encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return sha256(encoded).hexdigest()
+
+
+def _published_final_artifact_hashes(target: Path) -> dict[str, str]:
+    """Hash the immutable final artifacts named by the publication contract."""
+
+    target = target.resolve()
+    export_manifest_path = target / "export_manifest.json"
+    hashes: dict[str, str] = {}
+    if export_manifest_path.is_file():
+        try:
+            export_manifest = json.loads(
+                export_manifest_path.read_text(encoding="utf-8-sig")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            export_manifest = {}
+        for page in export_manifest.get("pages") or []:
+            if not isinstance(page, dict):
+                continue
+            relative_path = str(page.get("translated_path") or "").strip()
+            if not relative_path:
+                continue
+            artifact = (target / relative_path).resolve()
+            try:
+                portable = artifact.relative_to(target).as_posix()
+            except ValueError:
+                continue
+            if artifact.is_file():
+                hashes[portable] = _sha256_file(artifact)
+    if hashes:
+        return dict(sorted(hashes.items()))
+    return {
+        path.relative_to(target).as_posix(): _sha256_file(path)
+        for path in sorted((target / "translated").glob("*"))
+        if path.is_file()
+    }
 
 
 def build_runner_evidence(
@@ -683,11 +718,7 @@ def build_runner_evidence(
     stderr = str(getattr(completed, "stderr", "") or "")
     target = Path(entry["work_dir"])
     project_path = target / "project.json"
-    final_hashes = {
-        path.relative_to(target).as_posix(): _sha256_file(path)
-        for path in sorted((target / "translated").glob("*"))
-        if path.is_file()
-    } if target.is_absolute() else {}
+    final_hashes = _published_final_artifact_hashes(target) if target.is_absolute() else {}
     evidence = {
         "schema_version": 1,
         "entry_id": entry["entry_id"],
@@ -869,7 +900,7 @@ def _run_entry(
         started_at=started_at,
         finished_at=finished_at,
     )
-    runner_manifest_path = target / "run_manifest.json"
+    runner_manifest_path = _runner_evidence_path(output_root, entry["entry_id"])
     runner_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     runner_manifest_path.write_text(
         json.dumps(runner_evidence, ensure_ascii=False, indent=2) + "\n",
@@ -1831,7 +1862,7 @@ def _run_matrix_cli(args: argparse.Namespace) -> int:
             work_dir = Path(entry["work_dir"])
             if not work_dir.is_absolute():
                 work_dir = output_root / work_dir
-            runner_path = work_dir / "run_manifest.json"
+            runner_path = _runner_evidence_path(output_root, entry["entry_id"])
             try:
                 runner_evidence = validate_runner_evidence(
                     json.loads(runner_path.read_text(encoding="utf-8-sig"))

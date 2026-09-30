@@ -37,6 +37,14 @@ def test_unchanged_english_dialogue_is_not_valid_pt_br() -> None:
     assert verdict.reason == "unchanged_source_dialogue"
 
 
+def test_unchanged_short_interjection_needs_an_explicit_preservation_policy() -> None:
+    verdict = validate_target_language(
+        source="Hup!", target="Hup!", role="dialogue_body", explicit_entities=(),
+    )
+    assert not verdict.accepted
+    assert verdict.reason == "unchanged_source_dialogue"
+
+
 def test_mostly_english_target_requests_next_backend() -> None:
     verdict = validate_target_language(
         source="THE ARENA WILL BEGIN",
