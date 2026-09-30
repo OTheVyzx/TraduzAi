@@ -1467,6 +1467,32 @@ class BandToPageDictTests(unittest.TestCase):
         self.assertEqual(block["bubble_mask_source"], "image_white_bubble_mask")
         self.assertEqual(region["bubble_mask_source"], "image_white_bubble_mask")
 
+    def test_band_to_page_dict_keeps_valid_detector_mask_and_provenance(self):
+        from strip.process_bands import _band_to_page_dict
+        from strip.types import Band, Balloon, BBox
+        import cv2
+        import numpy as np
+
+        image = np.full((100, 160, 3), 32, dtype=np.uint8)
+        detector_crop = np.zeros((60, 100), dtype=np.uint8)
+        cv2.ellipse(detector_crop, (50, 30), (43, 23), 0, 0, 360, 255, -1)
+        band = Band(
+            y_top=300,
+            y_bottom=400,
+            balloons=[Balloon(strip_bbox=BBox(20, 310, 120, 370), confidence=0.92, mask=detector_crop)],
+            strip_slice=image,
+            original_slice=image.copy(),
+        )
+
+        page = _band_to_page_dict(band, page_idx=0, source_page_number=1)
+        block = page["_vision_blocks"][0]
+        assert block["bubble_mask_source"] == "real_bubble_mask"
+        assert block["bubble_mask_provenance"] == "detector"
+        assert "bubble_mask_error" not in block
+        assert block["bubble_mask"].shape == image.shape[:2]
+        assert int(block["bubble_mask"][40, 70]) == 255
+        assert int(block["bubble_mask"][0, 0]) == 0
+
     def test_attach_real_bubble_mask_does_not_promote_unsourced_existing_mask(self):
         from strip.process_bands import _attach_real_bubble_mask_to_block
         import numpy as np

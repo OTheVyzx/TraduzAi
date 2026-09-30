@@ -71,7 +71,6 @@ FAST_FILL_MASK_EVIDENCE_KINDS = {
     "sfx_glyph_mask",
     "component_bubble_cleaner",
     "verified_rect_sign",
-    "component_bubble_cleaner",
 }
 DIALOGUE_MASK_CONTENT_CLASSES = {
     "dialogue",
