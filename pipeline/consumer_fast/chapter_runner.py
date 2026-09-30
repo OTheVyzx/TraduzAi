@@ -62,7 +62,7 @@ def _git_value(worktree: Path, *args: str) -> str:
             text=True,
             encoding="utf-8",
             errors="strict",
-        ).strip()
+        ).rstrip()
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ConsumerFastPreflightError(f"identidade Git indisponível: {exc}") from exc
 
@@ -96,6 +96,7 @@ def build_preflight(config: dict[str, Any], *, pipeline_root: Path | None = None
 
     module_names = (
         "consumer_fast_core",
+        "main",
         "consumer_operational_recovery",
         "consumer_operational_publish",
         "consumer_fast_project",
@@ -103,7 +104,17 @@ def build_preflight(config: dict[str, Any], *, pipeline_root: Path | None = None
         "integration_v1.providers",
         "vision_runtime.analysis_payload",
         "typesetter.renderer",
+        "typesetter.recipe_contract",
         "consumer_fast.provider_adapter",
+        "consumer_fast.physical_executor",
+        "extractor.extractor",
+        "inpainter",
+        "ownership.chapter_contract",
+        "strip.run",
+        "vision_stack.runtime",
+        "vision_stack.engine_presets",
+        "project_writer",
+        "qa.export_gate",
     )
     resolved_modules: list[dict[str, Any]] = []
     for name in module_names:
@@ -306,12 +317,10 @@ def _emit_json(event: dict[str, Any]) -> None:
 
 
 def _physical_pipeline(config_path: Path) -> Path:
-    """Run the declared physical V1 stage in-process; never select a fallback executable."""
-    import main as physical_runtime
+    """Run Consumer Fast's explicit physical executor; there is no general-pipeline fallback."""
+    from consumer_fast.physical_executor import execute_config
 
-    physical_runtime._run_pipeline(str(config_path))
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    return Path(config["work_dir"]) / "project.json"
+    return execute_config(config_path)
 
 
 def run_chapter(
@@ -335,6 +344,13 @@ def run_chapter(
     atomic_json(config_file, config)
     project_path = Path((physical_executor or _physical_pipeline)(config_file)).resolve()
     result = finalize_project(project_path, preflight)
+    physical_evidence = project_path.parent / "consumer_fast_physical_execution.json"
+    if physical_evidence.is_file():
+        from project_writer import validate_project_consistency
+
+        validate_project_consistency(json.loads(project_path.read_text(encoding="utf-8")))
+        result["physical_execution"] = json.loads(physical_evidence.read_text(encoding="utf-8"))
+        result["physical_execution"]["project_sha256_terminal"] = result["project_sha256"]
     receipt_path = work_dir / "consumer_fast_v1_receipt.json"
     result["receipt_path"] = str(receipt_path)
     atomic_json(receipt_path, result)

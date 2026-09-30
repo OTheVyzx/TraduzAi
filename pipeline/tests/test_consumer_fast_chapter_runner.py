@@ -198,6 +198,46 @@ def test_runner_executes_explicit_physical_stage_then_publishes_receipt(tmp_path
     assert events[-1]["runtime_id"] == "consumer-fast-v1"
 
 
+def test_default_physical_executor_never_delegates_to_general_pipeline(monkeypatch) -> None:
+    import inspect
+    import sys
+    from types import SimpleNamespace
+
+    from consumer_fast import physical_executor
+    from consumer_fast.chapter_runner import _physical_pipeline
+
+    source = inspect.getsource(_physical_pipeline)
+
+    assert "_run_pipeline" not in source
+    assert "consumer_fast.physical_executor" in source
+
+    expected = Path("direct-consumer-fast-project.json")
+    calls: list[Path] = []
+    monkeypatch.setattr(physical_executor, "execute_config", lambda path: calls.append(path) or expected)
+    forbidden_calls: list[str] = []
+    monkeypatch.setitem(
+        sys.modules,
+        "main",
+        SimpleNamespace(_run_pipeline=lambda *_args: forbidden_calls.append("legacy")),
+    )
+    assert _physical_pipeline(Path("config.json")) == expected
+    assert calls == [Path("config.json")]
+    assert forbidden_calls == []
+
+
+def test_physical_executor_honors_explicit_inpaint_skip_without_mutating_pixels() -> None:
+    from consumer_fast.physical_executor import _build_inpainter
+
+    source_pixels = [1, 2, 3]
+    page: dict = {}
+    result = _build_inpainter({"skip_inpaint": True}).inpaint_band_image(source_pixels, page)
+
+    assert result == source_pixels
+    assert result is not source_pixels
+    assert page["_skip_inpaint_honored"] is True
+    assert page["_strip_used_real_inpaint"] is False
+
+
 def test_consumer_fast_provider_adapter_disables_page_fallback_without_changing_retry_policy() -> None:
     from consumer_fast import provider_adapter
 
