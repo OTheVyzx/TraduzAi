@@ -851,6 +851,34 @@ def test_atomic_rejection_revokes_all_owner_write_authority():
     assert reviewed.validate() == ()
 
 
+def test_atomic_rejection_retires_owner_from_enforced_graph_for_review():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import _transition_owner_to_review
+
+    graph = _graph(state="owned")
+    owner = graph.owners[0]
+    owner_id = owner.owner_id
+    component_id = owner.component_ids[0]
+
+    reviewed = _transition_owner_to_review(
+        graph,
+        owner_id,
+        enforce_graph=True,
+    )
+
+    assert reviewed.owners == []
+    assert reviewed.projections == []
+    disposition = reviewed.component_dispositions[0]
+    assert disposition.component_id == component_id
+    assert disposition.decision == "uncertain"
+    assert disposition.owner_id is None
+    assert disposition.policy_id == "coverage_ambiguous_candidate"
+    assert disposition.policy_bbox_page == reviewed.components[0].bbox_page
+    assert disposition.policy_evidence_ids
+    assert "preserved" in disposition.policy_reason
+    reviewed.require_valid(mode="enforce")
+
+
 def test_owner_layout_safe_polygon_uses_raster_coordinates_at_page_edges():
     from test_final_pixel_qa import _graph
     from strip.process_bands import _owner_layout_regions

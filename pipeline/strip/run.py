@@ -8313,8 +8313,13 @@ def _run_chapter_impl(
                     owner_page_results_by_page[page_id] = page_result
                     owner_page_executions_by_page[page_id] = execution
                     owner_graphs[page_id] = page_result.owner_graph.read()
+                    page_text_layers = (
+                        page_result.text_layers_view.read().get("texts", [])
+                        if page_result.text_layers_view is not None
+                        else execution.records
+                    )
                     owner_execution_records_by_page[page_id] = [
-                        copy.deepcopy(record) for record in execution.records
+                        copy.deepcopy(record) for record in page_text_layers
                     ]
                     page_space_owner_commits.extend(execution.commits)
         overlap_executor = (

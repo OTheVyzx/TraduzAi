@@ -725,15 +725,27 @@ def log_editor_action(phase: str, action: str, **fields):
         pass
 
 
+class PipelineCancelled(RuntimeError):
+    """Raised at a cooperative boundary after the active job is cancelled."""
+
+
 def wait_if_paused(config: dict):
-    """Block cooperatively while the Tauri pause marker exists."""
+    """Block cooperatively while paused and fail at a cancellation boundary."""
+    cancel_file = config.get("cancel_file")
+    cancel_path = Path(cancel_file) if cancel_file else None
+    if cancel_path is not None and cancel_path.exists():
+        raise PipelineCancelled("pipeline_cancelled")
     pause_file = config.get("pause_file")
     if not pause_file:
         return
 
     pause_path = Path(pause_file)
     while pause_path.exists():
+        if cancel_path is not None and cancel_path.exists():
+            raise PipelineCancelled("pipeline_cancelled")
         time.sleep(0.25)
+    if cancel_path is not None and cancel_path.exists():
+        raise PipelineCancelled("pipeline_cancelled")
 
 
 def _parse_runner_cli_args(args: list[str]) -> dict:
@@ -10017,6 +10029,23 @@ def _build_connected_reasoner_config(config: dict, *, ollama_status: dict | None
     return result
 
 
+def _resolve_chapter_translation_provider(config: dict):
+    if config.get("runtime_id") == "consumer-fast-v1":
+        plan = config.get("consumer_fast_execution_plan") or {}
+        if (
+            plan.get("schema") != "traduzai.consumer-fast-plan.v1"
+            or config.get("translation_provider_policy") != "consumer-fast-bounded-owner-v1"
+            or config.get("legacy_translation_fallback_allowed") is not False
+        ):
+            raise ValueError("Consumer Fast execution plan/provider binding is incomplete")
+        from consumer_fast import provider_adapter
+
+        return provider_adapter
+    from translator import translate
+
+    return translate
+
+
 def _run_pipeline(
     config_path: str,
     *,
@@ -10139,7 +10168,7 @@ def _run_pipeline(
             run_final_pixel_ocr_probe,
             run_ocr_stage,
         )
-        from translator import translate as translator_mod
+        translator_mod = _resolve_chapter_translation_provider(config)
         from inpainter import inpaint_band_image
         from typesetter import renderer as typesetter_mod
         from translator.context import fetch_context, merge_context
@@ -10320,6 +10349,7 @@ def _run_pipeline(
                 )
         
         def progress_cb(stage, current, total, message=""):
+            wait_if_paused(config)
             # Mapeamento de estágios para o progresso global (Tauri UI)
             p = current / max(1, total)
             if stage == "concat":
@@ -18051,7 +18081,13 @@ def _build_cli_help() -> str:
 
 if __name__ == "__main__":
     try:
-        main()
+        if len(sys.argv) >= 2 and sys.argv[1] == "--consumer-fast-v1":
+            from consumer_fast.chapter_runner import run_chapter
+            if len(sys.argv) != 3:
+                raise ValueError("uso: traduzai-pipeline --consumer-fast-v1 <config.json>")
+            run_chapter(Path(sys.argv[2]))
+        else:
+            main()
     except Exception as e:
         import traceback
         tb = traceback.format_exc()

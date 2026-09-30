@@ -22,6 +22,9 @@ static PIPELINE_CANCEL: once_cell::sync::Lazy<Mutex<bool>> =
 static PIPELINE_PAUSE_MARKER: once_cell::sync::Lazy<Mutex<Option<std::path::PathBuf>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(None));
 #[allow(dead_code)]
+static PIPELINE_CANCEL_MARKER: once_cell::sync::Lazy<Mutex<Option<std::path::PathBuf>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
+#[allow(dead_code)]
 static VISUAL_WARMUP_STATE: once_cell::sync::Lazy<Mutex<VisualWarmupState>> =
     once_cell::sync::Lazy::new(|| Mutex::new(VisualWarmupState::Idle));
 #[allow(dead_code)]
@@ -59,6 +62,16 @@ async fn clear_current_pause_marker(path: &std::path::Path) {
     let mut current = PIPELINE_PAUSE_MARKER.lock().await;
     if current.as_deref() == Some(path) {
         set_pause_marker(path, false).ok();
+        *current = None;
+    }
+}
+
+async fn clear_current_cancel_marker(path: &std::path::Path) {
+    let mut current = PIPELINE_CANCEL_MARKER.lock().await;
+    if current.as_deref() == Some(path) {
+        if path.exists() {
+            std::fs::remove_file(path).ok();
+        }
         *current = None;
     }
 }
@@ -511,12 +524,20 @@ pub async fn start_pipeline(
 
     let pause_path = work_dir.join("pipeline.pause");
     set_pause_marker(&pause_path, false)?;
+    let cancel_path = work_dir.join("pipeline.cancel");
+    if cancel_path.exists() {
+        std::fs::remove_file(&cancel_path).map_err(|e| e.to_string())?;
+    }
     {
         let mut cur = PIPELINE_PAUSE_MARKER.lock().await;
         if let Some(p) = cur.take() {
             set_pause_marker(&p, false).ok();
         }
         *cur = Some(pause_path.clone());
+    }
+    {
+        let mut cur = PIPELINE_CANCEL_MARKER.lock().await;
+        *cur = Some(cancel_path.clone());
     }
 
     let worker_path = get_vision_worker_path(&app).unwrap_or_default();
@@ -538,7 +559,8 @@ pub async fn start_pipeline(
         "preset": config.preset,
         "models_dir": storage_paths.models.to_string_lossy(),
         "logs_dir": storage_paths.logs.to_string_lossy(),
-        "vision_worker_path": worker_path, "pause_file": pause_path.to_string_lossy()
+        "vision_worker_path": worker_path, "pause_file": pause_path.to_string_lossy(),
+        "cancel_file": cancel_path.to_string_lossy()
     })).map_err(|e| e.to_string())?;
 
     let config_file = work_dir.join("pipeline_config.json");
@@ -548,6 +570,7 @@ pub async fn start_pipeline(
     let app_c = app.clone();
     let job_c = job_id.clone();
     let pause_c = pause_path.clone();
+    let cancel_c = cancel_path.clone();
     let work_dir_c = work_dir.clone();
     let use_fast_worker = persistent_pipeline_worker_enabled();
 
@@ -558,6 +581,7 @@ pub async fn start_pipeline(
             run_sidecar(&app_c, &sidecar, &config_file).await
         };
         clear_current_pause_marker(&pause_c).await;
+        clear_current_cancel_marker(&cancel_c).await;
         match res {
             Ok(out) => {
                 let summary_dir = if out.trim().is_empty() {
@@ -896,9 +920,49 @@ async fn run_pipeline_with_fast_worker(
     }
 }
 
+pub(crate) async fn run_pipeline_config_file(
+    app: &AppHandle,
+    config_path: &std::path::Path,
+) -> Result<String, String> {
+    let sidecar = get_sidecar_info(app)?;
+    if persistent_pipeline_worker_enabled() {
+        run_pipeline_with_fast_worker(app, config_path).await
+    } else {
+        run_sidecar(app, &sidecar, config_path).await
+    }
+}
+
+pub(crate) async fn run_consumer_fast_config_file(
+    app: &AppHandle,
+    config_path: &std::path::Path,
+) -> Result<String, String> {
+    let mut sidecar = get_sidecar_info(app)?;
+    if cfg!(debug_assertions) {
+        let script = std::path::Path::new(
+            sidecar
+                .script
+                .as_deref()
+                .ok_or_else(|| "script Python do pipeline não resolvido".to_string())?,
+        )
+        .parent()
+        .ok_or_else(|| "raiz do pipeline não resolvida".to_string())?
+        .join("consumer_fast/chapter_runner.py");
+        sidecar.script = Some(script.to_string_lossy().to_string());
+    } else {
+        sidecar.script = Some("--consumer-fast-v1".to_string());
+    }
+    run_sidecar(app, &sidecar, config_path).await
+}
+
 #[tauri::command]
 pub async fn cancel_pipeline() -> Result<(), String> {
     *PIPELINE_CANCEL.lock().await = true;
+    if let Some(path) = PIPELINE_CANCEL_MARKER.lock().await.clone() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(path, "cancelled").map_err(|e| e.to_string())?;
+    }
     if let Some(path) = PIPELINE_PAUSE_MARKER.lock().await.take() {
         set_pause_marker(&path, false)?;
     }

@@ -399,12 +399,60 @@ except ImportError:  # pragma: no cover - supports package imports
     from ..runtime_profiles import ROTATED_TEXT_POLICY
 
 
+_PROJECT_FONT_ROOT = Path(__file__).resolve().parents[2] / "fonts"
+_CONFIGURED_FONT_ROOT = os.environ.get("TRADUZAI_FONT_ROOT")
 FONT_DIRS = [
-    Path(__file__).parent.parent.parent / "fonts",
+    _PROJECT_FONT_ROOT,
+    *([Path(_CONFIGURED_FONT_ROOT).expanduser()] if _CONFIGURED_FONT_ROOT else []),
     Path.home() / ".traduzai" / "fonts",
     Path.home() / ".mangatl" / "fonts",  # legado
     Path("/usr/share/fonts"),
 ]
+
+
+@lru_cache(maxsize=8)
+def _load_quality_closed_font_map(map_path: str, map_sha256: str):
+    from typesetter.font_policy import ClosedFontMap
+    del map_sha256
+    path = Path(map_path)
+    font_root = Path(_CONFIGURED_FONT_ROOT).expanduser() if _CONFIGURED_FONT_ROOT else _PROJECT_FONT_ROOT
+    return ClosedFontMap.load(font_root, path)
+
+
+def _quality_closed_font_map():
+    path = Path(os.environ.get("TRADUZAI_QUALITY_FONT_MAP") or
+                str(Path(__file__).with_name("font-map.closed.json"))).resolve()
+    return _load_quality_closed_font_map(str(path), sha256(path.read_bytes()).hexdigest())
+
+
+def _quality_closed_fonts_enabled() -> bool:
+    return os.environ.get("TRADUZAI_QUALITY_CLOSED_FONTS") == "1"
+
+
+def _quality_baseline_profile(text_data: dict, estilo: Mapping[str, Any]) -> str:
+    """Bind optional compact leading to a versioned text and effect policy."""
+    record = text_data.get("baseline_policy_v1")
+    if record is None:
+        return "standard"
+    if not isinstance(record, Mapping) or record.get("schema") != "quality_baseline_policy_v1":
+        raise ValueError("invalid baseline policy record")
+    path = Path(__file__).with_name("baseline-policy.json")
+    if record.get("policy_sha256") != sha256(path.read_bytes()).hexdigest():
+        raise ValueError("baseline policy changed since recipe creation")
+    target = str(text_data.get("translated_payload") or text_data.get("translated")
+                 or text_data.get("traduzido") or "")
+    digest = sha256(unicodedata.normalize("NFC", target).encode("utf-8")).hexdigest()
+    if record.get("text_sha256") != digest:
+        raise ValueError("baseline policy target changed since recipe creation")
+    profile = str(record.get("profile") or "")
+    if profile not in {"standard", "compact_5_unadorned"}:
+        raise ValueError("unknown baseline profile")
+    if profile == "compact_5_unadorned" and (
+        (bool(estilo.get("contorno")) and int(estilo.get("contorno_px", 0) or 0) > 0)
+        or bool(estilo.get("sombra")) or bool(estilo.get("glow"))
+    ):
+        raise ValueError("compact baseline requires no outline, shadow or glow")
+    return profile
 
 DEFAULT_FONTS = {
     "fala":      "ComicNeue-Bold.ttf",
@@ -1017,7 +1065,7 @@ def _apply_false_dark_white_neutral_style(text_data: dict) -> None:
     text_data["qa_flags"] = flags
 
 
-def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> None:
+def _apply_auto_style_policy_pre_font(img: Image.Image, text_data: dict) -> None:
     profile = text_data.get("visual_profile_v2")
     intent = text_data.get("style_resolved_intent_v1")
     if isinstance(profile, Mapping) and isinstance(intent, Mapping):
@@ -1086,6 +1134,34 @@ def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> Non
     _apply_visual_card_font_fallback(text_data, background_rgb)
     _apply_original_dark_panel_effect_colors(text_data)
 
+def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> None:
+    _apply_auto_style_policy_pre_font(img, text_data)
+    if not _quality_closed_fonts_enabled():
+        return
+    if str(text_data.get("style_origin") or "").lower() in {"manual", "user_override"}:
+        return
+    from typesetter.font_policy import decide, validate_decision
+
+    target = str(text_data.get("translated_payload") or text_data.get("translated")
+                 or text_data.get("traduzido") or "")
+    capture = text_data.get("owner_style_capture")
+    evidence = text_data.get("font_match_evidence")
+    if not isinstance(evidence, Mapping) and isinstance(capture, Mapping):
+        evidence = capture.get("font_match_evidence")
+    prior_decision = text_data.get("font_policy_v1")
+    decision = (validate_decision(_quality_closed_font_map(), target, prior_decision)
+                if isinstance(prior_decision, Mapping)
+                else decide(_quality_closed_font_map(), target,
+                            evidence if isinstance(evidence, Mapping) else None))
+    prior = str((text_data.get("estilo") or {}).get("fonte") or "")
+    text_data["font_policy_previous_recipe_font"] = prior or None
+    for key in ("estilo", "style", "visual_profile"):
+        style = text_data.get(key)
+        if isinstance(style, Mapping):
+            text_data[key] = {**style, "fonte": decision["selected"]}
+    text_data["font_policy_v1"] = decision
+
+
 SAFE_PATH_FORCE_KEYWORDS = (
     "newrotic",
     "wildwords",
@@ -1106,6 +1182,8 @@ def _get_ft2_font(font_path: str) -> _FT2Font:
         try:
             _ft2_cache[font_path] = _FT2Font(font_path)
         except Exception:
+            if _quality_closed_fonts_enabled():
+                raise
             # Fallback para ComicNeue-Bold.ttf se a fonte falhar ao carregar
             if "ComicNeue-Bold.ttf" not in font_path:
                 for font_dir in FONT_DIRS:
@@ -1144,11 +1222,11 @@ class SafeTextPathFont:
         return bbox
 
     def get_metrics(self) -> tuple[int, int]:
-        """Retorna (ascent, line_height) baseados no arquivo da fonte."""
+        """Return pixel metrics; FT2 ascender/descender are in font units."""
         ft2 = _get_ft2_font(str(self.font_path))
-        ft2.set_size(self.size, 72)
-        ascent = int(ft2.ascender / 64.0)
-        total_h = int((ft2.ascender - ft2.descender) / 64.0)
+        units = max(1, int(ft2.units_per_EM))
+        ascent = int(math.ceil(ft2.ascender * self.size / units))
+        total_h = int(math.ceil((ft2.ascender - ft2.descender) * self.size / units))
         return ascent, total_h
 
 
@@ -1171,6 +1249,8 @@ def _font_has_glyph(font_path: str, char: str) -> bool:
 @lru_cache(maxsize=2048)
 def _find_fallback_font_path(char: str, original_path: str) -> str | None:
     """Encontra uma fonte fallback que tenha o glyph para o caractere."""
+    if _quality_closed_fonts_enabled():
+        return None  # New revisions use a whole-block fallback before raster.
     for font_dir in FONT_DIRS:
         if not font_dir.exists():
             continue
@@ -1222,98 +1302,24 @@ def _record_rendered_font_run(
 
 
 def _render_text_with_fallback(font: SafeTextPathFont, text: str) -> np.ndarray:
-    """Renderiza texto com fallback automÃ¡tico para caracteres sem glyph na fonte principal.
+    """Legacy call name; paint one covered face on a fixed baseline cell.
 
-    Para cada caractere que nÃ£o existe na fonte principal, usa uma fonte fallback.
-    Renderiza char a char apenas quando necessÃ¡rio (quando hÃ¡ chars faltando).
+    A missing glyph requires a whole-block font decision before this stage.
+    Per-character bottom alignment is forbidden because it moves accent ink.
     """
-    font_path = str(font.font_path)
+    from typesetter.stable_baseline import rasterize
 
-    # Verificar se todos os chars existem na fonte principal
-    missing_chars = []
-    for ch in text:
-        if ch.isspace() or not ch.isprintable():
-            continue
-        if not _font_has_glyph(font_path, ch):
-            missing_chars.append(ch)
-
-    # Se nÃ£o falta nenhum, renderiza tudo de uma vez (mais rÃ¡pido)
-    if not missing_chars:
-        ft2 = _get_ft2_font(font_path)
-        ft2.set_size(font.size, 72)
-        ft2.set_text(text, 0.0)
-        ft2.draw_glyphs_to_bitmap()
-        _record_rendered_font_run(font, text, [font_path] * len(text))
-        return ft2.get_image()
-
-    # Renderiza caractere a caractere, usando fallback quando necessÃ¡rio
-    fallback_cache: dict[str, str | None] = {}
-    char_bitmaps: list[tuple[np.ndarray, int]] = []  # (bitmap, y_offset)
-    used_paths: list[str] = []
-
-    for ch in text:
-        if ch == " ":
-            # EspaÃ§o: renderiza com fonte principal para obter largura correta
-            ft2 = _get_ft2_font(font_path)
-            ft2.set_size(font.size, 72)
-            ft2.set_text(" I", 0.0)
-            ft2.draw_glyphs_to_bitmap()
-            space_bitmap = ft2.get_image()
-            ft2_single = _get_ft2_font(font_path)
-            ft2_single.set_size(font.size, 72)
-            ft2_single.set_text("I", 0.0)
-            ft2_single.draw_glyphs_to_bitmap()
-            single_bitmap = ft2_single.get_image()
-            space_w = max(1, space_bitmap.shape[1] - single_bitmap.shape[1])
-            space_img = np.zeros((max(1, int(font.size)), space_w), dtype=np.uint8)
-            char_bitmaps.append((space_img, 0))
-            used_paths.append(font_path)
-            continue
-
-        # Determinar qual fonte usar
-        use_path = font_path
-        if ch in missing_chars:
-            if ch not in fallback_cache:
-                fallback_cache[ch] = _find_fallback_font_path(ch, font_path)
-            fb = fallback_cache[ch]
-            if fb:
-                use_path = fb
-
-        # CRÃTICO: usar cache para evitar Access Violation (0xc0000005)
-        # Criar _FT2Font diretamente sem cache causava crash por alocaÃ§Ã£o
-        # excessiva de objetos FreeType na memÃ³ria do processo.
-        ft2 = _get_ft2_font(use_path)
-        ft2.set_size(font.size, 72)
-        ft2.set_text(ch, 0.0)
-        ft2.draw_glyphs_to_bitmap()
-        bmp = ft2.get_image()
-        used_paths.append(use_path)
-        if bmp.size == 0:
-            continue
-        char_bitmaps.append((bmp, 0))
-
-    if not char_bitmaps:
-        _record_rendered_font_run(font, text, used_paths)
-        return np.zeros((1, 1), dtype=np.uint8)
-
-    # Combinar todos os bitmaps lado a lado
-    max_h = max(bmp.shape[0] for bmp, _ in char_bitmaps)
-    total_w = sum(bmp.shape[1] for bmp, _ in char_bitmaps)
-    combined = np.zeros((max_h, total_w), dtype=np.uint8)
-    x_cursor = 0
-    for bmp, _ in char_bitmaps:
-        h, w = bmp.shape
-        y_off = max_h - h  # Alinhar por baixo (baseline)
-        combined[y_off:y_off + h, x_cursor:x_cursor + w] = np.maximum(
-            combined[y_off:y_off + h, x_cursor:x_cursor + w], bmp
-        )
-        x_cursor += w
-
-    _record_rendered_font_run(font, text, used_paths)
-    return combined
-
+    text = unicodedata.normalize("NFC", text)
+    missing = sorted({ch for ch in text if not ch.isspace()
+                      and not _font_has_glyph(str(font.font_path), ch)})
+    if missing:
+        raise ValueError(f"font lacks glyphs {missing!r}; select a block fallback")
+    mask = rasterize(str(font.font_path), font.size, text)
+    _record_rendered_font_run(font, text, [str(font.font_path)] * len(text))
+    return mask
 
 def _build_textpath_mask(font: SafeTextPathFont, text: str, padding: int = 0) -> np.ndarray:
+    text = unicodedata.normalize("NFC", text)
     if not text or not text.strip():
         return np.zeros((1, 1), dtype=np.uint8)
 
@@ -1323,26 +1329,10 @@ def _build_textpath_mask(font: SafeTextPathFont, text: str, padding: int = 0) ->
         return cached.copy()
 
     try:
-        # Pega a "tinta" real do texto
-        ink_bitmap = _render_text_with_fallback(font, text)
-        if ink_bitmap.size == 0 or ink_bitmap.shape[1] == 0:
-            mask = np.zeros((1, 1), dtype=np.uint8)
-        else:
-            ascent_px, total_h_px = font.get_metrics()
-            
-            # O line_height calculado deve ser no mÃ­nimo a altura da tinta
-            target_h = max(ink_bitmap.shape[0], total_h_px)
-            mask = np.zeros((target_h, ink_bitmap.shape[1]), dtype=np.uint8)
-            
-            # Alinhamento pela baseline: a tinta deve subir a partir da baseline.
-            # Centralizamos a "tinta" na cÃ©lula da linha para Leading estÃ¡vel.
-            y_off = (target_h - ink_bitmap.shape[0]) // 2
-            y_off = max(0, min(y_off, target_h - ink_bitmap.shape[0]))
-            
-            mask[y_off:y_off + ink_bitmap.shape[0], :] = ink_bitmap
+        mask = _render_text_with_fallback(font, text)
     except Exception as exc:
         logger.error(f"Erro ao renderizar mÃ¡scara de texto '{text}': {exc}", exc_info=True)
-        mask = np.zeros((1, 1), dtype=np.uint8)
+        raise
 
     pad = max(0, int(padding))
     if pad > 0:
@@ -2209,6 +2199,10 @@ def _clamp_safe_text_positions_to_bbox(
     return [(lx + dx, ly + dy) for lx, ly in corrected]
 
 
+def _owner_center_contract_active(text_data: Mapping[str, Any]) -> bool:
+    return bool(text_data.get("_owner_mode") and text_data.get("_owner_layout_verified"))
+
+
 def _align_uied_positions_to_source_center(
     font: SafeTextPathFont,
     lines: list[str],
@@ -2234,7 +2228,7 @@ def _align_uied_positions_to_source_center(
     if abs(dx) <= 1 and abs(dy) <= 1:
         return positions
 
-    clamp_bounds = bounds
+    clamp_bounds = None if _owner_center_contract_active(text_data) else bounds
     if _should_enforce_original_text_scale_contract(text_data):
         clamp_bounds = None
     clamped_dx, clamped_dy, clamped = _clamp_bbox_shift_to_bounds(
@@ -2303,7 +2297,7 @@ def _align_rgba_layer_to_source_text_center(
     if abs(dx) <= 1 and abs(dy) <= 1:
         return layer, render_bbox
 
-    clamp_bounds = bounds
+    clamp_bounds = None if _owner_center_contract_active(text_data) else bounds
     flags = {str(flag).strip().lower() for flag in text_data.get("qa_flags") or [] if str(flag).strip()}
     connected_lobe_context = bool(
         text_data.get("_is_lobe_subregion")
@@ -2597,6 +2591,8 @@ def _find_project_system_font(font_name: str, font_assets: dict | None = None) -
 
 
 def find_font(font_name: str, font_assets: dict | None = None) -> str | None:
+    if _quality_closed_fonts_enabled():
+        return str(_quality_closed_font_map().path(str(font_name)))
     cache_key = str(font_name or "").strip().lower()
     if font_assets is None and cache_key in _font_path_cache:
         return _font_path_cache[cache_key]
@@ -3284,6 +3280,9 @@ def get_font(font_name: str, size: int):
         font = SafeTextPathFont(font_path, size)
         _font_cache[key] = font
         return font
+
+    if _quality_closed_fonts_enabled():
+        raise ValueError(f"font outside active map or missing: {font_name}")
 
     import platform
 
@@ -7529,6 +7528,7 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
                 int(plan.get("max_width", 0) or 0),
                 int(plan.get("max_height", 0) or 0),
                 float(plan.get("line_spacing_ratio", 0.2) or 0.2),
+                str(plan.get("baseline_profile") or "standard"),
             )
             if not fits_at_minimum:
                 fallback_style = dict(text.get("estilo") or text.get("style") or {})
@@ -7547,6 +7547,7 @@ def _apply_visual_item_card_row_slots(texts: list[dict]) -> None:
                     int(plan.get("max_width", 0) or 0),
                     int(plan.get("max_height", 0) or 0),
                     float(plan.get("line_spacing_ratio", 0.2) or 0.2),
+                    str(plan.get("baseline_profile") or "standard"),
                 )
                 if fits_at_minimum:
                     _merge_qa_flags(text, ["visual_card_font_fallback"])
@@ -8230,12 +8231,34 @@ def _category_font_bounds(text_data: dict) -> tuple[int, int]:
 def _resolve_english_anchor_bbox(text_data: dict) -> list[int] | None:
     # Prefer per-line OCR polygons: they describe where the original ink was,
     # while merged text/source boxes can include balloon edges or adjacent noise.
+    explicit_ink_anchor = _layout_bbox(
+        text_data.get("source_text_anchor_bbox")
+        or text_data.get("_source_text_anchor_bbox")
+    )
     source_text_mask_bbox = _layout_bbox(
         text_data.get("source_text_anchor_bbox")
         or text_data.get("_source_text_anchor_bbox")
         or text_data.get("source_text_mask_bbox")
         or text_data.get("_source_text_mask_bbox")
     )
+    if _owner_center_contract_active(text_data):
+        if explicit_ink_anchor:
+            return explicit_ink_anchor
+        selected_ids = tuple(str(value) for value in text_data.get("selected_observation_ids") or ())
+        geometry = text_data.get("owner_render_geometry")
+        observations = geometry.get("selected_observations") if isinstance(geometry, Mapping) else None
+        if selected_ids and isinstance(observations, (list, tuple)):
+            by_id = {
+                str(item.get("observation_id")): _layout_bbox(item.get("bbox_page"))
+                for item in observations if isinstance(item, Mapping)
+            }
+            boxes = [by_id.get(observation_id) for observation_id in selected_ids]
+            if all(boxes):
+                return [
+                    min(box[0] for box in boxes), min(box[1] for box in boxes),
+                    max(box[2] for box in boxes), max(box[3] for box in boxes),
+                ]
+        return None  # An owner cannot fall back to a detector or balloon envelope.
     polygon_bbox = _layout_bbox(_bbox_from_polygons(text_data.get("line_polygons") or []))
     pixel_bbox = _layout_bbox(text_data.get("text_pixel_bbox"))
     flags = {str(flag).strip().lower() for flag in text_data.get("qa_flags") or [] if str(flag).strip()}
@@ -8485,6 +8508,11 @@ def _estimate_original_font_size_px(text_data: dict) -> int | None:
         polygon_estimate = max(_MIN_FONT_SIZE, min(96, int(round(median_height * 1.05))))
         if bbox_line_estimate is None or polygon_estimate <= int(round(bbox_line_estimate * 1.8)):
             estimates.append(polygon_estimate)
+            # Multiple OCR line polygons are direct per-line evidence.  The
+            # enclosing text bbox also contains inter-line gaps and must not
+            # inflate the font-size cap above the observed glyph line height.
+            if len(polygon_heights) >= 2:
+                return polygon_estimate
 
     if estimates:
         return max(estimates)
@@ -13637,6 +13665,16 @@ def _plan_owner_text_layout(text_data: dict) -> dict:
         upper = min(96, max(lower, container_height - 4, min(container_width, 96)))
         target_size = int(upper)
 
+    replay_cap_value = text_data.get("style_replay_max_font_size_px")
+    if replay_cap_value is not None:
+        if not isinstance(replay_cap_value, int) or isinstance(replay_cap_value, bool):
+            raise ValueError("style replay font-size cap must be a canonical integer")
+        if replay_cap_value <= 0:
+            raise ValueError("style replay font-size cap must be positive")
+        upper = min(int(upper), replay_cap_value)
+        lower = min(int(lower), upper)
+        target_size = min(int(target_size), upper)
+
     estilo = _canonical_render_style(
         text_data.get("visual_profile") or text_data.get("estilo") or {}
     )
@@ -13685,6 +13723,7 @@ def _plan_owner_text_layout(text_data: dict) -> dict:
         "rotation_deg": 0.0,
         "rotation_source": "verified_owner_layout",
         "line_spacing_ratio": 0.20,
+        "baseline_profile": _quality_baseline_profile(text_data, estilo),
         "vertical_bias_px": 0,
         "horizontal_bias_px": 0,
         "_target_source": "verified_owner_safe_polygon",
@@ -15097,6 +15136,7 @@ def plan_text_layout(text_data: dict) -> dict:
         "rotation_deg": rotation_deg,
         "rotation_source": rotation_source,
         "line_spacing_ratio": line_spacing,
+        "baseline_profile": _quality_baseline_profile(text_data, estilo),
         "vertical_bias_px": vertical_bias_px,
         "horizontal_bias_px": horizontal_bias_px,
         "_target_source": text_data.get("_render_target_source") or "",
@@ -15466,14 +15506,16 @@ def _score_layout_candidate(
     return score
 
 
-def _fits_in_box(text: str, font_name: str, size: int, max_width: int, max_height: int, line_spacing_ratio: float) -> bool:
+def _fits_in_box(text: str, font_name: str, size: int, max_width: int, max_height: int,
+                 line_spacing_ratio: float, baseline_profile: str = "standard") -> bool:
     """Verifica se o texto cabe na caixa, considerando a altura real dos acentos (v0.48)."""
     font = get_font(font_name, size)
     wrapped = wrap_text(text, font, max_width)
     if not wrapped:
         return True
     
-    final_lh = _resolve_uniform_line_height(font, wrapped, size, line_spacing_ratio)
+    final_lh = _resolve_uniform_line_height(font, wrapped, size, line_spacing_ratio,
+                                            baseline_profile)
     total_height = final_lh * len(wrapped)
 
     line_widths = [measure_text_width(font, line, size) for line in wrapped]
@@ -15500,6 +15542,7 @@ def _fit_attempt_for_size(text: str, plan: dict, size: int) -> dict:
         wrapped,
         size,
         float(plan["line_spacing_ratio"]),
+        str(plan.get("baseline_profile") or "standard"),
     )
     total_height = line_height * len(wrapped)
     line_widths = [measure_text_width(font, line, size) for line in wrapped]
@@ -17476,7 +17519,12 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         category_min, category_max = _category_font_bounds(text_data)
     height_limit = position_height if use_capacity_position else box_height
     if original_scale_bbox is not None:
-        font_size = min(category_max, 96)
+        source_cap = int(plan.get("_font_search_cap", 0) or 0)
+        if source_cap <= 0 and (
+            plan.get("_follow_original_ocr_size") or plan.get("_prefer_original_font_size")
+        ):
+            source_cap = int(plan.get("target_size", 0) or 0)
+        font_size = min(category_max, source_cap if source_cap > 0 else 96, 96)
     else:
         font_size = min(
             _compute_font_search_upper_bound(plan, text),
@@ -17497,12 +17545,14 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         floor_bound = max(6, min(int(plan.get("_font_search_emergency_floor", 6) or 6), font_size))
         best_fit = None
     else:
-        lo = max(_MIN_FONT_SIZE, min(floor_bound, font_size))
+        explicit_cap = int(plan.get("_font_search_cap", 0) or 0)
+        effective_min = min(_MIN_FONT_SIZE, font_size) if explicit_cap > 0 else _MIN_FONT_SIZE
+        lo = max(effective_min, min(floor_bound, font_size))
         hi = max(lo, font_size)
         best_fit: int | None = None
         while lo <= hi:
             mid = (lo + hi) // 2
-            if _fits_in_box(text, plan["font_name"], mid, plan["max_width"], plan["max_height"], plan["line_spacing_ratio"]):
+            if _fits_in_box(text, plan["font_name"], mid, plan["max_width"], plan["max_height"], plan["line_spacing_ratio"], plan.get("baseline_profile", "standard")):
                 best_fit = mid
                 lo = mid + 1
             else:
@@ -17530,7 +17580,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         emergency_floor = max(6, int(plan.get("_font_search_emergency_floor", 8) or 8))
         emergency_hi = min(font_size, max(emergency_floor, floor_bound - 1))
         for size in range(emergency_hi, emergency_floor - 1, -1):
-            if _fits_in_box(text, plan["font_name"], size, plan["max_width"], plan["max_height"], plan["line_spacing_ratio"]):
+            if _fits_in_box(text, plan["font_name"], size, plan["max_width"], plan["max_height"], plan["line_spacing_ratio"], plan.get("baseline_profile", "standard")):
                 candidate_sizes = [size, max(emergency_floor, size - 1)]
                 break
 
@@ -17545,6 +17595,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
             wrapped,
             attempt_size,
             plan["line_spacing_ratio"],
+            str(plan.get("baseline_profile") or "standard"),
         )
         if original_scale_bbox is not None and len(wrapped) > 1 and not constrain_original_scale_to_safe_box:
             min_line_height_ratio = 1.12 if inpaint_contract_source else 1.28
@@ -17935,7 +17986,7 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
     if best_fit is None:
         fallback_basis = min(category_min, font_size)
         for size in range(min(fallback_basis, max(emergency_floor, int(plan.get("max_height", 0) or emergency_floor))), emergency_floor - 1, -1):
-            if _fits_in_box(text, plan["font_name"], size, plan["max_width"], plan["max_height"], plan["line_spacing_ratio"]):
+            if _fits_in_box(text, plan["font_name"], size, plan["max_width"], plan["max_height"], plan["line_spacing_ratio"], plan.get("baseline_profile", "standard")):
                 fallback_basis = size
                 break
         else:
@@ -17946,7 +17997,9 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         fallback_size = max(_MIN_FONT_SIZE, fallback_basis, min(category_min, font_size))
     fallback_font = get_font(plan["font_name"], fallback_size)
     fallback_lines = wrap_text(text, fallback_font, plan["max_width"])
-    fallback_line_height = get_line_height(fallback_font, fallback_size, plan["line_spacing_ratio"])
+    fallback_line_height = _resolve_uniform_line_height(
+        fallback_font, fallback_lines, fallback_size, plan["line_spacing_ratio"],
+        str(plan.get("baseline_profile") or "standard"))
     if original_scale_bbox is not None and len(fallback_lines) > 1 and not constrain_original_scale_to_safe_box:
         min_line_height_ratio = 1.12 if inpaint_contract_source else 1.28
         fallback_line_height = max(fallback_line_height, int(round(fallback_size * min_line_height_ratio)))
@@ -18009,7 +18062,9 @@ def _resolve_text_layout(text_data: dict, plan: dict) -> dict:
         for size in range(max(1, int(fallback_size) - 1), 0, -1):
             test_font = get_font(plan["font_name"], size)
             test_lines = wrap_text(text, test_font, plan["max_width"])
-            test_line_height = get_line_height(test_font, size, plan["line_spacing_ratio"])
+            test_line_height = _resolve_uniform_line_height(
+                test_font, test_lines, size, plan["line_spacing_ratio"],
+                str(plan.get("baseline_profile") or "standard"))
             if len(test_lines) > 1 and not constrain_original_scale_to_safe_box:
                 min_line_height_ratio = 1.12 if inpaint_contract_source else 1.28
                 test_line_height = max(test_line_height, int(round(size * min_line_height_ratio)))
@@ -18282,6 +18337,7 @@ def _persist_render_layout_contract(text_data: dict, plan: dict, resolved: dict,
         "font_name": str(plan.get("font_name") or ""),
         "font_size": font_size,
         "line_height": line_height,
+        "baseline_profile": str(plan.get("baseline_profile") or "standard"),
         "lines": lines,
         "positions": [[int(x), int(y)] for x, y in positions],
         "line_widths": line_widths,
@@ -18310,6 +18366,8 @@ def _candidate_from_render_layout_contract(text_data: dict, plan: dict) -> dict 
             }
         return None
     if int(contract.get("schema_version", 0) or 0) != 1:
+        return None
+    if str(contract.get("baseline_profile") or "standard") != str(plan.get("baseline_profile") or "standard"):
         return None
     text = str(text_data.get("translated") or text_data.get("traduzido") or "")
     if _text_layout_contract_text_key(text) != str(contract.get("translated_key") or ""):
@@ -19695,12 +19753,13 @@ def _render_single_text_block_unrotated(
             text_data,
             (source_center_bounds if text_data.get("_render_target_source") == "real_balloon_bbox_overmerged_contour_guard" else clamp_bounds),
         )
-        positions = _clamp_safe_text_positions_to_bbox(
-            best_font,
-            best_lines,
-            positions,
-            (source_center_bounds if text_data.get("_render_target_source") == "real_balloon_bbox_overmerged_contour_guard" else clamp_bounds),
-        )
+        if not _owner_center_contract_active(text_data):
+            positions = _clamp_safe_text_positions_to_bbox(
+                best_font,
+                best_lines,
+                positions,
+                (source_center_bounds if text_data.get("_render_target_source") == "real_balloon_bbox_overmerged_contour_guard" else clamp_bounds),
+            )
         _persist_render_layout_contract(text_data, plan, resolved, positions)
 
         if _should_render_safe_arc_text(plan, best_lines):
@@ -20466,7 +20525,21 @@ def _sample_owner_candidate_font_sizes(candidate_sizes: Iterable[int]) -> list[i
         int(round(index * last_index / float(_MAX_OWNER_PROPORTIONAL_RENDER_ATTEMPTS - 1)))
         for index in range(_MAX_OWNER_PROPORTIONAL_RENDER_ATTEMPTS)
     }
-    return [sizes[index] for index in sorted(sampled_indices)]
+    sampled = {sizes[index] for index in sampled_indices}
+    # Fixed Portuguese leading can make a sampled size unsafe by only a few
+    # pixels. Test each nearby size instead of dropping directly to a much
+    # smaller face. This changes neither the source anchor nor safe geometry.
+    sampled.update(size for size in sizes if size <= 36)
+    return sorted(sampled, reverse=True)
+
+
+def _source_center_candidate_rejection(result: Mapping[str, Any]) -> str | None:
+    status = str(result.get("status") or "source_center_anchor_missing")
+    if status != "ok":
+        return status
+    if int(result.get("composition_outside_safe_pixels") or 0) > 0:
+        return "composition_outside_safe_region"
+    return None
 
 
 def _evaluate_rendered_owner_candidate(
@@ -20495,6 +20568,31 @@ def _evaluate_rendered_owner_candidate(
         height=after_image.height,
         label="owner render safe polygon",
     )
+    source_anchor = _resolve_english_anchor_bbox(child) if _owner_center_contract_active(child) else None
+    ink_y, ink_x = np.where(glyph_core_mask > 0)
+    actual_ink_bbox = (
+        [int(ink_x.min()), int(ink_y.min()), int(ink_x.max()) + 1, int(ink_y.max()) + 1]
+        if len(ink_x) else None
+    )
+    if source_anchor and actual_ink_bbox:
+        source_center = _bbox_center(source_anchor)
+        ink_center = _bbox_center(actual_ink_bbox)
+        center_error = [ink_center[0] - source_center[0], ink_center[1] - source_center[1]]
+        alignment_status = (
+            "ok" if max(abs(center_error[0]), abs(center_error[1])) <= 1.0
+            else "source_center_misaligned"
+        )
+    else:
+        center_error = None
+        alignment_status = "source_center_anchor_missing" if _owner_center_contract_active(child) else "not_applicable"
+    outside_composition = int(np.count_nonzero((changed_mask > 0) & (safe_mask == 0)))
+    child["source_center_alignment"] = {
+        "anchor_bbox_page": list(source_anchor) if source_anchor else None,
+        "ink_bbox_page": actual_ink_bbox,
+        "center_error_px": center_error,
+        "status": alignment_status,
+        "composition_outside_safe_pixels": outside_composition,
+    }
     quality = evaluate_owner_render_quality(
         render_bbox=list(child.get("render_bbox") or []),
         safe_bbox=list(plan.get("safe_text_box") or plan.get("target_bbox") or []),
@@ -20521,6 +20619,7 @@ def _evaluate_rendered_owner_candidate(
     metrics = child.setdefault("qa_metrics", {})
     if isinstance(metrics, dict):
         metrics["owner_render_quality"] = copy.deepcopy(quality)
+        metrics["source_center_alignment"] = copy.deepcopy(child["source_center_alignment"])
     return quality
 
 
@@ -20531,16 +20630,29 @@ def _mark_owner_proportional_review(
     minimum_font_size: int,
     diagnostic_quality: dict | None = None,
 ) -> None:
+    alignment_blocked = any(
+        str(item.get("reason")) in {
+            "source_center_misaligned", "source_center_anchor_missing",
+            "composition_outside_safe_region",
+        }
+        for item in attempts
+    )
     text_data.pop("render_bbox", None)
-    text_data["fit_status"] = "below_proportional_legibility"
+    text_data["fit_status"] = (
+        "source_center_unsafe" if alignment_blocked else "below_proportional_legibility"
+    )
     text_data["render_completed"] = False
     text_data["font_size_final"] = 0
     text_data["minimum_legible_font_px"] = int(minimum_font_size)
     text_data["route_action"] = "review_required"
-    text_data["route_reason"] = "owner_below_proportional_legibility"
+    text_data["route_reason"] = (
+        "owner_source_center_unsafe" if alignment_blocked
+        else "owner_below_proportional_legibility"
+    )
     _merge_qa_flags(
         text_data,
-        ["fit_below_proportional_legibility", "owner_render_review_required"],
+        (["source_center_unsafe", "owner_render_review_required"] if alignment_blocked
+         else ["fit_below_proportional_legibility", "owner_render_review_required"]),
     )
     text_data["fit_attempts"] = attempts[-8:]
     if diagnostic_quality is not None:
@@ -20591,6 +20703,7 @@ def _render_single_owner_proportionally(
             int(child_plan.get("max_width", 0) or 0),
             int(child_plan.get("max_height", 0) or 0),
             float(child_plan.get("line_spacing_ratio", 0.2) or 0.2),
+            str(child_plan.get("baseline_profile") or "standard"),
         ):
             attempts.append({"font_px": candidate_size, "status": "overflow", "reason": "nominal_overflow"})
             continue
@@ -20616,9 +20729,15 @@ def _render_single_owner_proportionally(
             else child.get("render_bbox")
         )
         diagnostic_quality = quality
+        anchor_result = child.get("source_center_alignment") or {}
+        anchor_rejection = (
+            _source_center_candidate_rejection(anchor_result)
+            if _owner_center_contract_active(child) else None
+        )
         accepted_ok = bool(
             child.get("render_completed")
             and quality.get("status") == "ok"
+            and anchor_rejection is None
             and (
                 not isinstance(raster_result, GlyphRasterResult)
                 or raster_result.status in {"applied", "fallback"}
@@ -20636,7 +20755,7 @@ def _render_single_owner_proportionally(
                         "raster_materialization_unavailable"
                         if isinstance(raster_result, GlyphRasterResult)
                         and raster_result.status != "applied"
-                        else str(quality.get("status") or "invalid")
+                        else anchor_rejection or str(quality.get("status") or "invalid")
                     )
                 ),
             }
@@ -20680,6 +20799,29 @@ def _render_single_owner_proportionally(
         }
     ]
     return raster_result
+
+
+def _owner_region_chunks(payload: str, regions: list[dict]) -> list[str]:
+    """Keep independently bound subblocks intact; retain legacy visual flow."""
+    if any(region.get("semantic_subblock") for region in regions):
+        if not all(region.get("semantic_subblock") for region in regions):
+            raise ValueError("semantic subblock binding is incomplete")
+        chunks = [str(region.get("translated_payload") or "").strip() for region in regions]
+        if any(not chunk for chunk in chunks):
+            raise ValueError("semantic subblock binding is incomplete")
+        if _normalized_owner_payload(" ".join(chunks)) != _normalized_owner_payload(payload):
+            raise ValueError("semantic subblock binding differs from owner payload")
+        return chunks
+    areas = []
+    for region in regions:
+        bbox = _layout_bbox(region.get("bbox_page") or region.get("bbox"))
+        if bbox is None:
+            raise ValueError("owner layout region is missing a canonical bbox_page")
+        areas.append(float(max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))))
+    total_area = sum(areas)
+    return _split_text_for_connected_balloons(
+        payload, len(regions), [area / total_area for area in areas]
+    )
 
 
 def _render_owner_text_block(
@@ -20730,18 +20872,7 @@ def _render_owner_text_block(
         text_data["translated_payload"] = payload
         return result
 
-    areas: list[float] = []
-    for region in regions:
-        bbox = _layout_bbox(region.get("bbox_page") or region.get("bbox"))
-        if bbox is None:
-            raise ValueError("owner layout region is missing a canonical bbox_page")
-        areas.append(float(max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))))
-    total_area = sum(areas)
-    chunks = _split_text_for_connected_balloons(
-        payload,
-        len(regions),
-        [area / total_area for area in areas],
-    )
+    chunks = _owner_region_chunks(payload, regions)
     if len(chunks) != len(regions) or any(not chunk.strip() for chunk in chunks):
         raise ValueError("owner visual chunk partition is incomplete")
     if _normalized_owner_payload(" ".join(chunks)) != _normalized_owner_payload(payload):
@@ -20789,6 +20920,27 @@ def _render_owner_text_block(
                 "source_line_polygons",
             ):
                 child.pop(legacy_geometry_key, None)
+            if region.get("semantic_subblock"):
+                ids = [str(value) for value in region.get("selected_observation_ids") or []]
+                anchor = _layout_bbox(region.get("source_anchor_bbox"))
+                if not ids or anchor is None:
+                    raise ValueError("semantic subblock binding lacks local OCR evidence")
+                geometry = child.get("owner_render_geometry")
+                observations = geometry.get("selected_observations") if isinstance(geometry, dict) else None
+                if not isinstance(observations, list):
+                    raise ValueError("semantic subblock geometry lacks selected OCR evidence")
+                supplements = child.get("semantic_subblock_observations") or []
+                if not isinstance(supplements, list):
+                    raise ValueError("semantic subblock OCR evidence is malformed")
+                local = [item for item in (*observations, *supplements)
+                         if isinstance(item, dict) and str(item.get("observation_id")) in ids]
+                if {str(item.get("observation_id")) for item in local} != set(ids):
+                    raise ValueError("semantic subblock OCR evidence is not bound to the owner")
+                geometry["parent_geometry_sha256"] = geometry.pop("geometry_sha256", None)
+                geometry["selected_observations"] = local
+                child["selected_observation_ids"] = ids
+                child["source_text_anchor_bbox"] = anchor
+                child["semantic_subblock_observations"] = []
             child.update(
                 {
                     "bbox": list(bbox),
@@ -20821,6 +20973,7 @@ def _render_owner_text_block(
                 int(child_plan.get("max_width", 0) or 0),
                 int(child_plan.get("max_height", 0) or 0),
                 float(child_plan.get("line_spacing_ratio", 0.2) or 0.2),
+                str(child_plan.get("baseline_profile") or "standard"),
             ):
                 candidate_reason = "nominal_overflow"
                 break
@@ -23401,6 +23554,7 @@ def _owner_component_geometry_sha256(
     owner_graph: object,
     *,
     shape: tuple[int, int],
+    component_bboxes_page: Mapping[str, object] | None = None,
 ) -> str:
     component_by_id = {
         _owner_identity(getattr(component, "component_id", None), label="component_id"): component
@@ -23408,12 +23562,22 @@ def _owner_component_geometry_sha256(
     }
     entries: list[tuple[str, tuple[int, int, int, int]]] = []
     height, width = shape
-    for raw_component_id in list(getattr(owner, "component_ids", []) or []):
-        component_id = _owner_identity(raw_component_id, label="owner component_id")
+    owner_component_ids = tuple(
+        _owner_identity(value, label="owner component_id")
+        for value in list(getattr(owner, "component_ids", []) or [])
+    )
+    overrides = dict(component_bboxes_page or {})
+    if overrides and set(overrides) != set(owner_component_ids):
+        raise ValueError("owner execution component geometry override is incomplete")
+    for component_id in owner_component_ids:
         component = component_by_id.get(component_id)
         if component is None:
             raise ValueError(f"owner component geometry is missing: {component_id}")
-        raw_bbox = getattr(component, "bbox_page", None)
+        raw_bbox = (
+            overrides[component_id]
+            if overrides
+            else getattr(component, "bbox_page", None)
+        )
         if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
             raise ValueError(f"owner component bbox is malformed: {component_id}")
         if any(isinstance(value, bool) for value in raw_bbox):
@@ -23661,6 +23825,11 @@ def _render_owner_band_image(
         owner,
         owner_graph,
         shape=(height, width),
+        component_bboxes_page=(
+            block.get("_owner_component_bboxes_page")
+            if isinstance(block.get("_owner_component_bboxes_page"), Mapping)
+            else None
+        ),
     )
     raw_profile = block.get("visual_profile_v2")
     if not isinstance(raw_profile, dict):
@@ -23716,6 +23885,72 @@ def _render_owner_band_image(
             fit_status = f"delivery_{delivery_contract.reason}"
         render_completed = False
 
+    # Capture only facts exposed by this exact render attempt. The executor will
+    # later bind these inputs to the final AnalysisRecord and project ledger.
+    recipe_evidence = None
+    render_layout = block.get("render_layout_contract")
+    render_debug = block.get("_render_debug")
+    font_name = str(block.get("font_name") or (render_debug or {}).get("font_name") or "")
+    font_size_px = int(block.get("font_size_final", 0) or (render_debug or {}).get("font_size_final", 0) or 0)
+    if font_name and font_size_px > 0:
+        actual_font = get_font(font_name, font_size_px)
+        actual_font_path = str(getattr(actual_font, "font_path", "") or "")
+        font_digest = sha256(Path(actual_font_path).read_bytes()).hexdigest() if actual_font_path and Path(actual_font_path).is_file() else ""
+    else:
+        actual_font_path = ""
+        font_digest = ""
+    runtime_digest = sha256(Path(__file__).read_bytes()).hexdigest()
+    geometry_payload = owner_render_geometry.to_dict()
+    render_config = {
+        "font_name": font_name,
+        "font_sha256": font_digest,
+        "font_size_px": font_size_px,
+        "render_layout_contract": copy.deepcopy(render_layout),
+        "style": copy.deepcopy(block.get("estilo") or {}),
+    }
+    recipe_evidence = {
+        "target_text": execution_authority.translated_payload,
+        "rendered_lines": (
+            [str(line) for line in render_layout.get("lines") or []]
+            if isinstance(render_layout, Mapping) else []
+        ),
+        "font_family": font_name,
+        "font_path": actual_font_path,
+        "font_sha256": font_digest,
+        "font_size_px": font_size_px if font_size_px > 0 else None,
+        "line_advance_px": (
+            int(render_layout.get("line_height", 0) or 0)
+            if isinstance(render_layout, Mapping) else None
+        ),
+        "render_bbox": list(glyph_bbox or []),
+        "effects": copy.deepcopy(block.get("estilo") or {}),
+        "anchors": {
+            "source_anchor_bbox": geometry_payload.get("source_anchor_bbox"),
+            "source_anchor_polygon": geometry_payload.get("source_anchor_polygon"),
+            "mode": "authenticated_owner_render_geometry",
+        },
+        "geometry": {
+            "coordinate_space": "logical_page",
+            "owner_render_geometry": geometry_payload,
+            "owner_render_geometry_sha256": owner_render_geometry.geometry_sha256,
+            "glyph_bbox_page": list(glyph_bbox or []),
+        },
+        "policy_versions": (
+            {
+                "render_layout_contract": f"v{int(render_layout.get('schema_version', 0) or 0)}",
+                "owner_glyph_patch_contract": "owner-glyph-patch-v1",
+            }
+            if isinstance(render_layout, Mapping) and int(render_layout.get("schema_version", 0) or 0) > 0
+            else {}
+        ),
+        "rasterizer_runtime_id": "traduzai-typesetter-owner-renderer-v1",
+        "rasterizer_runtime_sha256": runtime_digest,
+        "rasterizer_config_sha256": sha256(
+            json.dumps(render_config, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest(),
+        "source_pixel_sha256": sha256(before.tobytes(order="C")).hexdigest(),
+    }
+
     return OwnerGlyphPatch(
         owner_id=owner_id,
         page_id=graph_page_id,
@@ -23749,6 +23984,8 @@ def _render_owner_band_image(
         text_execution_authority_sha256=execution_authority.authority_sha256,
         text_execution_authority=execution_authority,
         delivery_contract=delivery_contract,
+        render_layout_contract=copy.deepcopy(block.get("render_layout_contract")),
+        renderer_recipe_evidence=recipe_evidence,
     )
 
 
@@ -23875,20 +24112,13 @@ def _resolve_uniform_line_height(
     lines: list[str],
     font_size: int,
     spacing_ratio: float,
+    baseline_profile: str = "standard",
 ) -> int:
-    base = get_line_height(font, font_size, spacing_ratio)
-    actual_max_h = 0
-    for line in lines or []:
-        try:
-            line_bbox = font.getbbox(line)
-        except Exception:
-            continue
-        actual_max_h = max(actual_max_h, int(line_bbox[3] - line_bbox[1]))
-
-    sample_text = " ".join(lines or [])
-    needs_safe_gap = isinstance(font, SafeTextPathFont) or any(ord(ch) > 127 for ch in sample_text)
-    min_gap_px = max(5, round(font_size * 0.18)) if needs_safe_gap else max(4, round(font_size * 0.14))
-    return int(max(base, actual_max_h + min_gap_px, font_size))
+    if isinstance(font, SafeTextPathFont):
+        from typesetter.stable_baseline import line_advance
+        fixed = line_advance(str(font.font_path), int(font_size), baseline_profile)
+        return int(max(fixed, font_size + font_size * spacing_ratio))
+    return get_line_height(font, font_size, spacing_ratio)
 
 
 def get_line_height(font: ImageFont.FreeTypeFont, font_size: int, spacing_ratio: float) -> int:

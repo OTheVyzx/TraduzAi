@@ -958,7 +958,7 @@ def test_ocr_empty_plain_detector_region_without_sfx_support_requires_review() -
         page_id=PAGE_ID,
         bbox_page=(55, 35, 265, 145),
         polygon_page=((55, 35), (265, 35), (265, 145), (55, 145)),
-        detector_sources=("primary_region_detector",),
+        detector_sources=detector_sources,
         confidence=0.91,
         evidence_ids=("detector-region-dialogue",),
     )

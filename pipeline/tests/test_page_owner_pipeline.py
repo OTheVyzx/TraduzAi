@@ -462,6 +462,35 @@ def test_page_pipeline_requires_repaint_for_already_target_ocr_pixels(monkeypatc
     assert captured["repaint_already_target_pixels"] is True
 
 
+def test_page_pipeline_preserves_rejected_translation_as_review_and_continues():
+    def unchanged(owner_request, _variant):
+        return owner_request.source_text
+
+    unchanged.backend_name = "fixture"
+    result = run_page_owner_pipeline(
+        _request(),
+        replace(_services(), translation_backends=(unchanged,)),
+    )
+
+    assert result.translations == ()
+    assert result.translation_attempts
+    assert all(
+        attempt.status == "rejected"
+        for attempt in result.translation_attempts
+    )
+    assert result.owner_graph.read().owners == []
+    assert result.page_commits == ()
+    review = result.text_layers_view.read()["texts"][0]
+    assert review["state"] == "review_required"
+    assert review["route_action"] == "review_required"
+    assert review["visible"] is False
+    assert review["translated"] == ""
+    assert review["translation_attempt_ids"]
+    assert "unchanged_source_dialogue" in review[
+        "owner_execution_rejection_reason"
+    ]
+
+
 def test_execution_record_adapter_converts_nested_tuples_but_not_invalid_sets() -> None:
     from ownership.execution import FrozenJSONSnapshot
     from strip.page_pipeline import _json_compatible_execution_value

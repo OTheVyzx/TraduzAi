@@ -416,3 +416,44 @@ def test_candidate_excludes_verified_no_repaint_binding_from_commit_cardinality(
 
     assert repair_pending.page_commits == ()
     assert repair_pending.text_layers_view.read()["texts"][0]["state"] == "repair_pending"
+
+
+def test_candidate_allows_review_binding_beside_one_materialized_owner():
+    from ownership.hash_contract import canonical_json_sha256
+
+    result = _candidate_result_with_one_bound_owner()
+    rendered_binding = result.translations[0]
+    provisional_review = replace(
+        rendered_binding,
+        owner_id="owner-review-required",
+        component_ids=("component-review-required",),
+        translation_binding_sha256="",
+    )
+    reviewed_binding = replace(
+        provisional_review,
+        translation_binding_sha256=canonical_json_sha256(
+            provisional_review.canonical_payload()
+        ),
+    )
+    layers = result.text_layers_view.read()["texts"] + [
+        {
+            "owner_id": reviewed_binding.owner_id,
+            "translation_binding_sha256": reviewed_binding.translation_binding_sha256,
+            "target_payload_sha256": reviewed_binding.target_payload_sha256,
+            "translated": reviewed_binding.target_text,
+            "state": "review_required",
+            "route_action": "review_required",
+            "visible": False,
+        }
+    ]
+
+    mixed = PageExecutionResult.build_from(
+        result,
+        translations=(rendered_binding, reviewed_binding),
+        text_layers_view=FrozenJSONSnapshot.build({"texts": layers}),
+    )
+
+    assert len(mixed.translations) == 2
+    assert len(mixed.page_commits) == 1
+    assert len(mixed.owner_target_materializations) == 1
+    assert mixed.text_layers_view.read()["texts"][1]["state"] == "review_required"

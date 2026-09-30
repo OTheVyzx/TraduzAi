@@ -1,0 +1,202 @@
+{
+  "default": {
+    "fala": {
+      "fonte": "ComicNeue-Bold.ttf",
+      "force_upper": false
+    },
+    "narracao": {
+      "fonte": "ComicNeue-Bold.ttf",
+      "force_upper": false
+    },
+    "sfx": {
+      "fonte": "ComicNeue-Bold.ttf",
+      "force_upper": true
+    },
+    "sfx_impact": {
+      "fonte": "KOMIKAX_.ttf",
+      "force_upper": true
+    },
+    "sfx_motion": {
+      "fonte": "KOMIKAX_.ttf",
+      "force_upper": true
+    },
+    "sfx_mechanical": {
+      "fonte": "CCDaveGibbonsLower W00 Regular.ttf",
+      "force_upper": true
+    },
+    "pensamento": {
+      "fonte": "ComicNeue-Bold.ttf",
+      "force_upper": false
+    },
+    "visual_card": {
+      "fonte": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+      "force_upper": true
+    }
+  },
+  "available": [
+    {
+      "arquivo": "ComicNeue-Bold.ttf",
+      "estilo": "comic-padrao",
+      "serif": false,
+      "detector": true,
+      "license_status": "OFL-1.1",
+      "roles": [
+        "dialogue_body",
+        "thought",
+        "narration"
+      ],
+      "path": "ComicNeue-Bold.ttf"
+    },
+    {
+      "arquivo": "ComicNeue-Regular.ttf",
+      "estilo": "comic-regular",
+      "serif": false,
+      "detector": true,
+      "license_status": "OFL-1.1",
+      "roles": [
+        "dialogue_body",
+        "thought"
+      ],
+      "path": "ComicNeue-Regular.ttf"
+    },
+    {
+      "arquivo": "CCTotallyAwesome W00 Bold.ttf",
+      "estilo": "comic-manuscrito-condensado-bold",
+      "serif": false,
+      "detector": true,
+      "license_status": "commercial-user-provided-license-required",
+      "roles": [
+        "dialogue_body",
+        "thought",
+        "narration"
+      ],
+      "path": "commercial/CCTotallyAwesome W00 Bold.ttf"
+    },
+    {
+      "arquivo": "Atma-SemiBold.ttf",
+      "estilo": "comic-manuscrito-semibold",
+      "serif": false,
+      "detector": true,
+      "license_status": "OFL-1.1",
+      "roles": [
+        "dialogue_body",
+        "thought",
+        "narration"
+      ],
+      "google_family": "Atma",
+      "google_weight": 600,
+      "path": "google/Atma-SemiBold.ttf"
+    },
+    {
+      "arquivo": "DeliusUnicase-Bold.ttf",
+      "estilo": "comic-unicase-bold",
+      "serif": false,
+      "detector": true,
+      "license_status": "OFL-1.1",
+      "roles": [
+        "dialogue_body",
+        "thought",
+        "narration"
+      ],
+      "google_family": "Delius Unicase",
+      "google_weight": 700,
+      "path": "google/DeliusUnicase-Bold.ttf"
+    },
+    {
+      "arquivo": "KOMIKAX_.ttf",
+      "estilo": "acao",
+      "serif": false,
+      "detector": true,
+      "license_status": "bundled-project-asset",
+      "roles": [
+        "sfx",
+        "title",
+        "dialogue_emphasis",
+        "shout"
+      ],
+      "path": "KOMIKAX_.ttf"
+    },
+    {
+      "arquivo": "CCDaveGibbonsLower W00 Regular.ttf",
+      "estilo": "comic-legado",
+      "serif": false,
+      "detector": true,
+      "license_status": "bundled-project-asset",
+      "roles": [
+        "dialogue_body",
+        "sfx"
+      ],
+      "path": "CCDaveGibbonsLower W00 Regular.ttf"
+    },
+    {
+      "arquivo": "LeagueGothic-Regular-VariableFont_wdth.ttf",
+      "estilo": "condensado-status",
+      "serif": false,
+      "detector": true,
+      "license_status": "OFL-1.1",
+      "roles": [
+        "system_card",
+        "card_title",
+        "card_body",
+        "card_value"
+      ],
+      "path": "LeagueGothic-Regular-VariableFont_wdth.ttf"
+    },
+    {
+      "arquivo": "ReadyforAnythingBB-Regular.ttf",
+      "estilo": "ready-for-anything-regular",
+      "serif": false,
+      "detector": true,
+      "license_status": "user-provided-local-license-unverified",
+      "roles": [
+        "dialogue_body",
+        "thought",
+        "narration"
+      ],
+      "path": "Ready For Anything BB/ReadyforAnythingBB-Regular.ttf"
+    },
+    {
+      "arquivo": "ReadyforAnythingBB-Italic.ttf",
+      "estilo": "ready-for-anything-italic",
+      "serif": false,
+      "detector": true,
+      "license_status": "user-provided-local-license-unverified",
+      "roles": [
+        "dialogue_body",
+        "thought",
+        "narration"
+      ],
+      "path": "Ready For Anything BB/ReadyforAnythingBB-Italic.ttf"
+    },
+    {
+      "arquivo": "ReadyforAnythingBB-Bold.ttf",
+      "estilo": "ready-for-anything-bold",
+      "serif": false,
+      "detector": true,
+      "license_status": "user-provided-local-license-unverified",
+      "roles": [
+        "dialogue_body",
+        "thought",
+        "narration",
+        "sfx"
+      ],
+      "path": "Ready For Anything BB/ReadyforAnythingBB-Bold.ttf"
+    },
+    {
+      "arquivo": "ReadyforAnythingBB-BoldItalic.ttf",
+      "estilo": "ready-for-anything-bold-italic",
+      "serif": false,
+      "detector": true,
+      "license_status": "user-provided-local-license-unverified",
+      "roles": [
+        "dialogue_body",
+        "thought",
+        "narration",
+        "sfx"
+      ],
+      "path": "Ready For Anything BB/ReadyforAnythingBB-BoldItalic.ttf"
+    }
+  ],
+  "notes": "Detector compara livremente o catalogo declarado. CC Totally Awesome Bold e uma fonte comercial fornecida pelo usuario e requer licenca valida; Atma SemiBold e Delius Unicase Bold sao candidatas OFL. Nenhuma candidata e forcada como padrao.",
+  "source_map_sha256": "290306d23b15d85e83095b5054ecf3d8689dd3cbde79d4e5b4168e58f361c01f"
+}

@@ -4,6 +4,7 @@ import json
 import tempfile
 import ast
 import inspect
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -40,6 +41,59 @@ from translator.translate import (
 
 
 class TranslateContextTests(unittest.TestCase):
+    def test_ollama_request_uses_configurable_bounded_timeout(self):
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {"message": {"content": '[{"id":"t1","translated":"olá"}]'}}
+                ).encode("utf-8")
+
+        with patch.dict(os.environ, {"TRADUZAI_OLLAMA_HTTP_TIMEOUT_SEC": "17"}), patch(
+            "translator.translate.urllib.request.urlopen", return_value=_Response()
+        ) as urlopen:
+            translated = translate_module._call_ollama(
+                "traduzai-translator",
+                "system",
+                "hello",
+                "http://localhost:11434",
+            )
+
+        self.assertEqual(translated, [{"id": "t1", "translated": "olá"}])
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 17)
+
+    def test_google_wrapper_bounds_primary_http_request(self):
+        import deep_translator.google as deep_google
+
+        observed_timeouts = []
+
+        class _PrimaryTranslator:
+            def __init__(self, source, target):
+                self.source = source
+                self.target = target
+
+            def translate(self, _text):
+                deep_google.requests.get("https://translate.google.test")
+                return "olá"
+
+        def _get(*_args, **kwargs):
+            observed_timeouts.append(kwargs.get("timeout"))
+            return object()
+
+        with patch("deep_translator.GoogleTranslator", _PrimaryTranslator), patch(
+            "deep_translator.google.requests.get", side_effect=_get
+        ):
+            translator = translate_module._GoogleTranslator(source="en", target="pt")
+            translated = translator.translate("hello")
+
+        self.assertEqual(translated, "olá")
+        self.assertEqual(observed_timeouts, [15])
+
     def test_google_wrapper_falls_back_to_public_endpoint_and_health_uses_it(self):
         class _BrokenDeepTranslator:
             def __init__(self, source, target):
@@ -67,6 +121,7 @@ class TranslateContextTests(unittest.TestCase):
 
         self.assertEqual(translator.translate("hello"), "olá")
         self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 15)
         request = urlopen.call_args.args[0]
         self.assertIn("translate.googleapis.com/translate_a/single", request.full_url)
 
@@ -2004,6 +2059,38 @@ def test_forced_ollama_attempt_disables_hidden_google_repair(monkeypatch) -> Non
 
     assert result.backend == "ollama"
     assert low_level.call_args.kwargs["repair_translator"] is None
+
+
+def test_ollama_timeout_propagates_as_operational_provider_unavailable(monkeypatch) -> None:
+    def timed_out(*_args, **_kwargs):
+        raise TimeoutError("ollama request exceeded its per-attempt deadline")
+
+    monkeypatch.setattr(translate_module, "_translate_with_ollama", timed_out)
+
+    with unittest.TestCase().assertRaises(
+        translate_module.TranslationProviderUnavailable
+    ) as raised:
+        translate_module.translate_one_owner_attempt(
+            _owned_legacy_page(),
+            "obra",
+            {},
+            {},
+            idioma_destino="pt-BR",
+            idioma_origem="en",
+            qualidade="normal",
+            ollama_host="http://localhost:11434",
+            ollama_model="traduzai-translator",
+            models_dir="",
+            translation_context=None,
+            control=translate_module.TranslationAttemptControl(
+                "ollama", "local", True
+            ),
+        )
+
+    metadata = json.loads(raised.exception.provider_metadata_json_bytes)
+    assert metadata["backend"] == "ollama"
+    assert metadata["provider_called"] is True
+    assert metadata["error_code"] == "TimeoutError"
 
 
 def test_owner_ocr_recovery_attempt_reconstructs_source_then_translates_with_google(monkeypatch) -> None:

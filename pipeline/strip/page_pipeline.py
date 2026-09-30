@@ -973,6 +973,9 @@ class PageExecutionResult:
             item for item in commits
             if bool(getattr(item, "translation_binding_sha256", ""))
         )
+        bound_commit_owner_ids = {
+            str(getattr(item, "owner_id", "")) for item in bound_commits
+        }
         execution_layers: list[Mapping[str, Any]] = []
         if text_layers_view is not None:
             execution_layers_payload = text_layers_view.read()
@@ -986,9 +989,10 @@ class PageExecutionResult:
             graph_snapshot.read().owners,
         )
         execution_bindings = tuple(
-            item
-            for item in bindings
-            if not item.preserves_original_pixels and item.owner_id not in rejected_owner_ids
+            item for item in bindings
+            if not item.preserves_original_pixels
+            and item.owner_id not in rejected_owner_ids
+            and item.owner_id in bound_commit_owner_ids
         )
         if bound_commits:
             ordered_bindings = tuple(
@@ -1026,11 +1030,13 @@ class PageExecutionResult:
                     )
         if bound_commits and text_layers_view is None:
             raise PagePipelineIdentityError("bound owner result requires text layer snapshot")
-        if bindings and text_layers_view is not None:
+        if text_layers_view is not None:
             layers_payload = text_layers_view.read()
             layers = layers_payload.get("texts")
             ordered_all_bindings = tuple(sorted(bindings, key=lambda item: item.owner_id))
-            if not isinstance(layers, list) or len(layers) < len(ordered_all_bindings):
+            if not isinstance(layers, list):
+                raise PagePipelineIdentityError("text layer snapshot is malformed")
+            if len(layers) < len(ordered_all_bindings):
                 raise PagePipelineIdentityError("text layer cardinality is smaller than bindings")
             layer_by_owner = {
                 str(layer.get("owner_id") or ""): layer
@@ -1039,6 +1045,20 @@ class PageExecutionResult:
             if len(layer_by_owner) != len(layers):
                 raise PagePipelineIdentityError("text layers contain duplicate or invalid owners")
             binding_owner_ids = {binding.owner_id for binding in ordered_all_bindings}
+            if not binding_owner_ids.issubset(layer_by_owner):
+                raise PagePipelineIdentityError("text layer cardinality differs from bindings")
+            for owner_id, layer in layer_by_owner.items():
+                if owner_id in binding_owner_ids:
+                    continue
+                if not (
+                    layer.get("state") == "review_required"
+                    and layer.get("route_action") == "review_required"
+                    and layer.get("visible") is False
+                    and not layer.get("translation_binding_sha256")
+                ):
+                    raise PagePipelineIdentityError(
+                        "unbound text layer is not a fail-closed review record"
+                    )
             unresolved_owned_owner_ids = {
                 str(getattr(owner, "owner_id", ""))
                 for owner in graph_snapshot.read().owners
@@ -2062,6 +2082,92 @@ def _owner_graph_after_execution(
     return executed_graph
 
 
+def _translation_review_records(
+    graph: OwnerGraph,
+    result: OwnerPageTranslationResult,
+) -> tuple[dict[str, Any], ...]:
+    """Materialize rejected owner attempts without granting raster authority."""
+
+    bound_owner_ids = {binding.owner_id for binding in result.bindings}
+    components_by_id = {
+        component.component_id: component for component in graph.components
+    }
+    records: list[dict[str, Any]] = []
+    for owner in sorted(graph.owners, key=lambda item: item.owner_id):
+        if (
+            owner.owner_id in bound_owner_ids
+            or owner.route_action not in TRANSLATION_ROUTE_ACTIONS
+        ):
+            continue
+        owner_attempts = tuple(
+            attempt for attempt in result.attempts
+            if attempt.owner_id == owner.owner_id
+        )
+        if not owner_attempts:
+            continue
+        boxes = [
+            components_by_id[component_id].bbox_page
+            for component_id in owner.component_ids
+            if component_id in components_by_id
+        ]
+        bbox = (
+            [
+                min(box[0] for box in boxes),
+                min(box[1] for box in boxes),
+                max(box[2] for box in boxes),
+                max(box[3] for box in boxes),
+            ]
+            if boxes
+            else [0, 0, 1, 1]
+        )
+        terminal = owner_attempts[-1]
+        verdict = terminal.language_verdict
+        terminal_reason = (
+            verdict.reason
+            if verdict is not None
+            else str(terminal.error_code or terminal.status)
+        )
+        records.append(
+            {
+                "id": owner.owner_id,
+                "owner_id": owner.owner_id,
+                "page_id": owner.page_id,
+                "coordinate_space": "logical_page",
+                "component_ids": list(owner.component_ids),
+                "observation_ids": list(owner.observation_ids),
+                "selected_observation_ids": list(owner.selected_observation_ids),
+                "semantic_role": owner.semantic_role,
+                "source_payload": owner.source_payload,
+                "text": owner.source_payload,
+                "original": owner.source_payload,
+                "translated_payload": None,
+                "translated": "",
+                "disposition": "review",
+                "state": "review_required",
+                "route_action": "review_required",
+                "execution_tile_id": None,
+                "action_mask_ref": None,
+                "layout_region_ids": [],
+                "bbox": bbox,
+                "source_bbox": bbox,
+                "text_pixel_bbox": bbox,
+                "visible": False,
+                "render_policy": "review_required",
+                "owner_execution_rejection_reason": (
+                    f"translation_validation_exhausted:{terminal_reason}"
+                ),
+                "qa_flags": ["owner_translation_rejected"],
+                "translation_attempt_ids": [
+                    attempt.attempt_id for attempt in owner_attempts
+                ],
+                "translation_attempt_sha256s": [
+                    attempt.attempt_sha256 for attempt in owner_attempts
+                ],
+            }
+        )
+    return tuple(records)
+
+
 def run_page_owner_pipeline(
     request: PagePipelineRequest,
     services: PagePipelineServices,
@@ -2120,6 +2226,7 @@ def run_page_owner_pipeline(
         if owner.disposition == "owned"
         and owner.route_action in TRANSLATION_ROUTE_ACTIONS
     )
+    translation_review_records: tuple[dict[str, Any], ...] = ()
     if requests:
         if recorder is not None and callable(getattr(recorder, "increment_counter", None)):
             recorder.increment_counter("translation_calls", len(requests))
@@ -2142,6 +2249,7 @@ def run_page_owner_pipeline(
                     attempt_kwargs=services.translation_attempt_kwargs,
                     page_language_evidence_by_owner=language_evidence_by_owner,
                     repaint_already_target_pixels=True,
+                    continue_on_owner_failure=True,
                     performance_recorder=services.performance_recorder,
                 )
                 bound_owner_ids = {
@@ -2157,7 +2265,12 @@ def run_page_owner_pipeline(
                     recorder.increment_counter(
                         "translation_failures", failed_owner_count
                     )
-                translated_graph = apply_owner_translation_result(graph, translation_result)
+                translation_review_records = _translation_review_records(
+                    graph, translation_result,
+                )
+                translated_graph = apply_owner_translation_result(
+                    graph, translation_result, review_unbound_attempts=True,
+                )
         except Exception:
             if recorder is not None and callable(getattr(recorder, "increment_counter", None)):
                 recorder.increment_counter("translation_failures", len(requests))
@@ -2199,7 +2312,10 @@ def run_page_owner_pipeline(
         target_materializations = tuple(
             getattr(execution_output, "target_materializations", ()) or ()
         )
-        records = tuple(getattr(execution_output, "records", ()) or ())
+        records = (
+            tuple(getattr(execution_output, "records", ()) or ())
+            + translation_review_records
+        )
         text_layers_view = FrozenJSONSnapshot.build(
             _json_compatible_execution_value({"texts": list(records)})
         )
@@ -2220,6 +2336,14 @@ def run_page_owner_pipeline(
         )
     else:
         commits = tuple(execution_output)
+        if translation_review_records:
+            from ownership.execution import FrozenJSONSnapshot
+
+            text_layers_view = FrozenJSONSnapshot.build(
+                _json_compatible_execution_value(
+                    {"texts": list(translation_review_records)}
+                )
+            )
     result_graph = _owner_graph_after_execution(translated_graph, execution_output)
     result = PageExecutionResult.build(
         request=request,

@@ -10650,8 +10650,20 @@ def _owner_cleanup_effect_support_for_mode(
     return effect_support
 
 
-def _transition_owner_to_review(graph: OwnerGraph, owner_id: str) -> OwnerGraph:
-    """Revoke every write capability after an atomic owner-chain rejection."""
+def _transition_owner_to_review(
+    graph: OwnerGraph,
+    owner_id: str,
+    *,
+    enforce_graph: bool = False,
+) -> OwnerGraph:
+    """Revoke every write capability after an atomic owner-chain rejection.
+
+    Enforced graphs cannot persist the legacy review-owner lifecycle. In that
+    mode the rejected owner is retired and each of its source components is
+    retained as an audited uncertain disposition. The non-rendering project
+    record still carries ``review_required`` so the UI and export gate expose
+    the unresolved work while the canonical graph remains enforce-valid.
+    """
 
     owner = next((item for item in graph.owners if item.owner_id == owner_id), None)
     if owner is None:
@@ -10666,14 +10678,55 @@ def _transition_owner_to_review(graph: OwnerGraph, owner_id: str) -> OwnerGraph:
         for projection in graph.projections
         if projection.owner_id != owner_id
     ]
-    graph.component_dispositions = [
-        (
-            replace(disposition, decision="review", owner_id=owner_id)
-            if disposition.component_id in set(owner.component_ids)
-            else disposition
-        )
-        for disposition in graph.component_dispositions
-    ]
+    owner_component_ids = set(owner.component_ids)
+    if enforce_graph:
+        components_by_id = {
+            component.component_id: component for component in graph.components
+        }
+        evidence_by_component = {
+            component_id: tuple(
+                sorted(
+                    {
+                        observation.observation_id
+                        for observation in graph.observations
+                        if component_id in observation.component_ids
+                    }
+                )
+            )
+            for component_id in owner_component_ids
+        }
+        graph.component_dispositions = [
+            (
+                replace(
+                    disposition,
+                    decision="uncertain",
+                    owner_id=None,
+                    reason="owner_execution_rejected",
+                    policy_id="coverage_ambiguous_candidate",
+                    policy_bbox_page=components_by_id[disposition.component_id].bbox_page,
+                    policy_evidence_ids=(
+                        evidence_by_component[disposition.component_id]
+                        or (disposition.component_id,)
+                    ),
+                    policy_reason=(
+                        "source pixels preserved after owner execution rejection"
+                    ),
+                )
+                if disposition.component_id in owner_component_ids
+                else disposition
+            )
+            for disposition in graph.component_dispositions
+        ]
+        graph.owners = [item for item in graph.owners if item.owner_id != owner_id]
+    else:
+        graph.component_dispositions = [
+            (
+                replace(disposition, decision="review", owner_id=owner_id)
+                if disposition.component_id in owner_component_ids
+                else disposition
+            )
+            for disposition in graph.component_dispositions
+        ]
     return graph
 
 
@@ -11248,6 +11301,113 @@ def _owner_execution_rejection_record(
             }
         )
     return record
+
+
+def _retire_owner_composition_conflicts(
+    graph: OwnerGraph,
+    *,
+    commits: tuple[Any, ...],
+    records: tuple[dict[str, Any], ...],
+    target_materializations: tuple[Any, ...],
+    conflicts: tuple[Any, ...],
+    enforce_graph: bool,
+) -> tuple[tuple[Any, ...], tuple[dict[str, Any], ...], tuple[Any, ...]]:
+    """Revoke both sides of an overlapping owner write before publication."""
+
+    conflicts_by_owner: dict[str, list[Any]] = {}
+    for conflict in conflicts:
+        for owner_id in tuple(getattr(conflict, "owner_ids", ()) or ()):
+            conflicts_by_owner.setdefault(str(owner_id), []).append(conflict)
+    committed_owner_ids = {
+        str(getattr(commit, "owner_id", "") or "") for commit in commits
+    }
+    rejected_owner_ids = sorted(
+        owner_id
+        for owner_id in conflicts_by_owner
+        if owner_id and owner_id in committed_owner_ids
+    )
+    if not rejected_owner_ids:
+        raise ValueError("owner composition conflict has no committed owner authority")
+
+    replacement_records: dict[str, dict[str, Any]] = {}
+    records_by_owner = {
+        str(record.get("owner_id") or ""): record
+        for record in records
+        if isinstance(record, dict) and record.get("owner_id")
+    }
+    for owner_id in rejected_owner_ids:
+        owner = next(
+            (item for item in graph.owners if item.owner_id == owner_id),
+            None,
+        )
+        if owner is None:
+            raise ValueError(
+                f"owner composition conflict references unknown owner: {owner_id}"
+            )
+        owner_conflicts = sorted(
+            conflicts_by_owner[owner_id],
+            key=lambda item: (
+                str(getattr(item, "phase", "")),
+                str(getattr(item, "code", "")),
+                int(getattr(item, "pixel_count", 0) or 0),
+            ),
+        )
+        reason = "owner composition conflict: " + ",".join(
+            "/".join(
+                (
+                    str(getattr(item, "phase", "")),
+                    str(getattr(item, "code", "")),
+                    str(int(getattr(item, "pixel_count", 0) or 0)),
+                )
+            )
+            for item in owner_conflicts
+        )
+        _transition_owner_to_review(
+            graph,
+            owner_id,
+            enforce_graph=enforce_graph,
+        )
+        review_seed = copy.deepcopy(records_by_owner.get(owner_id) or {})
+        review_seed["owner_execution_rejection_reason"] = reason
+        review_seed["owner_composition_conflicts"] = [
+            {
+                "phase": str(getattr(item, "phase", "")),
+                "code": str(getattr(item, "code", "")),
+                "owner_ids": list(getattr(item, "owner_ids", ()) or ()),
+                "pixel_count": int(getattr(item, "pixel_count", 0) or 0),
+                "message": str(getattr(item, "message", "")),
+            }
+            for item in owner_conflicts
+        ]
+        review_seed["qa_flags"] = sorted(
+            {
+                *list(review_seed.get("qa_flags") or []),
+                "owner_composition_conflict",
+            }
+        )
+        replacement_records[owner_id] = _owner_non_rendering_record(
+            graph,
+            owner,
+            seed=review_seed,
+        )
+
+    filtered_commits = tuple(
+        commit
+        for commit in commits
+        if str(getattr(commit, "owner_id", "") or "")
+        not in replacement_records
+    )
+    filtered_materializations = tuple(
+        materialization
+        for materialization in target_materializations
+        if str(getattr(materialization, "owner_id", "") or "")
+        not in replacement_records
+    )
+    filtered_records = tuple(
+        replacement_records.get(str(record.get("owner_id") or ""), record)
+        for record in records
+    )
+    return filtered_commits, filtered_records, filtered_materializations
 
 
 def _owner_preserve_original_record(
@@ -12043,6 +12203,11 @@ def execute_owner_page_graph(
                 owner.owner_id,
                 exc,
             )
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
+            )
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = str(exc)
             review_seed["qa_flags"] = sorted(
@@ -12119,6 +12284,11 @@ def execute_owner_page_graph(
                 owner.page_id,
                 owner.owner_id,
                 owner_render_geometry.reason,
+            )
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
             )
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = owner_render_geometry.reason
@@ -12243,6 +12413,11 @@ def execute_owner_page_graph(
                 owner.owner_id,
                 exc,
             )
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
+            )
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = str(exc)
             review_seed["qa_flags"] = sorted(
@@ -12267,6 +12442,11 @@ def execute_owner_page_graph(
                 owner.page_id,
                 owner.owner_id,
                 plan.uncovered_source_ink_pixels,
+            )
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
             )
             review_seed = copy.deepcopy(record)
             review_seed["owner_execution_rejection_reason"] = (
@@ -12369,17 +12549,51 @@ def execute_owner_page_graph(
             and callable(getattr(performance_recorder, "measure", None))
             else nullcontext()
         )
-        with typesetting_timing:
-            layout_page = enrich_page_layout(
-                {
-                    "page_id": owner.page_id,
-                    "width": int(source.shape[1]),
-                    "height": int(source.shape[0]),
-                    "texts": [record],
-                },
-                owner_graph=single,
-                layout_regions=owner_layout_regions,
+        try:
+            with typesetting_timing:
+                layout_page = enrich_page_layout(
+                    {
+                        "page_id": owner.page_id,
+                        "width": int(source.shape[1]),
+                        "height": int(source.shape[0]),
+                        "texts": [record],
+                    },
+                    owner_graph=single,
+                    layout_regions=owner_layout_regions,
+                )
+        except ValueError as exc:
+            rejection_reason = str(exc)
+            if not rejection_reason.endswith(
+                "layout chord escapes paint_safe_polygon_page"
+            ):
+                raise
+            logger.warning(
+                "owner layout rejected: page_id=%s owner_id=%s reason=%s",
+                owner.page_id,
+                owner.owner_id,
+                rejection_reason,
             )
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
+            )
+            review_seed = copy.deepcopy(record)
+            review_seed["owner_execution_rejection_reason"] = rejection_reason
+            review_seed["qa_flags"] = sorted(
+                {
+                    *list(review_seed.get("qa_flags") or []),
+                    "owner_layout_unsafe",
+                }
+            )
+            final_records.append(
+                _owner_non_rendering_record(
+                    executed_graph,
+                    owner,
+                    seed=review_seed,
+                )
+            )
+            continue
         layout_page["texts"][0]["_owner_component_bboxes_page"] = {
             key: list(value) for key, value in component_bboxes.items()
         }
@@ -12801,6 +13015,11 @@ def execute_owner_page_graph(
             ]
             final_records.append(rendered_record)
         else:
+            _transition_owner_to_review(
+                executed_graph,
+                owner.owner_id,
+                enforce_graph=enforce_graph,
+            )
             review_seed = _owner_execution_review_seed(
                 record,
                 commit.reason,
@@ -12820,6 +13039,59 @@ def execute_owner_page_graph(
                     enforce_graph=enforce_graph,
                 )
             )
+
+    if commits:
+        from compositor.owner_compositor import compose_page
+
+        composition = compose_page(
+            source,
+            [commit.mutation for commit in commits],
+            [commit.glyph_patch for commit in commits],
+            np.zeros(source.shape[:2], dtype=np.uint8),
+        )
+        if not composition.committed:
+            rejected_commits, rejected_records, rejected_materializations = (
+                _retire_owner_composition_conflicts(
+                    executed_graph,
+                    commits=tuple(commits),
+                    records=tuple(final_records),
+                    target_materializations=tuple(target_materializations),
+                    conflicts=tuple(composition.conflicts),
+                    enforce_graph=enforce_graph,
+                )
+            )
+            commits = list(rejected_commits)
+            final_records = list(rejected_records)
+            target_materializations = list(rejected_materializations)
+            logger.warning(
+                "owner composition conflicts retired: page_id=%s owners=%s conflicts=%s",
+                executed_graph.page_id,
+                sorted(
+                    {
+                        owner_id
+                        for conflict in composition.conflicts
+                        for owner_id in conflict.owner_ids
+                    }
+                ),
+                [
+                    {
+                        "phase": conflict.phase,
+                        "code": conflict.code,
+                        "pixel_count": conflict.pixel_count,
+                    }
+                    for conflict in composition.conflicts
+                ],
+            )
+            verified_composition = compose_page(
+                source,
+                [commit.mutation for commit in commits],
+                [commit.glyph_patch for commit in commits],
+                np.zeros(source.shape[:2], dtype=np.uint8),
+            )
+            if not verified_composition.committed:
+                raise ValueError(
+                    "owner composition conflicts remain after authority revocation"
+                )
 
     executed_graph.require_valid(mode="enforce" if enforce_graph else "legacy")
     return OwnerPageExecution(

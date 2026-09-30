@@ -1,0 +1,96 @@
+{
+  "schema": "traduzai.consumer-fast-base-sources.v1",
+  "seed_commit": "57caa2e88b493ae8bd32d2181fd04d6a3dc06cfe",
+  "hash_semantics": "SHA-256 dos arquivos de origem antes dos adaptadores locais de integracao; preserva a proveniencia mesmo quando o arquivo materializado recebe ajustes portaveis no worktree.",
+  "source_roots": {
+    "vision_quality_overlay": "N:/TraduzAI/.worktrees/traduzai-vision-dataset-v0/tools/quality_remaining",
+    "optimized_overlay": "N:/TraduzAI/.worktrees/optimized-e2e-integration",
+    "root_runtime": "N:/TraduzAI/pipeline"
+  },
+  "origin_rules": [
+    {
+      "glob": "pipeline/consumer_fast/runtime/consumer_fast_core.py",
+      "root": "optimized_overlay"
+    },
+    {
+      "glob": "pipeline/consumer_fast/runtime/consumer_fast_resume.py",
+      "root": "optimized_overlay"
+    },
+    {
+      "glob": "pipeline/consumer_fast/runtime/owner_snapshot_codec.py",
+      "root": "optimized_overlay"
+    },
+    {
+      "glob": "pipeline/consumer_fast/**",
+      "root": "vision_quality_overlay",
+      "source_subdir": "experimental_overlay"
+    },
+    {
+      "glob": "pipeline/typesetter/**",
+      "root": "vision_quality_overlay",
+      "source_subdir": "pipeline_overlay/typesetter"
+    },
+    {
+      "glob": "pipeline/ownership/render_geometry.py",
+      "root": "vision_quality_overlay",
+      "source_subdir": "pipeline_overlay/ownership"
+    }
+  ],
+  "materialized_hash_semantics": "Entradas ausentes em materialized_overrides preservam exatamente o hash de files. Entradas presentes foram adaptadas no worktree e seu SHA-256 atual e autenticado e revisado no diff.",
+  "materialized_overrides": {
+    "pipeline/consumer_fast/runtime/consumer_operational_recovery.py": "1795f546aa3f9d403802d374f8e9897b55fec90f9ae9255f8df48c998c432961",
+    "pipeline/consumer_fast/run_operational_closure.py": "a1c98ca092b05b0ce3421ede84bede2698676db64a46154696000d262a978328",
+    "pipeline/consumer_fast/runtime/consumer_recipe_runtime.py": "31c1689196ede576d9495d8779d24f23911ab824c8aac38d6924e1485901ce6d",
+    "pipeline/consumer_fast/runtime/consumer_layout_search.py": "4e3e757e935c4d903fc49b672c26cb352dfb60dfff36eaf4e8d7ef80ec2b28c2",
+    "pipeline/typesetter/renderer.py": "d3fbe6835fa3807e65e1a42956527c9c0ab1df38cc738efdf69a54f83b41ec5a",
+    "pipeline/typesetter/font-policy.json": "e79d4e3bec049c73e1511c963f4dc4c2edcd6c899c2ef368212823f501e26162",
+    "pipeline/ownership/render_geometry.py": "b3a6ce8868721a770f12ac9c31135700b28be3bbe9bd98122744ac47d6c82d85",
+    "pipeline/typesetter/owner_render_quality.py": "5c35e8b79e3f3270293c1a311b347e710fa77ff40715593674f90b8da7850e45",
+    "pipeline/typesetter/font-map.closed.json": "43a0fb4907d591b09ae72f85bc2f6b6a382d63fe801f8d374acea352994ad6c6",
+    "pipeline/typesetter/font-map.closed.case-r1.json": "e2eaa5df9e1ff3f6da0d2016b76a419745fbd45cdba004b8db23692c9df301a1"
+  },
+  "integration_added_files": [
+    "pipeline/consumer_fast/runtime/consumer_historical_child.py",
+    "pipeline/integration_v1/providers.py",
+    "pipeline/integration_v1/orchestrator.py"
+  ],
+  "files": {
+    "pipeline/consumer_fast/run_operational_closure.py": "0de5c1a1099add1bc5a9a1f17bfd284ed86d20be99c35ea44f7bfb3eed5a658b",
+    "pipeline/consumer_fast/runtime/consumer_case_policy.py": "cda61268fc1d27b47316d455e01cc470e9303598feadd659d5c888ca54687970",
+    "pipeline/consumer_fast/runtime/consumer_connected.py": "b8b9722b106917169323f9a2ca37da4e020e080ba0fffa2415aae3b5326f13bf",
+    "pipeline/consumer_fast/runtime/consumer_connected_preparation.py": "502a28b5a43e096e2dfa598ff0229740485d75a5b3ad0ee61d1dc021d0e0dc0e",
+    "pipeline/consumer_fast/runtime/consumer_fast_core.py": "db2d17f72f6c2564728063db5a4c29a97c1cd522b85100366021e184dafc88b2",
+    "pipeline/consumer_fast/runtime/consumer_fast_project.py": "992ab54c04eebac45a7a84cda9215149b7ff20ce8b80e7785b37e61610d856a7",
+    "pipeline/consumer_fast/runtime/consumer_fast_recipe.py": "234c039544f6585f585939fabc5e9ff6de6d38869ddcd7c939276fee18c15d02",
+    "pipeline/consumer_fast/runtime/consumer_fast_resume.py": "bb5812a1e143b2fbff6bb6362b6ac304d042b1029264c99940267a2f1481922e",
+    "pipeline/consumer_fast/runtime/consumer_focal_text.py": "585e38487b0cde940cf6d24743275478d01247b16ce040a9715634de869447e1",
+    "pipeline/consumer_fast/runtime/consumer_layout_search.py": "1ce7693b2fd17e6d89991174706aaef12cf4e3c0eb8ed44bf9a103862c191492",
+    "pipeline/consumer_fast/runtime/consumer_operational_discovery.py": "3fed388c022187a4fb43a5421a7adee7bc420719b046107dbdcf8a95e24ddac9",
+    "pipeline/consumer_fast/runtime/consumer_operational_publish.py": "f83a5dd56d862cbbc700524335860c20e068a56d8693cb9f51c29842b7e4b5f2",
+    "pipeline/consumer_fast/runtime/consumer_operational_recovery.py": "a2de5dc85ebbdbfaad40803b5f0a31ef2953926aad091b66a31feebf3e4a8f27",
+    "pipeline/consumer_fast/runtime/consumer_recipe_runtime.py": "d0d9aba2c9b94e5710401b903abc7b57b39de2298279033b5f6a744137a6064f",
+    "pipeline/consumer_fast/runtime/consumer_visual_comfort.py": "f3b8f989552aac22b353656a9fec9b57c6738c66b839033108ddb0cfb137673f",
+    "pipeline/consumer_fast/runtime/consumer_white_glyph_cleanup.py": "655b3dd756d47b1f6b546d278f4bfe508cd5b5aa52e6d116fbd6efa84ace1f8e",
+    "pipeline/consumer_fast/runtime/owner_snapshot_codec.py": "086bd7f992b8dd47e02bc6b845d7f9f59c1dded2eacc55ff9dda17336e5240b4",
+    "pipeline/ownership/render_geometry.py": "47bfddbd7667268a3456d840aa0451eff19ec51f6bb7714f0aa2be2efafff6d4",
+    "pipeline/typesetter/stable_baseline.py": "1413173b1743a527369ff40877613cc7e95d2eb09465ae061ce619bcf4f0731c",
+    "pipeline/typesetter/renderer.py": "0566fc8827834c15924ed81acd5051ec9f5837cec0f4051bdb1c7a8edec79601",
+    "pipeline/typesetter/font_policy.py": "f6e10b0242460bdc27f50147cc4c6ef59de4112c0d74c76186bd4d185da987bd",
+    "pipeline/typesetter/font_matcher.py": "a3b18a7332607dfc2fd6ab3d2d9a2819bb0b4bfc3b8c4b5157f035b1dac3556a",
+    "pipeline/typesetter/owner_render_quality.py": "c538ad3f105303a98c5045ae601b5b4ccbddeaddf4b05a4bb220d572078dfc44",
+    "pipeline/typesetter/font-map.closed.json": "0832d735103c242bfd1bd7807079b3ca8148ab52c08e5a4401bdaa684a88b83c",
+    "pipeline/typesetter/font-map.closed.case-r1.json": "a251b2a88f57a34a95b7157f0ad52558c39f40a7a5372d786d757f4a4551aa4b",
+    "pipeline/typesetter/font-policy.json": "a5ec1672357cdfb73aa9151e258ae27fcae3f471a2c5d582ef2b0c17af09b03d",
+    "pipeline/typesetter/baseline-policy.json": "3ad30c2cb8afa2fe7a28d3d595fff79d69fcb69536a4a7887f6fd6b60340e431"
+  },
+  "excluded": [
+    "outputs/**",
+    "datasets/**",
+    "fonts/**",
+    "models/**",
+    "accepted translations",
+    "OCR caches",
+    "pickled candidates",
+    "published project.json files"
+  ]
+}
