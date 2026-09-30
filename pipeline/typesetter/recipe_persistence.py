@@ -89,4 +89,3 @@ def rerender_typography_edit(
     new.verify_output(rendered)
     persisted = persist_renderer_recipe(persist_root, new) if persist_root is not None else None
     return rendered, persisted
-
