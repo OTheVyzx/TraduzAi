@@ -21640,6 +21640,72 @@ def _render_owner_band_image(
             fit_status = f"delivery_{delivery_contract.reason}"
         render_completed = False
 
+    # Capture only facts exposed by this exact render attempt. The executor will
+    # later bind these inputs to the final AnalysisRecord and project ledger.
+    recipe_evidence = None
+    render_layout = block.get("render_layout_contract")
+    render_debug = block.get("_render_debug")
+    font_name = str(block.get("font_name") or (render_debug or {}).get("font_name") or "")
+    font_size_px = int(block.get("font_size_final", 0) or (render_debug or {}).get("font_size_final", 0) or 0)
+    if font_name and font_size_px > 0:
+        actual_font = get_font(font_name, font_size_px)
+        actual_font_path = str(getattr(actual_font, "font_path", "") or "")
+        font_digest = sha256(Path(actual_font_path).read_bytes()).hexdigest() if actual_font_path and Path(actual_font_path).is_file() else ""
+    else:
+        actual_font_path = ""
+        font_digest = ""
+    runtime_digest = sha256(Path(__file__).read_bytes()).hexdigest()
+    geometry_payload = owner_render_geometry.to_dict()
+    render_config = {
+        "font_name": font_name,
+        "font_sha256": font_digest,
+        "font_size_px": font_size_px,
+        "render_layout_contract": copy.deepcopy(render_layout),
+        "style": copy.deepcopy(block.get("estilo") or {}),
+    }
+    recipe_evidence = {
+        "target_text": execution_authority.translated_payload,
+        "rendered_lines": (
+            [str(line) for line in render_layout.get("lines") or []]
+            if isinstance(render_layout, Mapping) else []
+        ),
+        "font_family": font_name,
+        "font_path": actual_font_path,
+        "font_sha256": font_digest,
+        "font_size_px": font_size_px if font_size_px > 0 else None,
+        "line_advance_px": (
+            int(render_layout.get("line_height", 0) or 0)
+            if isinstance(render_layout, Mapping) else None
+        ),
+        "render_bbox": list(glyph_bbox or []),
+        "effects": copy.deepcopy(block.get("estilo") or {}),
+        "anchors": {
+            "source_anchor_bbox": geometry_payload.get("source_anchor_bbox"),
+            "source_anchor_polygon": geometry_payload.get("source_anchor_polygon"),
+            "mode": "authenticated_owner_render_geometry",
+        },
+        "geometry": {
+            "coordinate_space": "logical_page",
+            "owner_render_geometry": geometry_payload,
+            "owner_render_geometry_sha256": owner_render_geometry.geometry_sha256,
+            "glyph_bbox_page": list(glyph_bbox or []),
+        },
+        "policy_versions": (
+            {
+                "render_layout_contract": f"v{int(render_layout.get('schema_version', 0) or 0)}",
+                "owner_glyph_patch_contract": "owner-glyph-patch-v1",
+            }
+            if isinstance(render_layout, Mapping) and int(render_layout.get("schema_version", 0) or 0) > 0
+            else {}
+        ),
+        "rasterizer_runtime_id": "traduzai-typesetter-owner-renderer-v1",
+        "rasterizer_runtime_sha256": runtime_digest,
+        "rasterizer_config_sha256": sha256(
+            json.dumps(render_config, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest(),
+        "source_pixel_sha256": sha256(before.tobytes(order="C")).hexdigest(),
+    }
+
     return OwnerGlyphPatch(
         owner_id=owner_id,
         page_id=graph_page_id,
@@ -21674,6 +21740,7 @@ def _render_owner_band_image(
         text_execution_authority=execution_authority,
         delivery_contract=delivery_contract,
         render_layout_contract=copy.deepcopy(block.get("render_layout_contract")),
+        renderer_recipe_evidence=recipe_evidence,
     )
 
 

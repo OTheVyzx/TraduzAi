@@ -110,9 +110,10 @@ def _build_inpainter(config: dict[str, Any]):
 
 
 def _write_analysis_record(output_dir: Path, source_path: Path, config: dict[str, Any], output_pages) -> dict[str, Any]:
-    """Persist a real, non-publishable Vision contract while lineage adapters remain incomplete."""
+    """Persist the canonical Vision/page journal without upgrading mask authority."""
     from integration_v1.contracts import AnalysisRecord
     from vision_runtime.analysis_payload import build_analysis_payload
+    from vision_runtime.structure import build_structural_analysis
 
     source_sha = _sha256(source_path)
     config_sha = hashlib.sha256(
@@ -123,19 +124,93 @@ def _write_analysis_record(output_dir: Path, source_path: Path, config: dict[str
     height, width = (image.shape[:2] if image is not None else (1, 1))
     root = output_dir / "consumer_fast" / "vision"
     root.mkdir(parents=True, exist_ok=True)
-    observations_path = root / "ocr_observations.json"
+    page_result = getattr(page, "owner_page_result", None)
+    if page_result is None:
+        raise RuntimeError("Vision PageExecutionResult is missing; AnalysisRecord cannot be complete")
+    coverage = getattr(page_result, "coverage", None)
+    if coverage is None or not getattr(coverage, "canonical_json_bytes", None):
+        raise RuntimeError("Vision PageCoverageResult canonical bytes are missing")
+    ledger = getattr(coverage, "ledger", None)
+    if ledger is None or not getattr(ledger, "sha256", None):
+        raise RuntimeError("Vision coverage ledger identity is missing")
+
+    journal = page_result.to_canonical_dict()
+    journal_path = root / "page_execution_evidence.json"
+    _atomic_json(journal_path, journal)
+    journal_sha = _sha256(journal_path)
+    coverage_path = root / "coverage_result.json"
+    coverage_path.write_bytes(coverage.canonical_json_bytes)
+    coverage_sha = _sha256(coverage_path)
     observations = [
         {
-            "page": index + 1,
-            "owner_ids": [str(item.get("owner_id") or item.get("id") or "") for item in (p.text_layers or {}).get("texts", []) if isinstance(item, dict)],
-            "text_count": len((p.text_layers or {}).get("texts", [])),
+            "observation_id": str(item.observation_id),
+            "text": str(item.text),
+            "bbox_page": list(item.bbox_page),
+            "page_id": str(item.page_id),
+            "provider": str(item.provider),
+            "provider_family": str(item.provider_family),
+            "run_id": str(item.run_id),
+            "execution_id": str(item.origin_execution_id),
+            "attempt_id": str(item.attempt_id),
+            "invocation_id": str(item.invocation_id),
+            "page_source_sha256": str(item.page_source_sha256),
+            "payload_sha256": str(item.payload_sha256),
+            "rejection_reason": item.rejection_reason,
         }
-        for index, p in enumerate(output_pages)
+        for item in coverage.observations
     ]
+    observations_path = root / "ocr_observations.json"
     _atomic_json(observations_path, observations)
     observations_sha = _sha256(observations_path)
+    owner_graph_snapshot = getattr(page_result, "owner_graph", None)
+    owner_graph = owner_graph_snapshot.read() if callable(getattr(owner_graph_snapshot, "read", None)) else None
+    selected_observation_ids = sorted({
+        str(observation_id)
+        for owner in (getattr(owner_graph, "owners", ()) or ())
+        for observation_id in (getattr(owner, "selected_observation_ids", ()) or ())
+        if str(observation_id)
+    })
+    observation_ids = {str(item["observation_id"]) for item in observations}
+    if not set(selected_observation_ids).issubset(observation_ids):
+        raise RuntimeError("Vision owner selection references an observation outside the same page evidence")
+    structural = build_structural_analysis(
+        observations=[
+            {
+                "observation_id": item["observation_id"],
+                "text": item["text"],
+                "bbox_page": item["bbox_page"],
+                "selection_state": "eligible" if item["observation_id"] in selected_observation_ids else "unresolved",
+                "uncertainty_reasons": ([] if item["observation_id"] in selected_observation_ids else ["owner_selection_not_authorized_by_analysis_adapter"]),
+            }
+            for item in observations
+        ],
+        containers=[],
+    )
+    structural_payload = {
+        "schema": "traduzai.vision-structural-analysis.v1",
+        "logical_units": list(structural.logical_units),
+        "physical_subblocks": list(structural.physical_subblocks),
+        "relations": list(structural.relations),
+        "reading_order": list(structural.reading_order),
+        "source_observation_sha256": observations_sha,
+    }
+    structure_path = root / "structural_analysis.json"
+    _atomic_json(structure_path, structural_payload)
+    structure_sha = _sha256(structure_path)
+    artifact_refs = [
+        {"kind": kind, "path": path.relative_to(output_dir).as_posix(), "sha256": _sha256(path)}
+        for kind, path in (
+            ("vision_page_execution_evidence", journal_path),
+            ("vision_coverage_result", coverage_path),
+            ("vision_ocr_observations", observations_path),
+            ("vision_structural_analysis", structure_path),
+        )
+    ]
+    page_id = str(page_result.page_id)
+    project_id = f"consumer-fast-{source_sha[:24]}"
+    project_revision = 1
     payload = build_analysis_payload(
-        status="building",
+        status="complete",
         identity={
             "source_sha256": source_sha,
             "authenticated_neighbor_sha256s": [],
@@ -144,34 +219,275 @@ def _write_analysis_record(output_dir: Path, source_path: Path, config: dict[str
             "transform_sha256": hashlib.sha256(b"identity-transform-v1").hexdigest(),
             "source_language": str(config.get("idioma_origem", "en")),
             "analysis_config_sha256": config_sha,
-            "provider_family": "vision_stack",
+            "provider_family": "vision_v6",
             "provider_name": "vision_stack.runtime",
             "provider_model": str(config.get("engine_preset_id") or "max"),
-            "provider_version": "local-runtime",
+            "provider_version": str(getattr(coverage.observations[0], "provider_family", "vision-v6") if coverage.observations else "vision-v6"),
             "capability_version": "consumer-fast-v1",
         },
         references={
-            "artifact_refs": [{"kind": "ocr_observations", "path": "consumer_fast/vision/ocr_observations.json", "sha256": observations_sha}],
+            "artifact_refs": artifact_refs,
             "transform_ref": {"kind": "identity", "sha256": hashlib.sha256(b"identity-transform-v1").hexdigest(), "inverse_sha256": hashlib.sha256(b"identity-transform-v1").hexdigest()},
             "ocr_observations": {"artifact_ref": "consumer_fast/vision/ocr_observations.json", "sha256": observations_sha, "count": len(observations)},
-            "selected_observation_id": None,
-            "selection_provenance": {"kind": "owner_lineage_adapter_pending"},
-            "logical_units": {"artifact_ref": "consumer_fast/vision/ocr_observations.json", "sha256": observations_sha, "count": 0},
-            "physical_subblocks": {"artifact_ref": "consumer_fast/vision/ocr_observations.json", "sha256": observations_sha, "count": sum(row["text_count"] for row in observations)},
-            "relations": {"artifact_ref": "consumer_fast/vision/ocr_observations.json", "sha256": observations_sha, "count": 0},
-            "reading_order": {"artifact_ref": "consumer_fast/vision/ocr_observations.json", "sha256": observations_sha, "count": 0},
+            "selected_observation_id": selected_observation_ids[0] if len(selected_observation_ids) == 1 else None,
+            "selection_provenance": {"kind": "vision_page_execution_and_owner_graph", "page_evidence_sha256": journal_sha, "coverage_sha256": coverage_sha, "coverage_ledger_sha256": ledger.sha256, "owner_graph_sha256": str(getattr(owner_graph_snapshot, "sha256", journal.get("owner_graph_sha256") or "")), "selected_observation_ids": selected_observation_ids, "selection_status": "selected" if selected_observation_ids else "unresolved"},
+            "logical_units": {"artifact_ref": "consumer_fast/vision/structural_analysis.json", "sha256": structure_sha, "count": len(structural.logical_units)},
+            "physical_subblocks": {"artifact_ref": "consumer_fast/vision/structural_analysis.json", "sha256": structure_sha, "count": len(structural.physical_subblocks)},
+            "relations": {"artifact_ref": "consumer_fast/vision/structural_analysis.json", "sha256": structure_sha, "count": len(structural.relations)},
+            "reading_order": {"artifact_ref": "consumer_fast/vision/structural_analysis.json", "sha256": structure_sha, "count": len(structural.reading_order)},
             "container_contour_ref": None,
             "writing_body_ref": None,
             "tail_ref": None,
-            "dependency_hashes": {"source": source_sha, "analysis_config": config_sha, "ocr_observations": observations_sha},
+            "dependency_hashes": {"source": source_sha, "analysis_config": config_sha, "ocr_observations": observations_sha, "vision_page_evidence": journal_sha, "coverage_result": coverage_sha, "coverage_ledger": ledger.sha256, "structural_analysis": structure_sha},
         },
     )
+    payload.update({
+        "project_id": project_id,
+        "project_revision": project_revision,
+        "run_id": str(page_result.request.run_id),
+        "execution_id": str(page_result.request.execution_id),
+        "page_id": page_id,
+        "coverage_ledger_sha256": ledger.sha256,
+    })
     record = AnalysisRecord.build(payload).to_dict()
-    record["status"] = "building"
+    record["project_id"] = project_id
+    record["project_revision"] = project_revision
+    record["run_id"] = str(page_result.request.run_id)
+    record["execution_id"] = str(page_result.request.execution_id)
+    record["page_id"] = page_id
+    record["coverage_ledger_sha256"] = ledger.sha256
     record["publishable"] = False
     path = root / "analysis_record.json"
     _atomic_json(path, record)
-    return {"status": "building", "publishable": False, "path": str(path), "sha256": _sha256(path)}
+    return {
+        "status": "complete", "publishable": False, "path": str(path), "sha256": _sha256(path),
+        "project_id": project_id, "project_revision": project_revision, "run_id": record["run_id"],
+        "execution_id": record["execution_id"], "page_id": page_id,
+        "coverage_ledger_sha256": ledger.sha256,
+        "analysis_record_sha256": record["analysis_record_sha256"],
+    }
+
+
+def _exact_line_plan(target_text: str, rendered_lines: list[str]):
+    """Bind renderer-emitted lines to exact source substrings and whitespace."""
+    from typesetter.recipe_contract import ExactLinePlan
+
+    lines = [str(line) for line in rendered_lines]
+    if not target_text or not lines:
+        raise ValueError("RendererRecipe missing rendered_lines from typesetter output")
+    separators: list[str] = []
+    offset = 0
+    for index, line in enumerate(lines):
+        if not line or target_text[offset : offset + len(line)] != line:
+            raise ValueError("RendererRecipe rendered_lines do not preserve exact target_text")
+        offset += len(line)
+        if index + 1 < len(lines):
+            separator_start = offset
+            while offset < len(target_text) and target_text[offset].isspace():
+                offset += 1
+            separator = target_text[separator_start:offset]
+            if not separator:
+                raise ValueError("RendererRecipe rendered_lines have no exact whitespace separator")
+            separators.append(separator)
+    if offset != len(target_text):
+        raise ValueError("RendererRecipe rendered_lines do not consume exact target_text")
+    return ExactLinePlan.build(target_text=target_text, lines=lines, separators=separators)
+
+
+def _write_renderer_recipes(
+    output_dir: Path,
+    output_pages,
+    *,
+    analysis_record_sha256: str,
+    project_id: str,
+    project_revision: int,
+    ledger_sha256: str,
+    original_paths: list[Path] | None = None,
+) -> dict[str, Any]:
+    """Persist only recipes whose exact owner-render evidence came from the raster stage."""
+    from typesetter.recipe_contract import RendererRecipe
+    from typesetter.recipe_persistence import persist_renderer_recipe
+
+    output_root = Path(output_dir).resolve()
+    recipe_root = output_root / "consumer_fast"
+    recipe_root.mkdir(parents=True, exist_ok=True)
+    repo_root = Path(__file__).resolve().parents[2]
+    recipes: list[dict[str, Any]] = []
+    no_patch_diagnostics: list[str] = []
+    for page_index, page in enumerate(output_pages):
+        page_result = getattr(page, "owner_page_result", None)
+        if page_result is None:
+            raise ValueError("RendererRecipe requires the same Vision PageExecutionResult")
+        coverage = page_result.coverage
+        page_ledger = getattr(coverage, "ledger", None)
+        if page_ledger is None or page_ledger.sha256 != ledger_sha256:
+            raise ValueError("RendererRecipe coverage ledger differs from AnalysisRecord")
+        raster_path = Path(page.path).resolve()
+        raster_bytes = raster_path.read_bytes()
+        raster_sha = hashlib.sha256(raster_bytes).hexdigest()
+        commits = list(getattr(page_result, "page_commits", ()) or ())
+        owner_patches = [
+            item.glyph_patch for item in commits
+            if getattr(item, "glyph_patch", None) is not None
+        ]
+        if not owner_patches:
+            graph_snapshot = getattr(page_result, "owner_graph", None)
+            graph = graph_snapshot.read() if callable(getattr(graph_snapshot, "read", None)) else None
+            owners = list(getattr(graph, "owners", ()) or ())
+            owner_details = []
+            unchanged_owners = []
+            for owner in owners:
+                owner_id = str(getattr(owner, "owner_id", ""))
+                state = str(getattr(owner, "state", "unknown"))
+                route = str(getattr(owner, "route_action", "unknown"))
+                source = str(getattr(owner, "source_payload", "") or "")
+                target = str(getattr(owner, "translated_payload", "") or "")
+                owner_details.append(f"{owner_id}(state={state},route={route})")
+                if source and source == target:
+                    unchanged_owners.append(owner_id)
+            no_patch_diagnostics.append(
+                f"page_id={page_result.page_id} page_commits={len(commits)} "
+                f"owners=[{','.join(owner_details) or 'none'}] "
+                f"unchanged=[{','.join(unchanged_owners) or 'none'}]"
+            )
+            continue
+        for patch in owner_patches:
+            evidence = getattr(patch, "renderer_recipe_evidence", None)
+            if not isinstance(evidence, dict):
+                raise ValueError(
+                    "RendererRecipe producer typesetter.renderer._render_owner_band_image "
+                    "did not emit renderer_recipe_evidence"
+                )
+            required = (
+                "target_text", "rendered_lines", "font_family", "font_path", "font_sha256",
+                "font_size_px", "line_advance_px", "render_bbox", "effects", "anchors",
+                "geometry", "policy_versions", "rasterizer_runtime_id",
+                "rasterizer_runtime_sha256", "rasterizer_config_sha256", "source_pixel_sha256",
+            )
+            missing = [name for name in required if evidence.get(name) in (None, "", [], {})]
+            if missing:
+                raise ValueError(
+                    "RendererRecipe producer typesetter.renderer._render_owner_band_image "
+                    "missing fields: " + ", ".join(missing)
+                )
+            font_path = Path(str(evidence["font_path"])).resolve()
+            if not font_path.is_file() or hashlib.sha256(font_path.read_bytes()).hexdigest() != evidence["font_sha256"]:
+                raise ValueError("RendererRecipe font file identity/hash is unavailable or changed")
+            try:
+                font_relative_path = font_path.relative_to(repo_root).as_posix()
+            except ValueError as exc:
+                try:
+                    font_relative_path = font_path.relative_to(output_root).as_posix()
+                except ValueError:
+                    raise ValueError("RendererRecipe font_path is outside the project/runtime roots") from exc
+            source_pixel_sha = str(evidence["source_pixel_sha256"])
+            if len(source_pixel_sha) != 64 or any(char not in "0123456789abcdef" for char in source_pixel_sha):
+                raise ValueError("RendererRecipe source_pixel_sha256 is not a canonical SHA-256")
+            original_path = Path(original_paths[page_index]).resolve() if original_paths else None
+            original_sha = _sha256(original_path) if original_path and original_path.is_file() else ""
+            lineage = {
+                "project_id": project_id,
+                "project_revision": int(project_revision),
+                "coverage_ledger_sha256": ledger_sha256,
+                "analysis_record_sha256": analysis_record_sha256,
+                "run_id": str(page_result.request.run_id),
+                "execution_id": str(page_result.request.execution_id),
+                "page_id": str(page_result.page_id),
+                "owner_id": str(patch.owner_id),
+            }
+            lineage_sha = hashlib.sha256(
+                json.dumps(lineage, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            recipe = RendererRecipe.build(
+                owner_id=str(patch.owner_id),
+                source_sha256=source_pixel_sha,
+                output_sha256=raster_sha,
+                target_text=str(evidence["target_text"]),
+                font={
+                    "family": str(evidence["font_family"]),
+                    "relative_path": font_relative_path,
+                    "sha256": str(evidence["font_sha256"]),
+                },
+                rasterizer={
+                    "runtime_id": str(evidence["rasterizer_runtime_id"]),
+                    "runtime_sha256": str(evidence["rasterizer_runtime_sha256"]),
+                    "config_sha256": str(evidence["rasterizer_config_sha256"]),
+                },
+                line_plan=_exact_line_plan(str(evidence["target_text"]), list(evidence["rendered_lines"])),
+                bbox=list(evidence["render_bbox"]),
+                font_size_px=int(evidence["font_size_px"]),
+                line_advance_px=int(evidence["line_advance_px"]),
+                effects=dict(evidence["effects"]),
+                anchors=dict(evidence["anchors"]),
+                geometry=dict(evidence["geometry"]),
+                policy_versions=dict(evidence["policy_versions"]),
+                dependency_hashes={
+                    "analysis_record": analysis_record_sha256,
+                    "coverage_ledger": ledger_sha256,
+                    "project_lineage": lineage_sha,
+                    "renderer_runtime": str(evidence["rasterizer_runtime_sha256"]),
+                    "raster_artifact": raster_sha,
+                    "source_file": original_sha or source_pixel_sha,
+                },
+            )
+            recipe.verify_output(raster_bytes)
+            persisted_path = persist_renderer_recipe(recipe_root, recipe)
+            loaded_path = persisted_path.resolve().relative_to(output_root).as_posix()
+            recipes.append({
+                "owner_id": recipe.owner_id,
+                "page_id": str(page_result.page_id),
+                "recipe_sha256": recipe.recipe_sha256,
+                "output_sha256": recipe.output_sha256,
+                "path": loaded_path,
+                "project_id": project_id,
+                "project_revision": int(project_revision),
+                "coverage_ledger_sha256": ledger_sha256,
+                "analysis_record_sha256": analysis_record_sha256,
+                "lineage": lineage,
+            })
+    if not recipes:
+        detail = "; ".join(no_patch_diagnostics) or "no_owner_execution_commits"
+        raise ValueError(
+            "RendererRecipe producer typesetter.renderer._render_owner_band_image was not invoked: "
+            "no committed OwnerGlyphPatch; " + detail
+        )
+    lineage_receipt = {
+        "schema": "traduzai.consumer-fast-renderer-lineage.v1",
+        "project_id": project_id,
+        "project_revision": int(project_revision),
+        "coverage_ledger_sha256": ledger_sha256,
+        "analysis_record_sha256": analysis_record_sha256,
+        "recipes": recipes,
+    }
+    _atomic_json(recipe_root / "renderer_recipe_lineage.json", lineage_receipt)
+    return {"status": "persisted", "recipe_count": len(recipes), "project_id": project_id,
+            "project_revision": int(project_revision), "coverage_ledger_sha256": ledger_sha256,
+            "recipes": recipes, "lineage_path": str(recipe_root / "renderer_recipe_lineage.json")}
+
+
+def _loaded_module_evidence() -> list[dict[str, str]]:
+    import sys
+
+    names = (
+        "vision_stack.runtime", "vision_runtime.analysis_payload", "vision_runtime.structure",
+        "integration_v1.contracts", "consumer_fast.physical_executor", "consumer_fast.provider_adapter",
+        "strip.run", "typesetter.renderer", "typesetter.recipe_contract", "typesetter.recipe_persistence",
+    )
+    rows = []
+    for name in names:
+        module = sys.modules.get(name)
+        raw_path = getattr(module, "__file__", None) if module is not None else None
+        if not raw_path:
+            rows.append({"name": name, "status": "not_loaded"})
+            continue
+        path = Path(raw_path).resolve()
+        rows.append({
+            "name": name,
+            "status": "loaded",
+            "path": str(path),
+            "sha256": _sha256(path),
+        })
+    return rows
 
 
 def execute_config(config_path: Path) -> Path:
@@ -212,6 +528,10 @@ def execute_config(config_path: Path) -> Path:
     for index, image in enumerate(image_files, start=1):
         target_name = f"{index:03d}{image.suffix.lower()}"
         shutil.copy2(image, originals_dir / target_name)
+    original_targets = [
+        originals_dir / f"{index:03d}{image.suffix.lower()}"
+        for index, image in enumerate(image_files, start=1)
+    ]
     config["engine_preset_id"] = config.get("engine_preset_id") or resolve_engine_preset(
         config, idioma_origem=config.get("idioma_origem", "en")
     ).id
@@ -269,6 +589,7 @@ def execute_config(config_path: Path) -> Path:
             Image.fromarray(page.inpainted_image).save(images_dir / Path(page.path).name)
         else:
             shutil.copy2(expected, images_dir / Path(page.path).name)
+        page.original_source_path = expected
 
     from main import build_project_json
     from project_writer import write_project_json_atomic
@@ -287,16 +608,56 @@ def execute_config(config_path: Path) -> Path:
     project["runtime_id"] = "consumer-fast-v1"
     project["runtime_profile"] = "consumer_fast"
     project["verified"] = False
+    analysis_receipt = _write_analysis_record(work_dir, image_files[0], config, output_pages)
+    ledger_sha = str(analysis_receipt["coverage_ledger_sha256"])
+    project_id = str(analysis_receipt["project_id"])
+    renderer_recipe_receipt: dict[str, Any]
+    try:
+        renderer_recipe_receipt = _write_renderer_recipes(
+            work_dir,
+            output_pages,
+            analysis_record_sha256=str(analysis_receipt["analysis_record_sha256"]),
+            project_id=project_id,
+            project_revision=int(analysis_receipt["project_revision"]),
+            ledger_sha256=ledger_sha,
+            original_paths=original_targets,
+        )
+    except (ValueError, OSError) as exc:
+        renderer_recipe_receipt = {
+            "status": "not_emitted",
+            "recipe_count": 0,
+            "project_id": project_id,
+            "project_revision": int(analysis_receipt["project_revision"]),
+            "coverage_ledger_sha256": ledger_sha,
+            "blocker": str(exc),
+        }
     gate = evaluate_export_gate(project)
-    gate = append_qa_integrity_failure(gate, ["vision_analysis_record_building", "renderer_recipe_adapter_pending"])
+    integrity_failures = []
+    if analysis_receipt.get("status") != "complete":
+        integrity_failures.append("vision_analysis_record_incomplete")
+    committed_patch_count = len([
+        patch for page in output_pages
+        for commit in (getattr(getattr(page, "owner_page_result", None), "page_commits", ()) or ())
+        if (patch := getattr(commit, "glyph_patch", None)) is not None
+    ])
+    if not renderer_recipe_receipt.get("recipe_count") or renderer_recipe_receipt.get("recipe_count") != committed_patch_count:
+        integrity_failures.append("renderer_recipe_missing_or_incomplete")
+    if integrity_failures:
+        gate = append_qa_integrity_failure(gate, integrity_failures)
+    project["project_id"] = project_id
+    project["project_revision"] = int(analysis_receipt["project_revision"])
+    project["coverage_ledger_sha256"] = ledger_sha
     project.setdefault("qa", {})["export_gate"] = gate
     project["export_gate"] = gate
     project["consumer_fast_physical"] = {
         "execution_id": execution_id,
         "run_id": run_id,
         "execution_plan_sha256": hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
-        "vision_analysis_record": _write_analysis_record(work_dir, image_files[0], config, output_pages),
-        "renderer": {"module": renderer.__name__, "recipe_contract_status": "adapter_pending", "recipe_count": 0},
+        "project_id": project_id,
+        "project_revision": int(analysis_receipt["project_revision"]),
+        "coverage_ledger_sha256": ledger_sha,
+        "vision_analysis_record": analysis_receipt,
+        "renderer": {"module": renderer.__name__, "recipe_contract_status": renderer_recipe_receipt["status"], "recipe_count": renderer_recipe_receipt.get("recipe_count", 0), "recipe_lineage": renderer_recipe_receipt},
         "stages": ["import", "analysis", "ocr", "logical_units", "translate", "restore", "layout", "rasterize", "review", "persist", "export_decision"],
         "translation_provider": provider_adapter.POLICY_ID,
         "legacy_fallback_allowed": False,
@@ -325,9 +686,17 @@ def execute_config(config_path: Path) -> Path:
         "execution_id": execution_id,
         "run_id": run_id,
         "page_count": len(output_pages),
+        "project_id": project_id,
+        "project_revision": int(analysis_receipt["project_revision"]),
+        "coverage_ledger_sha256": ledger_sha,
+        "originals": [
+            {"path": path.relative_to(work_dir).as_posix(), "sha256": _sha256(path)}
+            for path in original_targets
+        ],
         "rasters": rasters,
-        "renderer_recipe": {"status": "not_emitted", "reason": "owner glyph-patch executor has no V1 RendererRecipe adapter"},
+        "renderer_recipe": renderer_recipe_receipt,
         "analysis_record": project["consumer_fast_physical"]["vision_analysis_record"],
+        "loaded_modules": _loaded_module_evidence(),
         "qa": gate,
     }
     _atomic_json(work_dir / "consumer_fast_physical_execution.json", evidence)

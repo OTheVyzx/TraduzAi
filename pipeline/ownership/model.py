@@ -1159,6 +1159,7 @@ class OwnerGlyphPatch:
     text_execution_authority: Any = None
     delivery_contract: Any = None
     render_layout_contract: Any = None
+    renderer_recipe_evidence: Any = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.render_quality_contract, OwnerRenderQuality):
