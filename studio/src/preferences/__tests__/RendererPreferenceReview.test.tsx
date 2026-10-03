@@ -78,7 +78,7 @@ describe("RendererPreferenceReview", () => {
     const fixtureRoot = fileURLToPath(new URL("../__fixtures__/renderer-preference-v1", import.meta.url));
     const indexPath = resolve(fixtureRoot, "index.json");
     const comparisonPath = resolve(fixtureRoot, "comparison.json");
-    const digest = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+    const digest = (path: string) => createHash("sha256").update(readFileSync(path, "utf8").replace(/\r\n/g, "\n")).digest("hex");
     const index = JSON.parse(readFileSync(indexPath, "utf8")) as Record<string, any>;
     const rawComparison = JSON.parse(readFileSync(comparisonPath, "utf8"));
     const owner = index.owners["fixture:renderer-preference:owner-001"];

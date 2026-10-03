@@ -45,7 +45,7 @@ def test_auto_style_removes_effects_font_and_bad_white_on_light_background():
 def test_auto_style_keeps_conservative_default_without_detected_style():
     style = normalize_auto_typesetting_style({}, (255, 255, 255))
 
-    assert CANONICAL_AUTO_FONT == "ComicNeue-Bold.ttf"
+    assert CANONICAL_AUTO_FONT == "CCTotallyAwesome W00 Bold.ttf"
     assert style["fonte"] == CANONICAL_AUTO_FONT
     assert style["cor"] == "#000000"
     assert style["contorno"] == ""

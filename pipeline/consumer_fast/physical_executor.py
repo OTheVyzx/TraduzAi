@@ -26,6 +26,79 @@ def _atomic_json(path: Path, value: Any) -> None:
     atomic_json(path, value)
 
 
+def _apply_translation_delivery_review(project: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any]:
+    """Persist owner-level delivery notices while final verification remains pending."""
+    from qa.partial_delivery import apply_partial_delivery_policy
+
+    reviewed_gate = apply_partial_delivery_policy(project, gate)
+    project['qa']['translation_delivery']['quality_approved'] = False
+    project['needs_review'] = True
+    return reviewed_gate
+
+
+def _bind_physical_page_artifacts(
+    project: dict[str, Any], output_pages: list[Any], original_targets: list[Path], work_dir: Path,
+) -> None:
+    """Bind the original file's real extension and the renderer's output path."""
+    pages = project.get("paginas")
+    if not isinstance(pages, list) or len(pages) != len(output_pages) or len(pages) != len(original_targets):
+        raise RuntimeError("Consumer Fast page artifact cardinality mismatch")
+    root = work_dir.resolve()
+    for page, output, original in zip(pages, output_pages, original_targets):
+        rendered = Path(output.path).resolve()
+        inpainted = (work_dir / "images" / rendered.name).resolve()
+        paths = {"base": original.resolve(), "inpaint": inpainted, "rendered": rendered}
+        layers = page.get("image_layers")
+        if not isinstance(layers, dict) or any(not isinstance(layers.get(name), dict) for name in paths):
+            raise RuntimeError("Consumer Fast image layer paths are missing")
+        relative = {}
+        for name, artifact in paths.items():
+            if not artifact.is_relative_to(root) or not artifact.is_file():
+                raise RuntimeError(f"Consumer Fast {name} artifact is missing or outside work_dir")
+            relative[name] = artifact.relative_to(root).as_posix()
+            layers[name]["path"] = relative[name]
+        page["arquivo_original"] = relative["base"]
+        page["arquivo_traduzido"] = relative["rendered"]
+
+
+def _bind_verified_delivery_notices(project: dict[str, Any], output_pages: list[Any]) -> None:
+    """Carry owner commit/translation evidence into the serialized project."""
+    import cv2
+    from ownership.hash_contract import canonical_page_sha256
+    from qa.partial_delivery import notice_for_layer
+
+    pages = project.get("paginas") or []
+    if len(pages) != len(output_pages):
+        raise RuntimeError("Consumer Fast delivery page count mismatch")
+    for page, output in zip(pages, output_pages):
+        result = getattr(output, "owner_page_result", None)
+        if result is None or result.status != "final_verified" or result.terminal_proof is None:
+            raise RuntimeError("Consumer Fast delivery lacks final owner proof")
+        raster = cv2.imread(str(output.path), cv2.IMREAD_COLOR)
+        if raster is None or canonical_page_sha256(cv2.cvtColor(raster, cv2.COLOR_BGR2RGB)) != result.final_page.page_output_pixel_sha256:
+            raise RuntimeError("Consumer Fast delivery raster differs from final owner proof")
+        bindings = {binding.owner_id: binding for binding in result.translations}
+        commits = tuple(result.page_commits)
+        verdicts = {verdict.owner_id: verdict for verdict in result.final_replacement_verdicts
+                    if verdict.status == "final_verified" and verdict.target_materialized}
+        for key in ("text_layers", "textos"):
+            layers = page.get(key) or []
+            for layer in layers:
+                owner_id = layer.get("owner_id")
+                binding = bindings.get(owner_id)
+                commit = next((item for item in commits if item.owner_id == owner_id
+                               and item.translation_binding_sha256 == getattr(binding, "translation_binding_sha256", None)), None)
+                verdict = verdicts.get(owner_id)
+                if (binding is not None and commit is not None and verdict is not None
+                        and verdict.translation_binding_sha256 == binding.translation_binding_sha256
+                        and verdict.target_glyph_patch_sha256 == commit.target_glyph_patch_sha256
+                        and str(layer.get("translated") or layer.get("traduzido") or layer.get("translated_payload") or "") == binding.target_text):
+                    layer["visible"] = True
+                layer["translation_delivery_notice"] = notice_for_layer(
+                    layer, binding=binding, attempts=result.translation_attempts, commits=commits,
+                )
+
+
 def _vision_adapters(config: dict[str, Any], models_dir: Path):
     from vision_stack.runtime import (
         _get_detector,
@@ -110,186 +183,52 @@ def _build_inpainter(config: dict[str, Any]):
 
 
 def _write_analysis_record(output_dir: Path, source_path: Path, config: dict[str, Any], output_pages) -> dict[str, Any]:
-    """Persist the canonical Vision/page journal without upgrading mask authority."""
-    from integration_v1.contracts import AnalysisRecord
-    from vision_runtime.analysis_payload import build_analysis_payload
-    from vision_runtime.structure import build_structural_analysis
+    """Persist the Vision page record for the direct Consumer Fast entry point."""
+    from vision_runtime.page_record import write_page_analysis_record
 
     source_sha = _sha256(source_path)
-    config_sha = hashlib.sha256(
-        json.dumps(config, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
-    page = output_pages[0]
-    image = getattr(page, "original_image", None)
-    height, width = (image.shape[:2] if image is not None else (1, 1))
-    root = output_dir / "consumer_fast" / "vision"
-    root.mkdir(parents=True, exist_ok=True)
-    page_result = getattr(page, "owner_page_result", None)
-    if page_result is None:
-        raise RuntimeError("Vision PageExecutionResult is missing; AnalysisRecord cannot be complete")
-    coverage = getattr(page_result, "coverage", None)
-    if coverage is None or not getattr(coverage, "canonical_json_bytes", None):
-        raise RuntimeError("Vision PageCoverageResult canonical bytes are missing")
-    ledger = getattr(coverage, "ledger", None)
-    if ledger is None or not getattr(ledger, "sha256", None):
-        raise RuntimeError("Vision coverage ledger identity is missing")
-
-    journal = page_result.to_canonical_dict()
-    journal_path = root / "page_execution_evidence.json"
-    _atomic_json(journal_path, journal)
-    journal_sha = _sha256(journal_path)
-    coverage_path = root / "coverage_result.json"
-    coverage_path.write_bytes(coverage.canonical_json_bytes)
-    coverage_sha = _sha256(coverage_path)
-    observations = [
-        {
-            "observation_id": str(item.observation_id),
-            "text": str(item.text),
-            "bbox_page": list(item.bbox_page),
-            "page_id": str(item.page_id),
-            "provider": str(item.provider),
-            "provider_family": str(item.provider_family),
-            "run_id": str(item.run_id),
-            "execution_id": str(item.origin_execution_id),
-            "attempt_id": str(item.attempt_id),
-            "invocation_id": str(item.invocation_id),
-            "page_source_sha256": str(item.page_source_sha256),
-            "payload_sha256": str(item.payload_sha256),
-            "rejection_reason": item.rejection_reason,
-        }
-        for item in coverage.observations
-    ]
-    observations_path = root / "ocr_observations.json"
-    _atomic_json(observations_path, observations)
-    observations_sha = _sha256(observations_path)
-    owner_graph_snapshot = getattr(page_result, "owner_graph", None)
-    owner_graph = owner_graph_snapshot.read() if callable(getattr(owner_graph_snapshot, "read", None)) else None
-    selected_observation_ids = sorted({
-        str(observation_id)
-        for owner in (getattr(owner_graph, "owners", ()) or ())
-        for observation_id in (getattr(owner, "selected_observation_ids", ()) or ())
-        if str(observation_id)
-    })
-    observation_ids = {str(item["observation_id"]) for item in observations}
-    if not set(selected_observation_ids).issubset(observation_ids):
-        raise RuntimeError("Vision owner selection references an observation outside the same page evidence")
-    structural = build_structural_analysis(
-        observations=[
-            {
-                "observation_id": item["observation_id"],
-                "text": item["text"],
-                "bbox_page": item["bbox_page"],
-                "selection_state": "eligible" if item["observation_id"] in selected_observation_ids else "unresolved",
-                "uncertainty_reasons": ([] if item["observation_id"] in selected_observation_ids else ["owner_selection_not_authorized_by_analysis_adapter"]),
-            }
-            for item in observations
-        ],
-        containers=[],
+    return write_page_analysis_record(
+        output_dir,
+        output_dir / "consumer_fast" / "vision",
+        output_pages[0],
+        config,
+        source_sha256=source_sha,
+        project_id=f"consumer-fast-{source_sha[:24]}",
+        capability_version="consumer-fast-v1",
     )
-    structural_payload = {
-        "schema": "traduzai.vision-structural-analysis.v1",
-        "logical_units": list(structural.logical_units),
-        "physical_subblocks": list(structural.physical_subblocks),
-        "relations": list(structural.relations),
-        "reading_order": list(structural.reading_order),
-        "source_observation_sha256": observations_sha,
-    }
-    structure_path = root / "structural_analysis.json"
-    _atomic_json(structure_path, structural_payload)
-    structure_sha = _sha256(structure_path)
-    artifact_refs = [
-        {"kind": kind, "path": path.relative_to(output_dir).as_posix(), "sha256": _sha256(path)}
-        for kind, path in (
-            ("vision_page_execution_evidence", journal_path),
-            ("vision_coverage_result", coverage_path),
-            ("vision_ocr_observations", observations_path),
-            ("vision_structural_analysis", structure_path),
-        )
-    ]
-    page_id = str(page_result.page_id)
-    project_id = f"consumer-fast-{source_sha[:24]}"
-    project_revision = 1
-    payload = build_analysis_payload(
-        status="complete",
-        identity={
-            "source_sha256": source_sha,
-            "authenticated_neighbor_sha256s": [],
-            "region": {"bbox": [0, 0, int(width), int(height)], "coordinate_space": "logical_page"},
-            "coordinate_space": "logical_page",
-            "transform_sha256": hashlib.sha256(b"identity-transform-v1").hexdigest(),
-            "source_language": str(config.get("idioma_origem", "en")),
-            "analysis_config_sha256": config_sha,
-            "provider_family": "vision_v6",
-            "provider_name": "vision_stack.runtime",
-            "provider_model": str(config.get("engine_preset_id") or "max"),
-            "provider_version": str(getattr(coverage.observations[0], "provider_family", "vision-v6") if coverage.observations else "vision-v6"),
-            "capability_version": "consumer-fast-v1",
-        },
-        references={
-            "artifact_refs": artifact_refs,
-            "transform_ref": {"kind": "identity", "sha256": hashlib.sha256(b"identity-transform-v1").hexdigest(), "inverse_sha256": hashlib.sha256(b"identity-transform-v1").hexdigest()},
-            "ocr_observations": {"artifact_ref": "consumer_fast/vision/ocr_observations.json", "sha256": observations_sha, "count": len(observations)},
-            "selected_observation_id": selected_observation_ids[0] if len(selected_observation_ids) == 1 else None,
-            "selection_provenance": {"kind": "vision_page_execution_and_owner_graph", "page_evidence_sha256": journal_sha, "coverage_sha256": coverage_sha, "coverage_ledger_sha256": ledger.sha256, "owner_graph_sha256": str(getattr(owner_graph_snapshot, "sha256", journal.get("owner_graph_sha256") or "")), "selected_observation_ids": selected_observation_ids, "selection_status": "selected" if selected_observation_ids else "unresolved"},
-            "logical_units": {"artifact_ref": "consumer_fast/vision/structural_analysis.json", "sha256": structure_sha, "count": len(structural.logical_units)},
-            "physical_subblocks": {"artifact_ref": "consumer_fast/vision/structural_analysis.json", "sha256": structure_sha, "count": len(structural.physical_subblocks)},
-            "relations": {"artifact_ref": "consumer_fast/vision/structural_analysis.json", "sha256": structure_sha, "count": len(structural.relations)},
-            "reading_order": {"artifact_ref": "consumer_fast/vision/structural_analysis.json", "sha256": structure_sha, "count": len(structural.reading_order)},
-            "container_contour_ref": None,
-            "writing_body_ref": None,
-            "tail_ref": None,
-            "dependency_hashes": {"source": source_sha, "analysis_config": config_sha, "ocr_observations": observations_sha, "vision_page_evidence": journal_sha, "coverage_result": coverage_sha, "coverage_ledger": ledger.sha256, "structural_analysis": structure_sha},
-        },
-    )
-    payload.update({
-        "project_id": project_id,
-        "project_revision": project_revision,
-        "run_id": str(page_result.request.run_id),
-        "execution_id": str(page_result.request.execution_id),
-        "page_id": page_id,
-        "coverage_ledger_sha256": ledger.sha256,
-    })
-    record = AnalysisRecord.build(payload).to_dict()
-    record["project_id"] = project_id
-    record["project_revision"] = project_revision
-    record["run_id"] = str(page_result.request.run_id)
-    record["execution_id"] = str(page_result.request.execution_id)
-    record["page_id"] = page_id
-    record["coverage_ledger_sha256"] = ledger.sha256
-    record["publishable"] = False
-    path = root / "analysis_record.json"
-    _atomic_json(path, record)
-    return {
-        "status": "complete", "publishable": False, "path": str(path), "sha256": _sha256(path),
-        "project_id": project_id, "project_revision": project_revision, "run_id": record["run_id"],
-        "execution_id": record["execution_id"], "page_id": page_id,
-        "coverage_ledger_sha256": ledger.sha256,
-        "analysis_record_sha256": record["analysis_record_sha256"],
-    }
 
 
 def _exact_line_plan(target_text: str, rendered_lines: list[str]):
     """Bind renderer-emitted lines to exact source substrings and whitespace."""
     from typesetter.recipe_contract import ExactLinePlan
 
-    lines = [str(line) for line in rendered_lines]
-    if not target_text or not lines:
+    import re
+
+    visual_lines = [str(line) for line in rendered_lines]
+    if not target_text or not visual_lines:
         raise ValueError("RendererRecipe missing rendered_lines from typesetter output")
+    source_words = list(re.finditer(r"\S+", target_text))
+    if sum(len(line.split()) for line in visual_lines) != len(source_words):
+        raise ValueError("RendererRecipe visual lines change target word count")
+    lines = []
     separators: list[str] = []
-    offset = 0
-    for index, line in enumerate(lines):
-        if not line or target_text[offset : offset + len(line)] != line:
-            raise ValueError("RendererRecipe rendered_lines do not preserve exact target_text")
-        offset += len(line)
-        if index + 1 < len(lines):
-            separator_start = offset
-            while offset < len(target_text) and target_text[offset].isspace():
-                offset += 1
-            separator = target_text[separator_start:offset]
-            if not separator:
-                raise ValueError("RendererRecipe rendered_lines have no exact whitespace separator")
-            separators.append(separator)
-    if offset != len(target_text):
+    consumed = 0
+    for index, visual_line in enumerate(visual_lines):
+        count = len(visual_line.split())
+        if count == 0:
+            raise ValueError("RendererRecipe rendered line is empty")
+        first = source_words[consumed]
+        last = source_words[consumed + count - 1]
+        source_line = target_text[first.start():last.end()]
+        if source_line.casefold() != visual_line.casefold():
+            raise ValueError("RendererRecipe visual line changes target text beyond casing")
+        lines.append(source_line)
+        consumed += count
+        if index + 1 < len(visual_lines):
+            next_word = source_words[consumed]
+            separators.append(target_text[last.end():next_word.start()])
+    if (source_words[0].start() != 0 or source_words[-1].end() != len(target_text)
+            or any(not item or not item.isspace() for item in separators)):
         raise ValueError("RendererRecipe rendered_lines do not consume exact target_text")
     return ExactLinePlan.build(target_text=target_text, lines=lines, separators=separators)
 
@@ -419,7 +358,7 @@ def _write_renderer_recipes(
                 line_advance_px=int(evidence["line_advance_px"]),
                 effects=dict(evidence["effects"]),
                 anchors=dict(evidence["anchors"]),
-                geometry=dict(evidence["geometry"]),
+                geometry={**dict(evidence["geometry"]), "visual_rendered_lines": list(evidence["rendered_lines"])},
                 policy_versions=dict(evidence["policy_versions"]),
                 dependency_hashes={
                     "analysis_record": analysis_record_sha256,
@@ -446,6 +385,26 @@ def _write_renderer_recipes(
                 "lineage": lineage,
             })
     if not recipes:
+        # A verified, byte-identical source page has no owner glyph rendering to bind.
+        # Keep the strict recipe requirement for every changed or unverified page.
+        source_preserved = all(
+            getattr(result, "status", None) == "final_verified"
+            and getattr(result, "terminal_proof", None) is not None
+            and not (getattr(result, "page_commits", ()) or ())
+            and getattr(getattr(getattr(result, "request", None), "original_page", None), "page_source_sha256", None)
+            == getattr(getattr(result, "final_page", None), "page_output_pixel_sha256", None)
+            for result in (getattr(page, "owner_page_result", None) for page in output_pages)
+        )
+        if source_preserved:
+            return {
+                "status": "not_applicable_source_preserved",
+                "recipe_count": 0,
+                "project_id": project_id,
+                "project_revision": int(project_revision),
+                "coverage_ledger_sha256": ledger_sha256,
+                "reason": "no_committed_owner_glyph_patch; all final pages match source pixels",
+                "page_diagnostics": no_patch_diagnostics,
+            }
         detail = "; ".join(no_patch_diagnostics) or "no_owner_execution_commits"
         raise ValueError(
             "RendererRecipe producer typesetter.renderer._render_owner_band_image was not invoked: "
@@ -469,8 +428,12 @@ def _loaded_module_evidence() -> list[dict[str, str]]:
     import sys
 
     names = (
-        "vision_stack.runtime", "vision_runtime.analysis_payload", "vision_runtime.structure",
-        "integration_v1.contracts", "consumer_fast.physical_executor", "consumer_fast.provider_adapter",
+        "vision_stack.runtime", "vision_stack.ocr", "vision_runtime.analysis_payload",
+        "vision_runtime.structure", "vision_runtime.cache_key", "vision_runtime.cache_reader",
+        "vision_runtime.page_record", "vision_runtime.stage_cache", "consumer_fast.vision_cache",
+        "ownership.coverage", "ownership.ocr_contract", "ownership.consensus_v2",
+        "qa.partial_delivery", "integration_v1.contracts",
+        "consumer_fast.physical_executor", "consumer_fast.provider_adapter",
         "strip.run", "typesetter.renderer", "typesetter.recipe_contract", "typesetter.recipe_persistence",
     )
     rows = []
@@ -546,7 +509,28 @@ def execute_config(config_path: Path) -> Path:
     source_manifest = ChapterSourceManifest.from_extracted_pages(
         image_files, extraction_root, run_id=run_id, execution_id=execution_id
     )
-    telemetry: dict[str, Any] = {}
+    from consumer_fast.vision_cache import select_cached_pages, publish_cached_pages
+
+    cache_root = work_dir / '.vision-cache'
+    try:
+        cache_selection = select_cached_pages(cache_root, source_manifest, config)
+    except Exception as exc:
+        cache_selection = {'status': 'miss', 'reason': f'cache_lookup_error:{type(exc).__name__}',
+                           'pages': {}, 'lineage': None, 'visual_config_sha256': None}
+    replay_of_execution_id = None
+    if cache_selection['status'] == 'hit':
+        run_id, replay_of_execution_id = cache_selection['lineage']
+        source_manifest = ChapterSourceManifest.from_extracted_pages(
+            image_files, extraction_root, run_id=run_id, execution_id=execution_id,
+            replay_of_execution_id=replay_of_execution_id,
+        )
+    telemetry: dict[str, Any] = {'vision_cache': {
+        'status': cache_selection['status'], 'reason': cache_selection['reason'],
+    }}
+    from main import _PipelineTiming
+    performance_recorder = _PipelineTiming(work_dir=work_dir, run_id=run_id)
+    telemetry["_performance_recorder"] = performance_recorder
+    execution_artifact_root = work_dir / '.owner-private' / execution_id
     output_pages = run_chapter(
         image_files=image_files,
         output_dir=translated_dir,
@@ -558,6 +542,14 @@ def execute_config(config_path: Path) -> Path:
         typesetter=renderer,
         context=config.get("contexto") or {},
         glossario=config.get("glossario") or {},
+        translation_context=(
+            {
+                "_translation_backend": "hy_mt2_gguf_local",
+                "_hy_mt2_url": config.get("hy_mt2_url", "http://127.0.0.1:11438"),
+                "_consumer_fast_bounded_hy": True,
+            }
+            if config.get("translation_backend") == "hy_mt2_gguf_local" else None
+        ),
         idioma_origem=config.get("idioma_origem", "en"),
         idioma_destino=config.get("idioma_destino", "pt-BR"),
         obra=config.get("obra", ""),
@@ -571,10 +563,16 @@ def execute_config(config_path: Path) -> Path:
         style_copy_mode="shadow",
         run_id=run_id,
         execution_id=execution_id,
+        replay_of_execution_id=replay_of_execution_id,
         source_manifest=source_manifest,
-        artifact_root=work_dir / ".owner-private" / execution_id,
+        artifact_root=execution_artifact_root,
+        vision_stage_cache=cache_selection['pages'] if cache_selection['status'] == 'hit' else None,
+        vision_config_sha256=cache_selection['visual_config_sha256'],
         progress_callback=lambda *_args, **_kwargs: None,
     )
+    telemetry.pop("_performance_recorder", None)
+    performance_recorder.finalize()
+    telemetry["performance_timing_path"] = "performance_timing.json"
     if len(output_pages) != len(image_files):
         raise RuntimeError("owner executor page cardinality mismatch")
     for index, page in enumerate(output_pages, start=1):
@@ -591,7 +589,16 @@ def execute_config(config_path: Path) -> Path:
             shutil.copy2(expected, images_dir / Path(page.path).name)
         page.original_source_path = expected
 
-    from main import build_project_json
+    try:
+        telemetry['vision_cache']['publish'] = publish_cached_pages(
+            cache_root, execution_artifact_root, output_pages, config, source_manifest,
+        )
+    except Exception as exc:
+        telemetry['vision_cache']['publish'] = {
+            'status': 'not_written', 'reason': f'cache_publish_error:{type(exc).__name__}',
+        }
+
+    from main import build_project_json, _observe_verified_owner_final_pages
     from project_writer import write_project_json_atomic
     from qa.export_gate import append_qa_integrity_failure, evaluate_export_gate
 
@@ -605,9 +612,23 @@ def execute_config(config_path: Path) -> Path:
         time.perf_counter() - started,
         output_pages=output_pages,
     )
+    _bind_physical_page_artifacts(project, output_pages, original_targets, work_dir)
+    _bind_verified_delivery_notices(project, output_pages)
     project["runtime_id"] = "consumer-fast-v1"
     project["runtime_profile"] = "consumer_fast"
     project["verified"] = False
+    from qa.final_pixel_observer import DetectorOcrFinalPixelObserver
+    try:
+        observed_started = time.perf_counter()
+        project.setdefault("qa", {})["final_pixel_reports"] = _observe_verified_owner_final_pages(
+            project_data=project, output_pages=output_pages,
+            observer=DetectorOcrFinalPixelObserver(detector=detector, runtime=runtime),
+            source_language=config.get("idioma_origem", "en"),
+        )
+        telemetry["final_pixel_observer_seconds"] = round(time.perf_counter()-observed_started, 4)
+    except Exception as exc:
+        # The export gate still sees the missing report and blocks the page.
+        project.setdefault("qa", {})["final_pixel_observer_error"] = f"{type(exc).__name__}: {exc}"
     analysis_receipt = _write_analysis_record(work_dir, image_files[0], config, output_pages)
     ledger_sha = str(analysis_receipt["coverage_ledger_sha256"])
     project_id = str(analysis_receipt["project_id"])
@@ -640,10 +661,19 @@ def execute_config(config_path: Path) -> Path:
         for commit in (getattr(getattr(page, "owner_page_result", None), "page_commits", ()) or ())
         if (patch := getattr(commit, "glyph_patch", None)) is not None
     ])
-    if not renderer_recipe_receipt.get("recipe_count") or renderer_recipe_receipt.get("recipe_count") != committed_patch_count:
+    recipe_count = renderer_recipe_receipt.get("recipe_count")
+    source_preserved_without_patch = (
+        committed_patch_count == 0
+        and recipe_count == 0
+        and renderer_recipe_receipt.get("status") == "not_applicable_source_preserved"
+    )
+    if not source_preserved_without_patch and (
+        recipe_count != committed_patch_count or renderer_recipe_receipt.get("status") != "persisted"
+    ):
         integrity_failures.append("renderer_recipe_missing_or_incomplete")
     if integrity_failures:
         gate = append_qa_integrity_failure(gate, integrity_failures)
+    gate = _apply_translation_delivery_review(project, gate)
     project["project_id"] = project_id
     project["project_revision"] = int(analysis_receipt["project_revision"])
     project["coverage_ledger_sha256"] = ledger_sha

@@ -521,10 +521,27 @@ class TranslationAttempt:
     response_sha256: str | None
     provider_called: bool
     cache_hit: bool
-    status: Literal["accepted", "rejected", "operational_error"]
+    status: Literal["accepted", "accepted_with_warnings", "rejected", "operational_error"]
     error_code: str | None
     language_verdict: TargetLanguageVerdict | None
     attempt_sha256: str
+
+    @property
+    def usable(self) -> bool:
+        if self.status == "accepted":
+            return bool(self.language_verdict and self.language_verdict.accepted)
+        if self.status != "accepted_with_warnings" or self.language_verdict is None:
+            return False
+        from translator.delivery_policy import POLICY_ID
+        metadata = json.loads(self.provider_metadata_json_bytes)
+        return bool(self.response_sha256 and self.response_sha256 != sha256_text("")
+                    and (self.provider_called or self.cache_hit)
+                    and not self.language_verdict.accepted
+                    and self.language_verdict.reason not in {"empty_target","placeholder_mismatch","entity_mismatch"}
+                    and metadata.get("quality_usage_policy_id") == POLICY_ID
+                    and metadata.get("quality_warning_reason") == self.language_verdict.reason
+                    and metadata.get("quality_approved") is False
+                    and metadata.get("validation_performed") is True)
 
     @property
     def identity(self) -> tuple[str, str, str, str, str]:
@@ -620,6 +637,8 @@ class TranslationAttempt:
         )
         if canonical_json_sha256(attempt.canonical_payload()) != attempt.attempt_sha256:
             raise TranslationIdentityError("translation attempt hash mismatch")
+        if attempt.status in {"accepted","accepted_with_warnings"} and not attempt.usable:
+            raise TranslationIdentityError("translation attempt usage authorization is invalid")
         return attempt
 
     @classmethod
@@ -634,12 +653,15 @@ class TranslationAttempt:
         target_text: str | None,
         provider_called: bool,
         cache_hit: bool,
-        status: Literal["accepted", "rejected", "operational_error"],
+        status: Literal["accepted", "accepted_with_warnings", "rejected", "operational_error"],
         language_verdict: TargetLanguageVerdict | None,
         error_code: str | None = None,
         attempt_index: int = 1,
     ) -> "TranslationAttempt":
-        metadata_bytes = canonical_json_bytes(dict(provider_metadata))
+        recorded_metadata = dict(provider_metadata)
+        if target_text is not None:
+            recorded_metadata["target_produced"] = target_text
+        metadata_bytes = canonical_json_bytes(recorded_metadata)
         metadata_sha = sha256_bytes(metadata_bytes)
         response_sha = sha256_text(target_text) if target_text is not None else None
         if status == "accepted" and (
@@ -649,6 +671,11 @@ class TranslationAttempt:
             or not (provider_called or cache_hit)
         ):
             raise ValueError("accepted translation attempt lacks valid provider response")
+        if status == "accepted_with_warnings":
+            from translator.delivery_policy import quality_warning_metadata
+            required = quality_warning_metadata(target_text, language_verdict)
+            if not (provider_called or cache_hit) or any(provider_metadata.get(k) != v for k,v in required.items()):
+                raise ValueError("warning translation attempt lacks an authorized response")
         seed = {
             "request_sha256": request.request_sha256,
             "backend": str(backend),
@@ -703,6 +730,17 @@ class TranslationBinding:
     language_verdict: TargetLanguageVerdict
     attempt_ids: tuple[str, ...]
     translation_binding_sha256: str
+    quality_usage_policy_id: str | None = None
+    quality_warning_reason: str | None = None
+
+    @property
+    def usable(self) -> bool:
+        if self.language_verdict.accepted:
+            return self.quality_usage_policy_id is None and self.quality_warning_reason is None
+        from translator.delivery_policy import POLICY_ID, usable_with_warning
+        return bool(self.quality_usage_policy_id == POLICY_ID
+                    and self.quality_warning_reason == self.language_verdict.reason
+                    and usable_with_warning(self.target_text,self.language_verdict))
 
     @property
     def identity(self) -> tuple[str, str, str, str, str]:
@@ -733,7 +771,7 @@ class TranslationBinding:
         )
 
     def canonical_payload(self) -> dict[str, object]:
-        return {
+        payload = {
             "run_id": self.run_id,
             "origin_execution_id": self.origin_execution_id,
             "page_id": self.page_id,
@@ -748,6 +786,10 @@ class TranslationBinding:
             "language_verdict": self.language_verdict.to_dict(),
             "attempt_ids": list(self.attempt_ids),
         }
+        if self.quality_usage_policy_id is not None:
+            payload["quality_usage_policy_id"] = self.quality_usage_policy_id
+            payload["quality_warning_reason"] = self.quality_warning_reason
+        return payload
 
     def to_dict(self) -> dict[str, object]:
         return self.canonical_payload() | {
@@ -776,8 +818,10 @@ class TranslationBinding:
             translation_binding_sha256=str(
                 payload.get("translation_binding_sha256") or ""
             ),
+            quality_usage_policy_id=payload.get("quality_usage_policy_id"),
+            quality_warning_reason=payload.get("quality_warning_reason"),
         )
-        if binding.target_locale != "pt-BR" or not binding.language_verdict.accepted:
+        if binding.target_locale != "pt-BR" or not binding.usable:
             raise TranslationIdentityError("translation binding target locale is invalid")
         if sha256_text(binding.source_text) != binding.source_payload_sha256:
             raise TranslationIdentityError("translation binding source hash mismatch")
@@ -823,8 +867,15 @@ class OwnerPageTranslationResult:
                 raise TranslationIdentityError("translation binding attempt chain mismatch")
             if any(attempt.identity != binding.identity for attempt in owner_attempts):
                 raise TranslationIdentityError("translation binding crossed owner identity")
-            if not owner_attempts or owner_attempts[-1].status != "accepted":
+            if not owner_attempts or not owner_attempts[-1].usable:
                 raise TranslationIdentityError("translation binding has no accepted terminal attempt")
+            terminal = owner_attempts[-1]
+            if terminal.response_sha256 != binding.target_payload_sha256 or terminal.language_verdict != binding.language_verdict or not binding.usable:
+                raise TranslationIdentityError("translation binding terminal response mismatch")
+            if terminal.status == "accepted_with_warnings":
+                metadata = json.loads(terminal.provider_metadata_json_bytes)
+                if binding.quality_usage_policy_id != metadata.get("quality_usage_policy_id") or binding.quality_warning_reason != metadata.get("quality_warning_reason"):
+                    raise TranslationIdentityError("translation binding warning policy mismatch")
         payload = {
             "run_id": run_id,
             "origin_execution_id": origin_execution_id,
@@ -869,9 +920,8 @@ def bind_translation(
         raise TranslationIdentityError("translation attempts do not belong to owner request")
     terminal = attempts[-1]
     if (
-        terminal.status != "accepted"
+        not terminal.usable
         or terminal.language_verdict is None
-        or not terminal.language_verdict.accepted
         or terminal.response_sha256 != sha256_text(target_text)
     ):
         raise ValueError("translation binding requires an accepted terminal attempt")
@@ -890,6 +940,16 @@ def bind_translation(
         "language_verdict": terminal.language_verdict,
         "attempt_ids": tuple(item.attempt_id for item in attempts),
     }
+    if terminal.status == "accepted_with_warnings":
+        from translator.delivery_policy import quality_warning_metadata
+        warning = quality_warning_metadata(target_text,terminal.language_verdict)
+        metadata = json.loads(terminal.provider_metadata_json_bytes)
+        if any(metadata.get(k) != v for k,v in warning.items()):
+            raise ValueError("translation warning delivery authorization mismatch")
+        values.update(quality_usage_policy_id=warning["quality_usage_policy_id"],
+                      quality_warning_reason=warning["quality_warning_reason"])
+    elif not terminal.language_verdict.accepted:
+        raise ValueError("translation binding requires accepted language or explicit warning policy")
     provisional = TranslationBinding(**values, translation_binding_sha256="")
     return TranslationBinding(
         **values,
@@ -908,14 +968,19 @@ def translate_owner(
     page_language_evidence: PageLanguageEvidence | None = None,
     repaint_already_target_pixels: bool = False,
     performance_recorder: Any | None = None,
+    explicit_entities: tuple[str, ...] = (),
+    allow_quality_warnings: bool = False,
 ) -> tuple[TranslationBinding, tuple[TranslationAttempt, ...]]:
     attempts: list[TranslationAttempt] = []
+    from translator.language_policy import _entity_pattern
+    explicit_entities = tuple(entity for entity in explicit_entities if entity and _entity_pattern(entity).search(request.source_text))
     with _performance_measure(performance_recorder, "translation_validation"):
         source_verdict = validate_target_language(
             source=request.source_text,
             target=request.source_text,
             role=request.semantic_role,
             page_language_evidence=page_language_evidence,
+            explicit_entities=explicit_entities,
         )
     if (
         repaint_already_target_pixels
@@ -1035,11 +1100,16 @@ def translate_owner(
                         target=target_text,
                         role=request.semantic_role,
                         page_language_evidence=page_language_evidence,
+                        explicit_entities=explicit_entities,
                     )
                 status = "accepted" if verdict.accepted else "rejected"
                 metadata = json.loads(
                     provider_result.provider_metadata_json_bytes.decode("utf-8")
                 )
+                from translator.delivery_policy import usable_with_warning, quality_warning_metadata
+                if allow_quality_warnings and usable_with_warning(target_text,verdict):
+                    status = "accepted_with_warnings"
+                    metadata.update(quality_warning_metadata(target_text,verdict))
                 attempt = TranslationAttempt.build(
                     request=request,
                     backend=provider_result.backend,
@@ -1090,7 +1160,7 @@ def translate_owner(
                 attempt,
                 latency_sec=time.perf_counter() - attempt_started,
             )
-            if attempt.status == "accepted" and target_text is not None:
+            if attempt.status in {"accepted","accepted_with_warnings"} and target_text is not None:
                 return bind_translation(request, target_text, attempts), tuple(attempts)
         if any(item.status == "rejected" for item in attempts):
             raise TranslationValidationExhausted(attempts)
@@ -1114,14 +1184,20 @@ def translate_owner(
                         target=target_text,
                         role=request.semantic_role,
                         page_language_evidence=page_language_evidence,
+                        explicit_entities=explicit_entities,
                     )
                 status = "accepted" if verdict.accepted else "rejected"
+                metadata = {"adapter":backend_name,"attempt_index":attempt_index}
+                from translator.delivery_policy import usable_with_warning, quality_warning_metadata
+                if allow_quality_warnings and usable_with_warning(target_text,verdict):
+                    status = "accepted_with_warnings"
+                    metadata.update(quality_warning_metadata(target_text,verdict))
                 attempt = TranslationAttempt.build(
                     request=request,
                     backend=backend_name,
                     variant=variant,
                     provider_model=getattr(backend, "provider_model", None),
-                    provider_metadata={"adapter": backend_name, "attempt_index": attempt_index},
+                    provider_metadata=metadata,
                     target_text=target_text,
                     provider_called=True,
                     cache_hit=False,
@@ -1135,9 +1211,10 @@ def translate_owner(
                     backend=backend_name,
                     variant=variant,
                     provider_model=getattr(backend, "provider_model", None),
-                    provider_metadata={"adapter": backend_name, "attempt_index": attempt_index},
+                    provider_metadata={"adapter": backend_name, "attempt_index": attempt_index,
+                                       "error_detail": str(exc), "adapter_called": True},
                     target_text=None,
-                    provider_called=False,
+                    provider_called=bool(getattr(exc, "provider_called", False)),
                     cache_hit=False,
                     status="operational_error",
                     language_verdict=None,
@@ -1157,7 +1234,7 @@ def translate_owner(
                 attempt,
                 latency_sec=time.perf_counter() - attempt_started,
             )
-            if attempt.status == "accepted":
+            if attempt.status in {"accepted","accepted_with_warnings"}:
                 return bind_translation(request, target_text, attempts), tuple(attempts)
     if any(item.status == "rejected" for item in attempts):
         raise TranslationValidationExhausted(attempts)
@@ -1175,6 +1252,8 @@ def translate_owner_page(
     repaint_already_target_pixels: bool = False,
     performance_recorder: Any | None = None,
     continue_on_owner_failure: bool = True,
+    explicit_entities: tuple[str, ...] = (),
+    allow_quality_warnings: bool = False,
 ) -> OwnerPageTranslationResult:
     attempts: list[TranslationAttempt] = []
     bindings: list[TranslationBinding] = []
@@ -1192,6 +1271,8 @@ def translate_owner_page(
                 ),
                 repaint_already_target_pixels=repaint_already_target_pixels,
                 performance_recorder=performance_recorder,
+                explicit_entities=explicit_entities,
+                allow_quality_warnings=allow_quality_warnings,
             )
         except (TranslationValidationExhausted, TranslationInfrastructureError) as exc:
             attempts.extend(exc.attempts)
@@ -1248,7 +1329,7 @@ def apply_owner_translation_result(
     if review_unbound_attempts:
         if any(
             not owner_attempts
-            or any(attempt.status == "accepted" for attempt in owner_attempts)
+            or any(attempt.status in {"accepted","accepted_with_warnings"} for attempt in owner_attempts)
             for owner_attempts in attempts_by_owner.values()
         ):
             raise TranslationIdentityError(
@@ -1262,7 +1343,7 @@ def apply_owner_translation_result(
             raise TranslationIdentityError("translation binding component identity mismatch")
         if sha256_text(str(owner.source_payload or "")) != binding.source_payload_sha256:
             raise TranslationIdentityError("translation binding source payload mismatch")
-        if binding.target_locale != "pt-BR" or not binding.language_verdict.accepted:
+        if binding.target_locale != "pt-BR" or not binding.usable:
             raise TranslationIdentityError("translation binding is not accepted PT-BR")
         owner.translated_payload = binding.target_text
         owner.state = "target_ready"

@@ -41,7 +41,26 @@ describe("createManualProject", () => {
     expect(project.paginas[0].arquivo_original).toBe("original/001.webp");
     expect(project.paginas[0].text_layers).toEqual([]);
     expect(project.paginas[0].textos).toEqual([]);
-    expect(project.paginas[0].studio_scene.roots).toEqual(["image:base"]);
+    const scene = project.paginas[0].studio_scene;
+    expect(scene.roots).toContain("image:base");
+    const baseNode = scene.nodes.find((node) => node.id === "image:base");
+    expect(baseNode).toMatchObject({
+      id: "image:base",
+      kind: "raster",
+      image_layer_key: "base",
+      parent_id: null,
+    });
+    const categoryGroups = scene.nodes.filter((node) => node.kind === "group");
+    expect(categoryGroups.map((node) => node.metadata.auto_category_group)).toEqual(["cleanup", "painting", "recovery"]);
+    expect(scene.roots).toEqual(expect.arrayContaining([
+      "image:base",
+      "group:auto:cleanup",
+      "group:auto:painting",
+      "group:auto:recovery",
+    ]));
+    expect(scene.nodes.find((node) => node.id === "image:inpaint")?.parent_id).toBe("group:auto:cleanup");
+    expect(scene.nodes.find((node) => node.id === "image:brush")?.parent_id).toBe("group:auto:painting");
+    expect(scene.nodes.find((node) => node.id === "image:recovery")?.parent_id).toBe("group:auto:recovery");
     expect(project.paginas[0].studio_scene.nodes[0]).toMatchObject({
       id: "image:base",
       kind: "raster",

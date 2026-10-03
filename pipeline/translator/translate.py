@@ -1027,6 +1027,23 @@ def _build_protection_glossary_entries(context: dict, glossario: dict) -> list[d
     return [entry for entry in entries if entry.get("type") in protected_types]
 
 
+def approved_preserved_entities(context: dict, glossario: dict) -> tuple[str, ...]:
+    """Return explicit unchanged glossary/named-context entries, not OCR guesses."""
+    entries = _build_protection_glossary_entries(context or {}, glossario or {})
+    approved_types = {"manual_glossary", "context_glossary", "character", "alias", "faction"}
+    candidates = ((context or {}).get("internet_context") or {}).get("glossary_candidates") or []
+    unreviewed = {str(item.get("source") or "").casefold() for item in candidates
+                  if isinstance(item, dict) and item.get("status") != "reviewed"}
+    explicit = {str(value).casefold() for value in (glossario or {})}
+    explicit.update(str(value).casefold() for value in ((context or {}).get("glossario") or {}))
+    return tuple(sorted({str(entry["source"]) for entry in entries
+        if entry.get("type") in approved_types and entry.get("protect")
+        and str(entry.get("source") or "").strip()
+        and (str(entry["source"]).casefold() not in unreviewed
+             or str(entry["source"]).casefold() in explicit)
+        and str(entry.get("source")).casefold() == str(entry.get("target") or "").casefold()}))
+
+
 def _protect_source_for_translation(text: str, tipo: str, context: dict, glossario: dict) -> dict:
     if tipo == "sfx" or not text:
         return {"protected_source": text, "terms": []}
@@ -1683,6 +1700,12 @@ def _apply_translation_render_blocks(
         for item in page.get("texts", []) or []:
             translated = str(item.get("translated", "") or "")
             qa_flags = list(item.get("qa_flags") or [])
+            from translator.delivery_policy import POLICY_ID
+            if translated and item.get("translation_delivery_policy") == POLICY_ID:
+                if _should_block_translation_render(str(item.get("original") or item.get("text") or ""),translated,source_lang,str(item.get("tipo","fala")),qa_flags):
+                    item["qa_flags"] = _merge_qa_flags(qa_flags,["translation_used_with_quality_warning"])
+                    item["translation_warning_reason"] = "translation_render_quality_check"
+                continue
             if not translated:
                 continue
             if not _should_block_translation_render(
@@ -2579,7 +2602,7 @@ def _refine_google_translations_with_semantic_llm(
 
 @dataclass(frozen=True)
 class TranslationAttemptControl:
-    backend: Literal["google", "ollama", "ocr_recovery"]
+    backend: Literal["google", "ollama", "ocr_recovery", "hy_mt2_gguf_local"]
     variant: str
     disable_cache: bool
     provider_model: str | None = None
@@ -2802,6 +2825,23 @@ def translate_one_owner_attempt(
                 target_locale=target_locale,
                 debug_session=debug_session,
             )
+        elif control.backend == "hy_mt2_gguf_local":
+            if (translation_context or {}).get("_translation_backend") != "hy_mt2_gguf_local":
+                raise ValueError("HY-MT2 owner attempt is not bound to the local backend")
+            provider_model = provider_model or "Hy-MT2-7B-Q4_K_M"
+            own_debug_session = debug_session is None
+            hy_debug_session = debug_session or _TranslationDebugSession(
+                backend="hy_mt2_gguf_local", model=provider_model,
+            )
+            try:
+                translated_pages = _translate_with_hy_mt2(
+                    [provider_page], context, glossario, source_lang, target_locale,
+                    str((translation_context or {}).get("_hy_mt2_url") or "http://127.0.0.1:11438"),
+                    progress_callback, hy_debug_session,
+                )
+            finally:
+                if own_debug_session:
+                    hy_debug_session.write_summary()
         elif control.backend == "ocr_recovery":
             reconstruction_model = provider_model or ollama_model
             reconstructed_source, recovery_metadata = _reconstruct_noisy_owner_source(
@@ -2957,6 +2997,88 @@ def _translate_pages_via_attempt_boundary(
     return translated_pages
 
 
+def _translate_with_hy_mt2(ocr_results, context, glossario, source_lang, target_locale,
+                           url, progress_callback, debug_session):
+    try:
+        from translator.hy_mt2_local import translate as hy_translate
+    except ImportError:
+        from .hy_mt2_local import translate as hy_translate
+    pages = []
+    for page_idx, page in enumerate(ocr_results):
+        records = _prepare_page_translation_records(page, glossario)
+        output = []
+        for index, item in enumerate(records):
+            original = _source_text_before_normalization(item)
+            source = _source_text_for_translation(item)
+            if _should_skip_translation_item(item):
+                output.append({**item, "original": original, "translated": original})
+                continue
+            protected = _protect_source_for_translation(source, item.get("tipo", "fala"),
+                                                        context, glossario)
+            sent = protected.get("protected_source") or source
+            debug_session.record_input(page_idx=page_idx, index=index, text=item,
+                source_text_before_normalization=original,
+                source_text_sent_to_translator=sent, backend="hy_mt2_gguf_local",
+              model="Hy-MT2-7B-Q4_K_M")
+            raw = None
+            final = ""
+            started = time.perf_counter()
+            try:
+                for attempt in range(2):
+                    try:
+                        raw = hy_translate(sent, source_language=source_lang,
+                                           target_locale=target_locale, url=url)
+                        break
+                    except (OSError, TimeoutError) as provider_error:
+                        if attempt:
+                            raise
+                        record_decision(stage="translate", action="retry_provider",
+                            reason="hy_mt2_gguf_local_transient_error", page=page_idx + 1,
+                            layer=item.get("id"), text=original,
+                            details={"error": str(provider_error), "attempt": attempt + 1})
+                restored, flags, hits = _restore_protected_translation(
+                    raw, list(protected.get("terms") or []))
+                if "unrestored_placeholder" in flags:
+                    raise RuntimeError("Hy-MT2 perdeu placeholder protegido")
+                final = _postprocess(restored, False, item.get("tipo", "fala"),
+                                     source_text=source, lang=source_lang)
+                final, glossary_hits, target_flags = _apply_target_entity_locks(
+                    source, final, context, glossario)
+                if not final.strip():
+                    raise RuntimeError("Hy-MT2 retornou texto vazio")
+                qa_flags = _merge_qa_flags(item.get("qa_flags"), flags, target_flags,
+                    _translation_quality_flags(original, final, source_lang))
+                if _should_repair_local_translation(original, final):
+                    qa_flags = _merge_qa_flags(qa_flags,["translation_used_with_quality_warning"])
+                debug_session.record_output(page_idx=page_idx, index=index, text=item,
+                    source_text_sent_to_translator=sent, raw_response=raw,
+                    final_translation_after_postprocess=final, duration_ms=int((time.perf_counter()-started)*1000),
+                    backend="hy_mt2_gguf_local", model="Hy-MT2-7B-Q4_K_M",
+                    fallback_used=False, glossary_hits=list(hits) + list(glossary_hits),
+                    qa_flags=qa_flags)
+                from translator.delivery_policy import POLICY_ID
+                output.append({**item, "original": original, "translated": final,
+                               "translation_delivery_policy": POLICY_ID,
+                               "source_text_sent_to_translator": sent,
+                               "qa_flags": qa_flags, "glossary_hits": list(hits) + list(glossary_hits)})
+            except Exception as exc:
+                if raw is not None:
+                    debug_session.record_output(page_idx=page_idx, index=index, text=item,
+                        source_text_sent_to_translator=sent, raw_response=raw,
+                        final_translation_after_postprocess=final,
+                        duration_ms=int((time.perf_counter()-started)*1000),
+                        backend="hy_mt2_gguf_local", model="Hy-MT2-7B-Q4_K_M",
+                        fallback_used=False, qa_flags=["provider_response_not_usable", str(exc)])
+                record_decision(stage="translate", action="provider_error", reason="hy_mt2_gguf_local",
+                    page=page_idx + 1, layer=item.get("id"), text=original,
+                    details={"error": str(exc)})
+                raise RuntimeError(f"Hy-MT2 falhou para pagina {page_idx + 1}, texto {item.get('id', index)}: {exc}") from exc
+        pages.append({**page, "texts": output})
+        if progress_callback:
+            progress_callback(page_idx + 1, len(ocr_results), f"[Hy-MT2] Pagina {page_idx + 1}/{len(ocr_results)}")
+    return _apply_translation_render_blocks(_apply_target_locale_validation(pages, target_locale), source_lang)
+
+
 def translate_pages(
     ocr_results: list[dict],
     obra: str,
@@ -2976,6 +3098,19 @@ def translate_pages(
     idioma_origem = normalize_google_language_code(idioma_origem)
     idioma_destino = normalize_google_language_code(idioma_destino)
 
+    translation_backend = (translation_context or {}).get("_translation_backend")
+    hy_mt2_url = (translation_context or {}).get("_hy_mt2_url", "http://127.0.0.1:11438")
+    if translation_backend == "hy_mt2_gguf_local":
+        debug_session = _TranslationDebugSession(backend=translation_backend, model="Hy-MT2-7B-Q4_K_M")
+        record_decision(stage="translate", action="select_backend", reason=translation_backend,
+                        details={"idioma_origem": idioma_origem, "target_locale": target_locale})
+        try:
+            return _translate_with_hy_mt2(ocr_results, context, glossario, idioma_origem,
+                                          target_locale, hy_mt2_url, progress_callback, debug_session)
+        finally:
+            debug_session.write_summary()
+    if translation_backend not in (None, "legacy"):
+        raise ValueError(f"Backend de traducao desconhecido: {translation_backend}")
     persistent_cache = _open_persistent_cache(models_dir, idioma_origem, idioma_destino)
 
     google_ok = False

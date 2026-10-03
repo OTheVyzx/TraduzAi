@@ -159,6 +159,9 @@ export function EditorTextLayer({
       listening={interactive}
       draggable={interactive && !entry.locked}
       dragBoundFunc={interactive && !entry.locked ? snapDragPosition : undefined}
+      onMouseDown={(event) => {
+        if (interactive) event.cancelBubble = true;
+      }}
       onClick={(event) => {
         if (!interactive) return;
         event.cancelBubble = true;

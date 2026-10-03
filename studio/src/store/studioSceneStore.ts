@@ -16,6 +16,7 @@ export interface StudioSceneHistoryEntry {
   before: StudioScene;
   after: StudioScene;
   createdAt: number;
+  editorCommandId?: string;
 }
 
 export type StudioSceneNodePatch = Partial<
@@ -34,9 +35,14 @@ export interface StudioSceneState {
   persist: StudioScenePersist | null;
   hydrate: (pageKey: string, scene: StudioScene, persist: StudioScenePersist) => void;
   selectNode: (nodeId: string, additive?: boolean) => void;
-  executeSceneCommand: (label: string, transform: StudioSceneTransform) => Promise<boolean>;
+  executeSceneCommand: (
+    label: string,
+    transform: StudioSceneTransform,
+    options?: { editorCommandId?: string },
+  ) => Promise<boolean>;
   patchNode: (nodeId: string, patch: StudioSceneNodePatch) => Promise<boolean>;
   groupSelected: (name?: string, groupId?: string) => Promise<boolean>;
+  deleteSelectedNodes: () => Promise<boolean>;
   moveNodeBefore: (nodeId: string, targetNodeId: string) => Promise<boolean>;
   undo: () => Promise<boolean>;
   redo: () => Promise<boolean>;
@@ -162,6 +168,47 @@ function moveSceneNodeBefore(scene: StudioScene, nodeId: string, targetNodeId: s
   return applySiblingOrder(scene, node.parent_id, withoutNode);
 }
 
+function deleteSceneNodes(scene: StudioScene, selectedIds: string[]): StudioScene {
+  const removed = new Set(selectedIds);
+  if (removed.size === 0) return scene;
+  let previousSize = -1;
+  while (previousSize !== removed.size) {
+    previousSize = removed.size;
+    for (const node of scene.nodes) {
+      if (node.parent_id && removed.has(node.parent_id)) removed.add(node.id);
+    }
+  }
+  const targets = scene.nodes.filter((node) => removed.has(node.id));
+  const byId = new Map(scene.nodes.map((node) => [node.id, node]));
+  const protectedByLock = (node: StudioSceneNode) => {
+    const visited = new Set<string>();
+    let current: StudioSceneNode | undefined = node;
+    while (current && !visited.has(current.id)) {
+      if (current.locked || current.image_layer_key === "base") return true;
+      visited.add(current.id);
+      current = current.parent_id ? byId.get(current.parent_id) : undefined;
+    }
+    return false;
+  };
+  if (targets.some(protectedByLock)) {
+    throw new Error("Desbloqueie as camadas antes de excluir. A camada Original não pode ser excluída.");
+  }
+  if (targets.length === 0) return scene;
+  const previousIds = scene.metadata?.deleted_node_ids;
+  const deletedIds = new Set(Array.isArray(previousIds)
+    ? previousIds.filter((id): id is string => typeof id === "string")
+    : []);
+  for (const node of targets) deletedIds.add(node.id);
+  return {
+    ...scene,
+    nodes: scene.nodes
+      .filter((node) => !removed.has(node.id))
+      .map((node) => ({ ...node, mask_ids: node.mask_ids.filter((id) => !removed.has(id)) })),
+    roots: scene.roots.filter((id) => !removed.has(id)),
+    metadata: { ...scene.metadata, deleted_node_ids: [...deletedIds] },
+  };
+}
+
 function sceneNodesInVisualOrder(scene: StudioScene) {
   const ordered: StudioSceneNode[] = [];
   const visited = new Set<string>();
@@ -212,6 +259,20 @@ export function projectStudioSceneToPage(page: StudioPage, scene: StudioScene): 
   const textById = new Map(textLayers.map((layer, index) => [layer.id, index]));
   const byId = new Map(ownedScene.nodes.map((node) => [node.id, node]));
 
+  const deletedIds = ownedScene.metadata?.deleted_node_ids;
+  const deletedNodeIds = new Set(Array.isArray(deletedIds)
+    ? deletedIds.filter((id): id is string => typeof id === "string")
+    : []);
+  for (const key of Object.keys(imageLayers) as Array<keyof typeof imageLayers>) {
+    const layer = imageLayers[key];
+    if (layer && deletedNodeIds.has(`image:${key}`)) imageLayers[key] = { ...layer, visible: false };
+  }
+  for (let index = 0; index < textLayers.length; index += 1) {
+    if (deletedNodeIds.has(`text:${textLayers[index].id}`)) {
+      textLayers[index] = { ...textLayers[index], visible: false };
+    }
+  }
+
   sceneNodesInVisualOrder(ownedScene).forEach((node, visualOrder) => {
     const effective = effectiveNodeProperties(node, byId);
     if (node.image_layer_key && imageLayers[node.image_layer_key]) {
@@ -257,6 +318,7 @@ export function createStudioSceneStore() {
     const commit = async (
       label: string,
       transform: (scene: StudioScene) => StudioScene,
+      editorCommandId?: string,
     ): Promise<boolean> => {
       const state = get();
       if (!state.scene) return false;
@@ -293,6 +355,7 @@ export function createStudioSceneStore() {
           before,
           after: cloneScene(after),
           createdAt: Date.now(),
+          ...(editorCommandId ? { editorCommandId } : {}),
         },
       ];
       if (history.length > MAX_SCENE_HISTORY) history = history.slice(-MAX_SCENE_HISTORY);
@@ -361,7 +424,7 @@ export function createStudioSceneStore() {
         set({ selectedNodeIds: [...selected, nodeId], primaryNodeId: nodeId });
       },
 
-      executeSceneCommand: (label, transform) => commit(label, transform),
+      executeSceneCommand: (label, transform, options) => commit(label, transform, options?.editorCommandId),
 
       patchNode: (nodeId, patch) => commit("Editar propriedades da camada", (scene) => patchSceneNode(scene, nodeId, patch)),
 
@@ -369,6 +432,13 @@ export function createStudioSceneStore() {
         const selectedIds = [...get().selectedNodeIds];
         const changed = await commit("Agrupar camadas", (scene) => groupSceneNodes(scene, selectedIds, name, groupId));
         if (changed) set({ selectedNodeIds: [groupId], primaryNodeId: groupId });
+        return changed;
+      },
+
+      deleteSelectedNodes: async () => {
+        const selectedIds = [...get().selectedNodeIds];
+        const changed = await commit("Excluir camadas", (scene) => deleteSceneNodes(scene, selectedIds));
+        if (changed) set({ selectedNodeIds: [], primaryNodeId: null });
         return changed;
       },
 

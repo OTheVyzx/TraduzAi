@@ -3,6 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { FileDown } from "lucide-react";
 import { Editor } from "../../../src/pages/Editor";
 import type { EditorSceneVisualNode } from "../../../src/components/editor/stage/editorSceneVisual";
+import { loadImageSource } from "../../../src/lib/imageSource";
 import { useAppStore, useEditorStore, type Project, type TextLayerStyle } from "../../../src/editor-shared";
 import type { TextEntry } from "../../../src/lib/stores/appStore";
 import { deriveProjectStatusFromReviewState } from "../../../src/lib/pipelineCompletion";
@@ -14,6 +15,8 @@ import { projectStudioSceneToPage, useStudioSceneStore } from "../store/studioSc
 import { configureEditorBackend, type EditorBackendApi } from "../shims/currentEditorBackend";
 import { StudioLayersTree } from "./layers/StudioLayersTree";
 import { persistStudioScene } from "./layers/studioScenePersistence";
+import { persistStudioBitmapOperation } from "./layers/studioRasterOperations";
+import type { StudioBitmapOperationCommit } from "../../../src/components/editor/stage/bitmapStrokePreview";
 import { attachStudioSelectionMask, studioSelectionFromLasso } from "./selection/selectionModel";
 import {
   composeStudioSceneLayerBitmaps,
@@ -223,6 +226,12 @@ export function StudioSharedEditor({
   const updatePendingEdit = useEditorStore((state) => state.updatePendingEdit);
   const scene = useStudioSceneStore((state) => state.scene);
   const primaryNodeId = useStudioSceneStore((state) => state.primaryNodeId);
+  const sceneHistory = useStudioSceneStore((state) => state.history);
+  const sceneHistoryIndex = useStudioSceneStore((state) => state.historyIndex);
+  const scenePageKey = useStudioSceneStore((state) => state.pageKey);
+  const sceneIsSaving = useStudioSceneStore((state) => state.isSaving);
+  const editorHistoryByPageKey = useEditorStore((state) => state.historyByPageKey);
+  const currentEditorPageKey = useEditorStore((state) => state.currentPageKey());
   const [isExportingPsd, setIsExportingPsd] = useState(false);
   const [translationFilter, setTranslationFilter] = useState<TranslationQueueFilter>("all");
   const [isConfirmingTranslation, setIsConfirmingTranslation] = useState(false);
@@ -237,6 +246,7 @@ export function StudioSharedEditor({
     source: string;
     visualNodes: EditorSceneVisualNode[];
   } | null>(null);
+  const recordedCleanupCommandIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
     const backend = createLegacyEditorBackendAdapter(getStudioEditorBackend()) as unknown as EditorBackendApi;
@@ -348,6 +358,144 @@ export function StudioSharedEditor({
       currentPage: synchronizedPage as unknown as typeof editorState.currentPage,
     });
   }, [currentPageIndex, projectPath]);
+
+  const commitStudioBitmapOperation = useCallback((operation: StudioBitmapOperationCommit) =>
+    persistStudioBitmapOperation({ projectPath, pageIndex: operation.pageIndex ?? currentPageIndex, operation }),
+  [currentPageIndex, projectPath]);
+
+  useEffect(() => {
+    const stack = editorHistoryByPageKey[currentEditorPageKey];
+    const command = stack?.commands[stack.index - 1];
+    if (command?.type !== "page-snapshot") return;
+    const beforePath = command.before.image_layers?.inpaint?.path ?? null;
+    const afterPath = command.after.image_layers?.inpaint?.path ?? null;
+    const currentPath = editorPage?.image_layers?.inpaint?.path ?? null;
+    if (!afterPath || afterPath === beforePath || currentPath !== afterPath) return;
+    if (recordedCleanupCommandIdsRef.current.has(command.commandId)) return;
+    recordedCleanupCommandIdsRef.current.add(command.commandId);
+
+    const recordCleanupResult = async () => {
+      let afterSource: Awaited<ReturnType<typeof loadImageSource>> | null = null;
+      let beforeSource: Awaited<ReturnType<typeof loadImageSource>> | null = null;
+      try {
+        [afterSource, beforeSource] = await Promise.all([
+          loadImageSource(afterPath, "image/png", Date.now()),
+          beforePath ? loadImageSource(beforePath, "image/png", Date.now()) : Promise.resolve(null),
+        ]);
+        const afterImage = new Image();
+        afterImage.decoding = "async";
+        afterImage.src = afterSource.src;
+        await afterImage.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = afterImage.naturalWidth;
+        canvas.height = afterImage.naturalHeight;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Canvas indisponível para salvar a limpeza em PNG");
+        context.drawImage(afterImage, 0, 0);
+
+        let baselineDataUrl: string | null = null;
+        if (beforeSource) {
+          const beforeImage = new Image();
+          beforeImage.decoding = "async";
+          beforeImage.src = beforeSource.src;
+          await beforeImage.decode();
+          const baselineCanvas = document.createElement("canvas");
+          baselineCanvas.width = canvas.width;
+          baselineCanvas.height = canvas.height;
+          const baselineContext = baselineCanvas.getContext("2d");
+          if (baselineContext) {
+            baselineContext.drawImage(beforeImage, 0, 0, canvas.width, canvas.height);
+            baselineDataUrl = baselineCanvas.toDataURL("image/png");
+          }
+        }
+
+        const latestEditorState = useEditorStore.getState();
+        const latestStack = latestEditorState.historyByPageKey[currentEditorPageKey];
+        const latestCommand = latestStack?.commands[latestStack.index - 1];
+        if (
+          latestEditorState.currentPageIndex !== currentPageIndex ||
+          latestEditorState.currentPage?.image_layers?.inpaint?.path !== afterPath ||
+          latestCommand?.commandId !== command.commandId
+        ) {
+          recordedCleanupCommandIdsRef.current.delete(command.commandId);
+          return;
+        }
+
+        await commitStudioBitmapOperation({
+          commandId: command.commandId,
+          pageIndex: currentPageIndex,
+          layerKey: "inpaint",
+          name: command.label,
+          pngData: canvas.toDataURL("image/png"),
+          baselineDataUrl,
+          bbox: [0, 0, canvas.width, canvas.height],
+          blendMode: "normal",
+        });
+      } catch (error) {
+        recordedCleanupCommandIdsRef.current.delete(command.commandId);
+        console.error("Falha ao criar camada PNG da limpeza:", error);
+      } finally {
+        afterSource?.revoke?.();
+        beforeSource?.revoke?.();
+      }
+    };
+    void recordCleanupResult();
+  }, [commitStudioBitmapOperation, currentEditorPageKey, currentPageIndex, editorHistoryByPageKey, editorPage]);
+
+  const historyForActivePage = scenePageKey === `${projectPath}::${currentPageIndex}`;
+  const editorHistory = editorHistoryByPageKey[currentEditorPageKey];
+  const sceneUndoEntry = historyForActivePage && sceneHistoryIndex > 0
+    ? sceneHistory[sceneHistoryIndex - 1]
+    : null;
+  const sceneRedoEntry = historyForActivePage && sceneHistoryIndex < sceneHistory.length
+    ? sceneHistory[sceneHistoryIndex]
+    : null;
+  const editorUndoCommand = editorHistory?.commands[editorHistory.index - 1] ?? null;
+  const editorRedoCommand = editorHistory?.commands[editorHistory.index] ?? null;
+  const studioCanUndo = Boolean(sceneUndoEntry || editorUndoCommand) && !sceneIsSaving;
+  const studioCanRedo = Boolean(sceneRedoEntry || editorRedoCommand) && !sceneIsSaving;
+
+  const undoStudio = useCallback(async () => {
+    const sceneState = useStudioSceneStore.getState();
+    const editorState = useEditorStore.getState();
+    const pageMatches = sceneState.pageKey === `${projectPath}::${editorState.currentPageIndex}`;
+    const sceneEntry = pageMatches && sceneState.historyIndex > 0
+      ? sceneState.history[sceneState.historyIndex - 1]
+      : null;
+    const stack = editorState.historyByPageKey[editorState.currentPageKey()];
+    const editorCommand = stack?.commands[stack.index - 1] ?? null;
+    if (sceneState.isSaving) return;
+    if (sceneEntry && editorCommand && sceneEntry.editorCommandId === editorCommand.commandId) {
+      if (await sceneState.undo()) editorState.undoEditor();
+      return;
+    }
+    if (sceneEntry && (!editorCommand || sceneEntry.createdAt >= editorCommand.createdAt)) {
+      await sceneState.undo();
+      return;
+    }
+    if (editorCommand) editorState.undoEditor();
+  }, [projectPath]);
+
+  const redoStudio = useCallback(async () => {
+    const sceneState = useStudioSceneStore.getState();
+    const editorState = useEditorStore.getState();
+    const pageMatches = sceneState.pageKey === `${projectPath}::${editorState.currentPageIndex}`;
+    const sceneEntry = pageMatches && sceneState.historyIndex < sceneState.history.length
+      ? sceneState.history[sceneState.historyIndex]
+      : null;
+    const stack = editorState.historyByPageKey[editorState.currentPageKey()];
+    const editorCommand = stack?.commands[stack.index] ?? null;
+    if (sceneState.isSaving) return;
+    if (sceneEntry && editorCommand && sceneEntry.editorCommandId === editorCommand.commandId) {
+      if (await sceneState.redo()) editorState.redoEditor();
+      return;
+    }
+    if (sceneEntry && (!editorCommand || sceneEntry.createdAt >= editorCommand.createdAt)) {
+      await sceneState.redo();
+      return;
+    }
+    if (editorCommand) editorState.redoEditor();
+  }, [projectPath]);
 
   useEffect(() => {
     const pageKey = `${projectPath}::${currentPageIndex}`;
@@ -628,7 +776,20 @@ export function StudioSharedEditor({
             isSaving={isConfirmingTranslation}
             error={translationCommitError}
           />
-        ) : <StudioLayersTree onSelectTextLayer={selectSceneTextLayer} />}
+        ) : (
+          <StudioLayersTree
+            onSelectTextLayer={selectSceneTextLayer}
+            onUndo={undoStudio}
+            onRedo={redoStudio}
+            canUndo={studioCanUndo}
+            canRedo={studioCanRedo}
+          />
+        )}
+        onUndo={undoStudio}
+        onRedo={redoStudio}
+        canUndo={studioCanUndo}
+        canRedo={studioCanRedo}
+        onStudioBitmapOperation={commitStudioBitmapOperation}
         selectionTargetNodeId={selectionTargetNode?.id ?? null}
         selectionTargetLabel={selectionTargetLabel}
         onAttachSelectionMask={attachCurrentSelectionMask}

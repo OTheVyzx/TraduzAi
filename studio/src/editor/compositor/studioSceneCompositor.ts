@@ -13,8 +13,10 @@ export interface ResolvedStudioSceneMask {
 export interface ResolvedStudioSceneRenderLayer {
   nodeId: string;
   name: string;
-  kind: "raster" | "generated" | "fill";
+  kind: "raster" | "generated" | "fill" | "group";
   imageLayerKey?: ImageLayerKey;
+  sourceBBox?: [number, number, number, number];
+  children?: ResolvedStudioSceneRenderLayer[];
   sourcePath: string | null;
   fillColor: string | null;
   visible: boolean;
@@ -29,7 +31,7 @@ interface StudioCanvasContextLike {
   fillStyle: string;
   clearRect(x: number, y: number, width: number, height: number): void;
   fillRect(x: number, y: number, width: number, height: number): void;
-  drawImage(image: unknown, dx?: number, dy?: number, width?: number, height?: number): void;
+  drawImage(image: unknown, ...args: number[]): void;
   save(): void;
   restore(): void;
 }
@@ -189,31 +191,90 @@ export function resolveStudioSceneMasksForNode(scene: StudioScene, nodeId: strin
   return node ? masksForNode(node, byId) : [];
 }
 
+function rasterOperationGroupKey(node: StudioSceneNode) {
+  const key = node.metadata.raster_operations_key;
+  return key === "brush" || key === "recovery" || key === "inpaint" ? key : null;
+}
+
+function hasRasterOperationAncestor(node: StudioSceneNode, byId: Map<string, StudioSceneNode>) {
+  let parentId = node.parent_id;
+  const visited = new Set<string>([node.id]);
+  while (parentId) {
+    if (visited.has(parentId)) return false;
+    visited.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) return false;
+    if (rasterOperationGroupKey(parent)) return true;
+    parentId = parent.parent_id;
+  }
+  return false;
+}
+
+function sourceBBoxForNode(node: StudioSceneNode): [number, number, number, number] | undefined {
+  const bbox = node.metadata.source_bbox;
+  if (!Array.isArray(bbox) || bbox.length < 4) return undefined;
+  const values = bbox.slice(0, 4).map(Number);
+  if (!values.every(Number.isFinite)) return undefined;
+  return [values[0], values[1], values[2], values[3]];
+}
+
 export function resolveStudioSceneRenderLayers(
   page: StudioPage,
   scene: StudioScene = page.studio_scene,
   options: ResolveStudioSceneRenderLayerOptions = {},
 ): ResolvedStudioSceneRenderLayer[] {
   const byId = new Map(scene.nodes.map((node) => [node.id, node]));
-  return nodesInVisualOrder(scene).flatMap((node) => {
-    if (node.kind !== "raster" && node.kind !== "generated" && node.kind !== "fill") return [];
-    const state = effectiveNodeState(node, byId);
-    if (!state.visible && !options.includeHidden) return [];
+  const renderableNode = (node: StudioSceneNode, opacity = clamp01(node.opacity)): ResolvedStudioSceneRenderLayer | null => {
+    if (node.kind !== "raster" && node.kind !== "generated" && node.kind !== "fill") return null;
     const sourcePath = node.kind === "raster" ? rasterSourcePath(page, node) : generatedSourcePath(node);
     const color = node.kind === "fill" ? fillColor(node) : null;
-    if (!sourcePath && !color) return [];
-    return [{
+    if (!sourcePath && !color) return null;
+    const sourceBBox = sourceBBoxForNode(node);
+    return {
       nodeId: node.id,
       name: node.name,
       kind: node.kind,
       ...(node.image_layer_key ? { imageLayerKey: node.image_layer_key } : {}),
+      ...(sourceBBox ? { sourceBBox } : {}),
       sourcePath,
       fillColor: color,
-      visible: state.visible,
-      opacity: state.opacity,
+      visible: true,
+      opacity,
       blendMode: node.blend_mode || "normal",
       masks: masksForNode(node, byId),
-    }];
+    };
+  };
+
+  return nodesInVisualOrder(scene).flatMap((node) => {
+    const state = effectiveNodeState(node, byId);
+    const operationKey = rasterOperationGroupKey(node);
+    if (operationKey) {
+      if (!state.visible && !options.includeHidden) return [];
+      const children = orderedChildren(scene, node.id).flatMap((child) => {
+        const childState = effectiveNodeState(child, byId);
+        if (!childState.visible && !options.includeHidden) return [];
+        const layer = renderableNode(child);
+        return layer ? [layer] : [];
+      });
+      if (children.length === 0) return [];
+      return [{
+        nodeId: node.id,
+        name: node.name,
+        kind: "group" as const,
+        sourcePath: null,
+        fillColor: null,
+        visible: state.visible,
+        opacity: state.opacity,
+        blendMode: node.blend_mode || "normal",
+        masks: [],
+        children,
+      }];
+    }
+    if (hasRasterOperationAncestor(node, byId)) return [];
+    if (node.kind !== "raster" && node.kind !== "generated" && node.kind !== "fill") return [];
+    if (!state.visible && !options.includeHidden) return [];
+    const layer = renderableNode(node, state.opacity);
+    return layer ? [layer] : [];
   });
 }
 
@@ -230,6 +291,7 @@ export function resolveStudioSceneVisualOrder(
   return nodesInVisualOrder(scene).flatMap<ResolvedStudioSceneVisualItem>((node) => {
     const state = effectiveNodeState(node, byId);
     if (!state.visible && !options.includeHidden) return [];
+    if (hasRasterOperationAncestor(node, byId)) return [];
     if (renderableIds.has(node.id)) return [{ kind: "bitmap" as const, nodeId: node.id }];
     if (node.kind === "text" && node.text_layer_id && textLayerIds.has(node.text_layer_id)) {
       return [{ kind: "text" as const, nodeId: node.id, textLayerId: node.text_layer_id }];
@@ -252,6 +314,7 @@ export function resolveStudioAssetPath(projectPath: string, assetPath: string) {
 function canvasBlendMode(blendMode: string) {
   if (blendMode === "normal") return "source-over";
   const supported = new Set([
+    "destination-out",
     "multiply",
     "screen",
     "overlay",
@@ -309,12 +372,28 @@ function renderStudioBitmapLayer(
   const layerContext = layerCanvas.getContext("2d");
   if (!layerContext) throw new Error(`Canvas 2D indisponivel para a camada ${layer.name}`);
   layerContext.clearRect(0, 0, width, height);
+  if (layer.children) {
+    for (const child of layer.children) {
+      const childCanvas = renderStudioBitmapLayer(child, width, height, createCanvas, loadedImages, rasterizeSelection);
+      layerContext.save();
+      layerContext.globalAlpha = child.opacity;
+      layerContext.globalCompositeOperation = canvasBlendMode(child.blendMode);
+      layerContext.drawImage(childCanvas, 0, 0, width, height);
+      layerContext.restore();
+    }
+    return layerCanvas;
+  }
   if (layer.fillColor) {
     layerContext.fillStyle = layer.fillColor;
     layerContext.fillRect(0, 0, width, height);
   }
   const loaded = layer.sourcePath ? loadedImages.get(layer.sourcePath) : null;
-  if (loaded) layerContext.drawImage(loaded.image, 0, 0, width, height);
+  if (loaded && layer.sourceBBox) {
+    const [x1, y1, x2, y2] = layer.sourceBBox;
+    layerContext.drawImage(loaded.image, 0, 0, loaded.width, loaded.height, x1, y1, x2 - x1, y2 - y1);
+  } else if (loaded) {
+    layerContext.drawImage(loaded.image, 0, 0, width, height);
+  }
   for (const mask of layer.masks) {
     const maskImage = rasterizeSelection(mask.selection);
     if (!maskImage) continue;
@@ -338,10 +417,13 @@ export async function composeStudioSceneLayerBitmaps(
   const loadedImages = new Map<string, LoadedStudioImage>();
 
   try {
-    for (const layer of layers) {
-      if (!layer.sourcePath || loadedImages.has(layer.sourcePath)) continue;
-      loadedImages.set(layer.sourcePath, await loadImage(resolveSourcePath(layer.sourcePath)));
-    }
+    const loadLayerImages = async (layer: ResolvedStudioSceneRenderLayer) => {
+      if (layer.sourcePath && !loadedImages.has(layer.sourcePath)) {
+        loadedImages.set(layer.sourcePath, await loadImage(resolveSourcePath(layer.sourcePath)));
+      }
+      for (const child of layer.children ?? []) await loadLayerImages(child);
+    };
+    for (const layer of layers) await loadLayerImages(layer);
     const firstImage = loadedImages.values().next().value as LoadedStudioImage | undefined;
     const width = Math.max(1, Math.round(options.width ?? firstImage?.width ?? 1));
     const height = Math.max(1, Math.round(options.height ?? firstImage?.height ?? 1));

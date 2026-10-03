@@ -103,18 +103,22 @@ def compose_export_gate(
     style_blocked = style_status == "BLOCK"
     issues = _issues(functional.get("issues")) + _issues(style.get("issues"))
     if style_blocked and not _issues(style.get("issues")):
+        owner_ids = sorted({str(value) for value in style.get("blocking_owner_ids") or []})
+        code = (
+            "style_fidelity_high_confidence_mismatch"
+            if owner_ids else "style_fidelity_coverage_missing"
+        )
         issues.append(
             {
-                "code": "style_fidelity_high_confidence_mismatch",
-                "reason": "style_fidelity_high_confidence_mismatch",
+                "code": code,
+                "reason": code,
                 "type": "style_fidelity",
-                "issue_scope": "owner",
+                "issue_scope": "owner" if owner_ids else "run",
                 "severity": "critical",
                 "blocks_export": True,
-                "flags": ["style_fidelity_high_confidence_mismatch"],
-                "owner_ids": sorted(
-                    {str(value) for value in style.get("blocking_owner_ids") or []}
-                ),
+                "flags": [code],
+                "owner_ids": owner_ids,
+                "findings": _issues(style.get("findings")) if not owner_ids else [],
             }
         )
     return normalize_export_gate(

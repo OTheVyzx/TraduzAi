@@ -640,24 +640,48 @@ def _normalise_regions(
     ), violations
 
 
-def _atomic_payload(selected: Sequence[TextObservation]) -> str:
+class AmbiguousPhysicalReadingError(ValueError):
+    """Overlapping OCR readings disagree; caller must route owner to review."""
+
+
+def _same_line_support(left: TextObservation, right: TextObservation) -> bool:
+    a, b = left.bbox_page, right.bbox_page
+    ah, bh = a[3] - a[1], b[3] - b[1]
+    if min(ah, bh) <= 0 or max(ah, bh) > 1.8 * min(ah, bh):
+        return False
+    overlap = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    area = lambda box: max(1, (box[2] - box[0]) * (box[3] - box[1]))
+    return overlap / min(area(a), area(b)) >= 0.80
+
+
+def _atomic_payload(selected: Sequence[TextObservation], *, decisions: list[dict] | None = None) -> str:
     parts: list[str] = []
-    seen_evidence: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
-    seen_spacing_evidence: set[tuple[str, tuple[str, ...]]] = set()
+    accepted: list[TextObservation] = []
     for item in selected:
         part = " ".join(str(item.text).split())
         if not part:
             continue
-        component_key = tuple(sorted(str(value) for value in item.component_ids))
-        evidence_key = (
-            normalize_evidence_tokens(part),
-            component_key,
-        )
-        spacing_key = (normalize_evidence_spacing_signature(part), component_key)
-        if evidence_key in seen_evidence or spacing_key in seen_spacing_evidence:
+        neighbours = [prior for prior in accepted if _same_line_support(prior, item)]
+        equivalent = [prior for prior in neighbours if
+                      normalize_evidence_tokens(prior.text) == normalize_evidence_tokens(part)
+                      or normalize_evidence_spacing_signature(prior.text)
+                      == normalize_evidence_spacing_signature(part)]
+        if len(equivalent) == 1:
+            if decisions is not None:
+                decisions.append(dict(observation_id=item.observation_id,
+                                      decision='duplicate_same_physical_line',
+                                      selected_observation_id=equivalent[0].observation_id))
             continue
-        seen_evidence.add(evidence_key)
-        seen_spacing_evidence.add(spacing_key)
+        if neighbours:
+            raise AmbiguousPhysicalReadingError(
+                f'conflicting OCR at {item.observation_id}: '
+                + ','.join(prior.observation_id for prior in neighbours)
+            )
+        accepted.append(item)
+        if decisions is not None:
+            decisions.append(dict(observation_id=item.observation_id,
+                                  decision='selected',
+                                  selected_observation_id=item.observation_id))
         parts.append(part)
     return " ".join(parts)
 
@@ -1125,7 +1149,15 @@ def build_page_owner_graph(
                     audit_reasons[
                         observation.observation_id
                     ] = "owner_blocked_by_cross_semantic_observation"
-        payload = _atomic_payload(selected)
+        conflict_reason = None
+        try:
+            payload = _atomic_payload(selected)
+        except AmbiguousPhysicalReadingError:
+            conflict_reason = "conflicting_same_physical_line"
+            for observation in selected:
+                audit_reasons[observation.observation_id] = conflict_reason
+            selected = []
+            payload = ""
         if (
             requested_disposition == "owned"
             and payload
@@ -1172,7 +1204,8 @@ def build_page_owner_graph(
                 decision=final_disposition,
                 owner_id=owner_id,
                 reason=(
-                    region.reason
+                    conflict_reason
+                    or region.reason
                     or (
                         "semantic_owner_resolved"
                         if final_disposition == "owned"

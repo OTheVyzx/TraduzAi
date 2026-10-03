@@ -8,6 +8,7 @@ legacy projects explicitly outside the verified execution path.
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import Any, Iterable, Sequence
 
 from .model import (
@@ -411,6 +412,77 @@ def build_owner_project_envelope(
     }
 
 
+OWNER_LAYER_CONTRACT_FIELDS = (
+    "id", "owner_id", "candidate_owner_id", "page_id", "component_ids",
+    "observation_ids", "selected_observation_ids", "semantic_role",
+    "action_mask_ref", "layout_region_ids", "route_action", "render_policy",
+    "disposition", "state", "execution_tile_id", "owner_graph_run_id",
+    "owner_graph_origin_execution_id", "owner_graph_page_source_sha256",
+    "execution_rejected", "derived_qa_status", "write_authority",
+    "source_pixels_preserved", "committed", "blocking", "qa_action", "visible",
+    "text", "original", "source_payload", "translated", "translated_payload",
+    "translation_binding_sha256", "source_payload_sha256", "target_payload_sha256",
+    "owner_execution_rejection_reason", "translation_attempt_ids",
+    "translation_attempt_sha256s",
+    "language_verdict", "translation_quality_usage_policy_id",
+    "translation_quality_warning_reason", "translation_delivery_notice",
+)
+
+
+def is_review_candidate(layer: dict[str, Any]) -> bool:
+    """Recognize candidate metadata without repairing an invalid identity."""
+    return layer.get("candidate_owner_id") is not None
+
+
+def preserve_owner_layer_contract(
+    source: dict[str, Any], target: dict[str, Any],
+) -> dict[str, Any]:
+    """Copy the canonical ownership contract through compatibility projections.
+
+    Values are copied, never inferred or repaired. Invalid authority and hashes
+    remain invalid so the persistence validator can reject them.
+    """
+    if source.get("owner_id") is None and not is_review_candidate(source):
+        return target
+    for field in OWNER_LAYER_CONTRACT_FIELDS:
+        if field in source:
+            target[field] = deepcopy(source[field])
+        else:
+            target.pop(field, None)
+    return target
+
+
+def neutralize_review_candidate_compatibility(layer: dict[str, Any]) -> bool:
+    """Neutralize legacy execution hints without changing candidate evidence."""
+    if not is_review_candidate(layer):
+        return False
+    layer["skip_processing"] = True
+    layer["preserve_original"] = True
+    layer["translate_policy"] = "skip_translation"
+    return True
+
+
+def detach_owner_review_candidate(
+    record: dict[str, Any], graph: OwnerGraph, owner_id: str,
+) -> dict[str, Any]:
+    """Build the shared non-authoritative record for a retired owner."""
+    record = deepcopy(record)
+    record.update({
+        "id": owner_id, "owner_id": None, "candidate_owner_id": owner_id,
+        "owner_graph_run_id": graph.run_id,
+        "owner_graph_origin_execution_id": graph.origin_execution_id,
+        "owner_graph_page_source_sha256": graph.page_source_sha256,
+        "disposition": "review", "state": "review_required",
+        "route_action": "review_required", "render_policy": "review_required",
+        "execution_tile_id": None, "action_mask_ref": None, "layout_region_ids": [],
+        "execution_rejected": True, "derived_qa_status": "review_required",
+        "write_authority": "revoked", "source_pixels_preserved": True,
+        "committed": False, "blocking": True, "qa_action": "BLOCK", "visible": False,
+    })
+    neutralize_review_candidate_compatibility(record)
+    return record
+
+
 def normalize_owner_text_layer_for_project(layer: dict[str, Any]) -> dict[str, Any]:
     """Materialize additive owner fields without deriving an identity."""
 
@@ -497,6 +569,360 @@ def _layer_owner_contract(layer: dict[str, Any]) -> tuple[Any, ...]:
         layer.get("action_mask_ref"),
         tuple(layer.get("layout_region_ids") or []),
     )
+
+
+def _retired_review_candidate_contract(
+    layer: dict[str, Any],
+    *,
+    alias_name: str,
+    page_id: str,
+    graph: dict[str, Any] | None,
+    owner_ids: set[str],
+) -> tuple[str | None, tuple[Any, ...] | None, list[str]]:
+    """Validate a detached review candidate against its current source graph.
+
+    A candidate can retain source and proposed target text for editor review after
+    a rejected owner is removed from an enforce graph. It never represents an
+    owner and must carry no write, mask, or render authority.
+    """
+
+    errors: list[str] = []
+    candidate_value = layer.get("candidate_owner_id")
+    try:
+        candidate_id = _nonempty_identity(
+            candidate_value, label=f"{alias_name}.candidate_owner_id"
+        )
+    except OwnerProjectValidationError as exc:
+        errors.append(str(exc))
+        return None, None, errors
+
+    if "owner_id" not in layer or layer.get("owner_id") is not None:
+        errors.append(
+            f"{alias_name} review candidate {candidate_id} must have owner_id=None"
+        )
+    try:
+        layer_id = _nonempty_identity(layer.get("id"), label=f"{alias_name}.id")
+        if layer_id != candidate_id:
+            errors.append(
+                f"{alias_name} review candidate id does not match candidate_owner_id"
+            )
+    except OwnerProjectValidationError as exc:
+        errors.append(str(exc))
+    if candidate_id in owner_ids:
+        errors.append(
+            f"review candidate identity collides with canonical owner_id: {candidate_id}"
+        )
+
+    try:
+        layer_page_id = _nonempty_identity(
+            layer.get("page_id"), label=f"{alias_name}.page_id"
+        )
+        if layer_page_id != page_id:
+            errors.append(
+                f"{alias_name} review candidate {candidate_id} page mismatch: "
+                f"container={page_id}, layer={layer_page_id}"
+            )
+    except OwnerProjectValidationError as exc:
+        errors.append(str(exc))
+
+    if graph is None:
+        errors.append(
+            f"{alias_name} review candidate {candidate_id} has no current page graph"
+        )
+    else:
+        graph_bindings = {
+            "owner_graph_run_id": graph.get("run_id"),
+            "owner_graph_origin_execution_id": graph.get("origin_execution_id"),
+            "owner_graph_page_source_sha256": graph.get("page_source_sha256"),
+        }
+        for field, expected in graph_bindings.items():
+            try:
+                actual = _nonempty_identity(
+                    layer.get(field), label=f"{alias_name}.{field}"
+                )
+            except OwnerProjectValidationError as exc:
+                errors.append(str(exc))
+                continue
+            if actual != expected:
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} has stale {field}"
+                )
+
+    required_values = {
+        "disposition": "review",
+        "state": "review_required",
+        "route_action": "review_required",
+        "derived_qa_status": "review_required",
+        "execution_rejected": True,
+        "write_authority": "revoked",
+        "source_pixels_preserved": True,
+        "committed": False,
+        "blocking": True,
+        "qa_action": "BLOCK",
+        "visible": False,
+        "render_policy": "review_required",
+        "action_mask_ref": None,
+        "execution_tile_id": None,
+    }
+    for field, expected in required_values.items():
+        if layer.get(field) != expected or type(layer.get(field)) is not type(expected):
+            errors.append(
+                f"{alias_name} review candidate {candidate_id} has unsafe {field}"
+            )
+    if layer.get("layout_region_ids") != [] or type(layer.get("layout_region_ids")) is not list:
+        errors.append(
+            f"{alias_name} review candidate {candidate_id} has unsafe layout_region_ids"
+        )
+
+    def identity_list(field: str, *, required: bool) -> list[str]:
+        value = layer.get(field)
+        if not isinstance(value, list) or (required and not value):
+            errors.append(
+                f"{alias_name} review candidate {candidate_id} has invalid {field}"
+            )
+            return []
+        values: list[str] = []
+        for item in value:
+            try:
+                values.append(_nonempty_identity(item, label=f"{alias_name}.{field}"))
+            except OwnerProjectValidationError as exc:
+                errors.append(str(exc))
+        if len(values) != len(set(values)):
+            errors.append(
+                f"{alias_name} review candidate {candidate_id} has duplicate {field}"
+            )
+        return values
+
+    component_ids = identity_list("component_ids", required=True)
+    observation_ids = identity_list("observation_ids", required=True)
+    selected_observation_ids = identity_list(
+        "selected_observation_ids", required=True
+    )
+    if not set(selected_observation_ids).issubset(observation_ids):
+        errors.append(
+            f"{alias_name} review candidate {candidate_id} selects unknown observations"
+        )
+
+    source_payload = layer.get("source_payload")
+    if not isinstance(source_payload, str) or not source_payload.strip():
+        errors.append(
+            f"{alias_name} review candidate {candidate_id} is missing source text"
+        )
+        source_payload = ""
+    for field in ("text", "original"):
+        if layer.get(field) != source_payload:
+            errors.append(
+                f"{alias_name} review candidate {candidate_id} has mismatched {field}"
+            )
+    translated_payload = layer.get("translated_payload")
+    if translated_payload is not None and not isinstance(translated_payload, str):
+        errors.append(
+            f"{alias_name} review candidate {candidate_id} has invalid translated_payload"
+        )
+    translated = layer.get("translated")
+    expected_translated = translated_payload or ""
+    if translated != expected_translated:
+        errors.append(
+            f"{alias_name} review candidate {candidate_id} has mismatched translated text"
+        )
+    from .hash_contract import sha256_text
+    for field, payload in (("source_payload_sha256", source_payload),
+                           ("target_payload_sha256", expected_translated)):
+        if field not in layer:
+            continue
+        value = layer[field]
+        if value != sha256_text(payload):
+            errors.append(
+                f"{alias_name} review candidate {candidate_id} has mismatched {field}"
+            )
+    if "translation_binding_sha256" in layer and (
+        not isinstance(layer["translation_binding_sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", layer["translation_binding_sha256"]) is None
+    ):
+        errors.append(f"{alias_name} review candidate {candidate_id} has invalid translation_binding_sha256")
+
+    if graph is not None:
+        components = {
+            str(item.get("component_id")): item
+            for item in graph.get("components") or []
+            if isinstance(item, dict)
+        }
+        observations = {
+            str(item.get("observation_id")): item
+            for item in graph.get("observations") or []
+            if isinstance(item, dict)
+        }
+        dispositions = {
+            str(item.get("component_id")): item
+            for item in graph.get("component_dispositions") or []
+            if isinstance(item, dict)
+        }
+        missing_components = sorted(set(component_ids) - set(components))
+        missing_observations = sorted(set(observation_ids) - set(observations))
+        if missing_components:
+            errors.append(
+                f"{alias_name} review candidate {candidate_id} references unknown components: "
+                f"{', '.join(missing_components)}"
+            )
+        if missing_observations:
+            errors.append(
+                f"{alias_name} review candidate {candidate_id} references unknown observations: "
+                f"{', '.join(missing_observations)}"
+            )
+        expected_evidence: set[str] = set()
+        retired_reasons: set[str] = set()
+        policy_reasons: set[str] = set()
+        for component_id in component_ids:
+            disposition = dispositions.get(component_id)
+            if not isinstance(disposition, dict) or any(
+                disposition.get(field) != expected
+                for field, expected in (
+                    ("decision", "uncertain"),
+                    ("owner_id", None),
+                    ("policy_id", "coverage_ambiguous_candidate"),
+                )
+            ):
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} is not bound to "
+                    f"a retired uncertain component: {component_id}"
+                )
+                continue
+            reason = disposition.get("reason")
+            policy_reason = disposition.get("policy_reason")
+            if not isinstance(reason, str) or not reason:
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} has no retirement reason"
+                )
+            else:
+                retired_reasons.add(reason)
+            if not isinstance(policy_reason, str) or not policy_reason:
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} has no policy reason"
+                )
+            else:
+                policy_reasons.add(policy_reason)
+            evidence_ids = disposition.get("policy_evidence_ids")
+            if not isinstance(evidence_ids, list) or not evidence_ids:
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} has invalid "
+                    f"policy evidence for {component_id}"
+                )
+                continue
+            for evidence_id in evidence_ids:
+                try:
+                    expected_evidence.add(
+                        _nonempty_identity(
+                            evidence_id,
+                            label=f"{alias_name}.policy_evidence_ids",
+                        )
+                    )
+                except OwnerProjectValidationError as exc:
+                    errors.append(str(exc))
+
+        if retired_reasons == {"owner_execution_rejected"}:
+            expected_policy_reason = "source pixels preserved after owner execution rejection"
+            if policy_reasons != {expected_policy_reason}:
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} has invalid "
+                    "owner execution rejection policy"
+                )
+            if expected_evidence != set(observation_ids):
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} does not match "
+                    "current rejected-owner OCR evidence"
+                )
+        elif retired_reasons == {"owner_translation_rejected"}:
+            attempt_ids = identity_list("translation_attempt_ids", required=True)
+            attempt_hashes = layer.get("translation_attempt_sha256s")
+            if (
+                not isinstance(attempt_hashes, list)
+                or len(attempt_hashes) != len(attempt_ids)
+                or any(
+                    not isinstance(value, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                    for value in (attempt_hashes or [])
+                )
+            ):
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} has invalid "
+                    "translation attempt hashes"
+                )
+            if expected_evidence != set(attempt_ids):
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} does not match "
+                    "current rejected translation attempts"
+                )
+            if len(attempt_ids) != len(set(attempt_ids)):
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} has duplicate "
+                    "translation attempts"
+                )
+            valid_hashes = [
+                value for value in attempt_hashes or [] if isinstance(value, str)
+            ]
+            if len(valid_hashes) != len(set(valid_hashes)):
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} has duplicate "
+                    "translation attempt hashes"
+                )
+            if not policy_reasons or any(
+                "translation validation exhausted" not in value
+                or "source pixels preserved" not in value
+                for value in policy_reasons
+            ):
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} has invalid "
+                    "translation rejection policy"
+                )
+        else:
+            errors.append(
+                f"{alias_name} review candidate {candidate_id} has unsupported "
+                f"retirement reasons: {sorted(retired_reasons)}"
+            )
+        for observation_id in observation_ids:
+            observation = observations.get(observation_id)
+            if not isinstance(observation, dict):
+                continue
+            observation_components = set(observation.get("component_ids") or [])
+            if not observation_components.intersection(component_ids):
+                errors.append(
+                    f"{alias_name} review candidate {candidate_id} includes "
+                    f"unrelated observation: {observation_id}"
+                )
+
+    contract = (
+        candidate_id,
+        layer.get("page_id"),
+        tuple(component_ids),
+        tuple(observation_ids),
+        tuple(selected_observation_ids),
+        layer.get("semantic_role"),
+        layer.get("route_action"),
+        layer.get("action_mask_ref"),
+        tuple(layer.get("layout_region_ids") or []),
+        layer.get("disposition"),
+        layer.get("state"),
+        layer.get("execution_rejected"),
+        layer.get("write_authority"),
+        layer.get("source_pixels_preserved"),
+        layer.get("committed"),
+        layer.get("blocking"),
+        layer.get("qa_action"),
+        layer.get("visible"),
+        layer.get("render_policy"),
+        source_payload,
+        translated_payload,
+        translated,
+        layer.get("owner_graph_run_id"),
+        layer.get("owner_graph_origin_execution_id"),
+        layer.get("owner_graph_page_source_sha256"),
+        tuple(layer.get("translation_attempt_ids") or []),
+        tuple(layer.get("translation_attempt_sha256s") or []),
+        layer.get("source_payload_sha256"),
+        layer.get("target_payload_sha256"),
+        layer.get("translation_binding_sha256"),
+    )
+    return candidate_id, contract, errors
 
 
 def owner_project_validation_errors(
@@ -609,6 +1035,8 @@ def owner_project_validation_errors(
             )
 
         materialized_owner_pages: dict[str, str] = {}
+        materialized_candidate_pages: dict[str, str] = {}
+        graphs_by_page = {str(graph["page_id"]): graph for graph in canonical}
         for page_index, page in enumerate(page_records, start=1):
             container_page_id = container_page_ids[page_index - 1]
             alias_contracts: list[tuple[str, dict[str, tuple[Any, ...]]]] = []
@@ -617,9 +1045,26 @@ def owner_project_validation_errors(
                 for layer in layers:
                     owner_value = layer.get("owner_id")
                     if owner_value is None:
-                        errors.append(
-                            f"verified {alias_name} text layer is missing owner_id"
+                        candidate_id, candidate_contract, candidate_errors = (
+                            _retired_review_candidate_contract(
+                                layer,
+                                alias_name=alias_name,
+                                page_id=container_page_id,
+                                graph=graphs_by_page.get(container_page_id),
+                                owner_ids=set(owners),
+                            )
                         )
+                        errors.extend(candidate_errors)
+                        if candidate_id is None or candidate_contract is None:
+                            continue
+                        contract_key = f"candidate:{candidate_id}"
+                        if contract_key in contracts:
+                            errors.append(
+                                f"{alias_name} text layer duplicates candidate_owner_id: "
+                                f"{candidate_id}"
+                            )
+                            continue
+                        contracts[contract_key] = candidate_contract
                         continue
                     owner_id = _nonempty_identity(
                         owner_value, label=f"{alias_name}.owner_id"
@@ -704,6 +1149,18 @@ def owner_project_validation_errors(
                             f"owner_id {owner_id} is materialized on multiple pages"
                         )
                     materialized_owner_pages[owner_id] = container_page_id
+
+            for _, contract in alias_contracts:
+                for contract_key in contract:
+                    if not contract_key.startswith("candidate:"):
+                        continue
+                    candidate_id = contract_key.removeprefix("candidate:")
+                    previous_page = materialized_candidate_pages.get(candidate_id)
+                    if previous_page is not None and previous_page != container_page_id:
+                        errors.append(
+                            f"candidate_owner_id {candidate_id} is materialized on multiple pages"
+                        )
+                    materialized_candidate_pages[candidate_id] = container_page_id
 
         missing_owner_layers = sorted(set(owners) - set(materialized_owner_pages))
         if pages is not None and missing_owner_layers:

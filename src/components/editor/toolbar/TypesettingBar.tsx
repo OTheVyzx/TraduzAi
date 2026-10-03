@@ -23,6 +23,7 @@ import {
 import { useEditorStore } from "../../../lib/stores/editorStore";
 import { useAppStore, type ProjectFontAssets } from "../../../lib/stores/appStore";
 import { ensureEditorFontOptionReady, type EditorFontOption } from "../../../lib/fontCatalog";
+import { resolveEditorTextStyle } from "../../../lib/editorTextStyleResolver";
 import { EditorFontPicker } from "../EditorFontPicker";
 import { TextStylePresetPopover } from "./TextStylePresetPopover";
 
@@ -140,6 +141,29 @@ function defaultGradientEnd(startColor: string) {
   return startColor.toLowerCase() === "#ffffff" ? "#000000" : "#ffffff";
 }
 
+function gradientAngleFromPoint(clientX: number, clientY: number, rect: DOMRect) {
+  const angle = Math.atan2(clientY - (rect.top + rect.height / 2), clientX - (rect.left + rect.width / 2)) * 180 / Math.PI;
+  return Math.round(angle);
+}
+
+function gradientDirectionLine(angle: number) {
+  const width = 240;
+  const height = 48;
+  const radians = angle * Math.PI / 180;
+  const dx = Math.cos(radians);
+  const dy = Math.sin(radians);
+  const distance = Math.min(
+    Math.abs(dx) < 0.0001 ? Number.POSITIVE_INFINITY : (width / 2 - 14) / Math.abs(dx),
+    Math.abs(dy) < 0.0001 ? Number.POSITIVE_INFINITY : (height / 2 - 8) / Math.abs(dy),
+  );
+  return {
+    x1: width / 2 - dx * distance,
+    y1: height / 2 - dy * distance,
+    x2: width / 2 + dx * distance,
+    y2: height / 2 + dy * distance,
+  };
+}
+
 function upsertSystemFontAsset(assets: ProjectFontAssets | undefined, option: EditorFontOption): ProjectFontAssets {
   if (option.source !== "system" || !option.localPath) return assets ?? {};
   return {
@@ -164,6 +188,7 @@ export function TypesettingBar() {
   const updateProject = useAppStore((s) => s.updateProject);
   const fontAssets = useAppStore((s) => s.project?.font_assets);
   const [loadingFont, setLoadingFont] = useState<string | null>(null);
+  const gradientDirectionRef = useRef<HTMLDivElement>(null);
 
   const selectedLayer = currentPage?.text_layers.find((t) => t.id === selectedLayerId);
   if (!selectedLayer || !selectedLayerId) return null;
@@ -171,27 +196,54 @@ export function TypesettingBar() {
 
   const edit = pendingEdits[selectedLayerId];
   const estilo = edit?.estilo ? { ...selectedLayer.estilo, ...edit.estilo } : (selectedLayer.estilo ?? {});
+  const resolvedStyle = resolveEditorTextStyle(estilo);
 
   const fonte = estilo.fonte ?? "ComicNeue-Bold.ttf";
   const tamanho = estilo.tamanho ?? 28;
   const cor = colorInputValue(estilo.cor, "#000000");
   const gradientColors = Array.isArray(estilo.cor_gradiente) ? estilo.cor_gradiente : [];
-  const gradientActive = gradientColors.length >= 2;
-  const gradientStart = colorInputValue(gradientColors[0], cor);
-  const gradientEnd = colorInputValue(gradientColors[1], defaultGradientEnd(gradientStart));
+  const resolvedGradient = resolvedStyle.fills.find((fill) => fill.type === "linear-gradient");
+  const gradientActive = estilo.cor_gradiente_ativo === false
+    ? false
+    : gradientColors.length >= 2 || Boolean(resolvedGradient);
+  const gradientStart = colorInputValue(
+    gradientColors[0] ?? (resolvedGradient?.type === "linear-gradient" ? resolvedGradient.stops[0]?.color : undefined),
+    cor,
+  );
+  const gradientEnd = colorInputValue(
+    gradientColors[1] ?? (resolvedGradient?.type === "linear-gradient" ? resolvedGradient.stops[resolvedGradient.stops.length - 1]?.color : undefined),
+    defaultGradientEnd(gradientStart),
+  );
+  const rawGradientAngle = Number(estilo.cor_gradiente_angulo ?? (resolvedGradient?.type === "linear-gradient" ? resolvedGradient.angle : 90));
+  const gradientAngle = Number.isFinite(rawGradientAngle) ? Math.max(-180, Math.min(180, rawGradientAngle)) : 90;
+  const gradientLine = gradientDirectionLine(gradientAngle);
   const alinhamento = estilo.alinhamento ?? "center";
   const bold = estilo.bold ?? true;
   const italico = estilo.italico ?? false;
   const contornoPx = estilo.contorno_px ?? 0;
   const contornoCor = colorInputValue(estilo.contorno, "#000000");
+  const contornoAtivo = estilo.contorno_ativo ?? (contornoPx > 0 || resolvedStyle.strokes.length > 0);
   const glow = estilo.glow ?? false;
   const glowCor = colorInputValue(estilo.glow_cor, "#FFFFFF");
   const glowPx = estilo.glow_px ?? 0;
-  const sombra = estilo.sombra ?? false;
-  const sombraCor = colorInputValue(estilo.sombra_cor, "#000000");
+  const sombra = estilo.sombra === true || (estilo.sombra_blur === undefined && resolvedStyle.effects.dropShadows.length > 0);
+  const sombraCor = colorInputValue(estilo.sombra_cor ?? resolvedStyle.effects.dropShadows[0]?.color, "#000000");
   const sombraOffsetX = estilo.sombra_offset?.[0] ?? 2;
   const sombraOffsetY = estilo.sombra_offset?.[1] ?? 2;
+  const rawShadowBlur = Number(estilo.sombra_blur ?? resolvedStyle.effects.dropShadows[0]?.blur ?? 8);
+  const sombraBlur = Number.isFinite(rawShadowBlur) ? Math.max(0, Math.min(30, rawShadowBlur)) : 8;
   const rotacao = clampRotation(Number(estilo.rotacao ?? 0));
+
+  const setGradientAngleFromPointer = (clientX: number, clientY: number) => {
+    const bounds = gradientDirectionRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    updateEstilo(selectedLayerId, {
+      cor: gradientStart,
+      cor_gradiente: [gradientStart, gradientEnd],
+      cor_gradiente_ativo: true,
+      cor_gradiente_angulo: gradientAngleFromPoint(clientX, clientY, bounds),
+    });
+  };
 
   async function handleFontChange(value: string, option?: EditorFontOption) {
     setLoadingFont(value);
@@ -302,7 +354,7 @@ export function TypesettingBar() {
           type="color"
           value={cor}
           title="Cor do texto"
-          onChange={(e) => updateEstilo(selectedLayerId, { cor: e.target.value, cor_gradiente: [] })}
+          onChange={(e) => updateEstilo(selectedLayerId, { cor: e.target.value, cor_gradiente: [], cor_gradiente_ativo: false })}
           className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
         />
         <div
@@ -318,9 +370,45 @@ export function TypesettingBar() {
           data-testid="text-gradient-preview"
           data-gradient-active={String(gradientActive)}
           className="h-8 rounded-md border border-border"
-          style={{ background: `linear-gradient(180deg, ${gradientStart}, ${gradientEnd})` }}
+          style={{ background: `linear-gradient(${gradientAngle + 90}deg, ${gradientStart}, ${gradientEnd})` }}
           title="Preview do gradiente"
         />
+        <div>
+          <PopoverLabel>Direção do gradiente</PopoverLabel>
+          <div
+            ref={gradientDirectionRef}
+            data-testid="text-gradient-direction"
+            role="slider"
+            aria-label="Direção do gradiente"
+            aria-valuemin={-180}
+            aria-valuemax={180}
+            aria-valuenow={gradientAngle}
+            tabIndex={0}
+            onPointerDown={(event) => {
+              event.currentTarget.setPointerCapture(event.pointerId);
+              setGradientAngleFromPointer(event.clientX, event.clientY);
+            }}
+            onPointerMove={(event) => {
+              if (event.buttons === 1) setGradientAngleFromPointer(event.clientX, event.clientY);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              updateEstilo(selectedLayerId, {
+                cor_gradiente_angulo: Math.max(-180, Math.min(180, gradientAngle + (event.key === "ArrowRight" ? 5 : -5))),
+              });
+            }}
+            className="relative h-12 touch-none cursor-crosshair overflow-hidden rounded-md border border-border bg-bg-tertiary/70 outline-none focus:border-brand/50"
+            title="Arraste a linha para mudar a direção"
+          >
+            <svg viewBox="0 0 240 48" className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true">
+              <line x1={gradientLine.x1} y1={gradientLine.y1} x2={gradientLine.x2} y2={gradientLine.y2} stroke="white" strokeOpacity="0.9" strokeWidth="2" />
+              <circle cx={gradientLine.x1} cy={gradientLine.y1} r="5" fill={gradientStart} stroke="white" strokeWidth="2" />
+              <circle cx={gradientLine.x2} cy={gradientLine.y2} r="5" fill={gradientEnd} stroke="white" strokeWidth="2" />
+            </svg>
+            <span className="pointer-events-none absolute bottom-1 right-1 rounded bg-bg-primary/75 px-1 text-[9px] text-text-muted">{gradientAngle}°</span>
+          </div>
+        </div>
         <div className="grid grid-cols-2 gap-1.5">
           <div>
             <PopoverLabel>Cor inicial</PopoverLabel>
@@ -333,6 +421,8 @@ export function TypesettingBar() {
                 updateEstilo(selectedLayerId, {
                   cor: e.target.value,
                   cor_gradiente: [e.target.value, gradientEnd],
+                  cor_gradiente_ativo: true,
+                  cor_gradiente_angulo: gradientAngle,
                 })
               }
               className="w-full h-7 rounded border border-border cursor-pointer bg-transparent"
@@ -349,6 +439,8 @@ export function TypesettingBar() {
                 updateEstilo(selectedLayerId, {
                   cor: gradientStart,
                   cor_gradiente: [gradientStart, e.target.value],
+                  cor_gradiente_ativo: true,
+                  cor_gradiente_angulo: gradientAngle,
                 })
               }
               className="w-full h-7 rounded border border-border cursor-pointer bg-transparent"
@@ -363,6 +455,8 @@ export function TypesettingBar() {
               updateEstilo(selectedLayerId, {
                 cor: gradientStart,
                 cor_gradiente: [gradientStart, gradientEnd],
+                cor_gradiente_ativo: true,
+                cor_gradiente_angulo: gradientAngle,
               })
             }
             className="flex-1 rounded-md bg-brand px-2 py-1 text-[10px] font-semibold text-white"
@@ -372,7 +466,7 @@ export function TypesettingBar() {
           <button
             type="button"
             data-testid="text-gradient-clear"
-            onClick={() => updateEstilo(selectedLayerId, { cor: gradientStart, cor_gradiente: [] })}
+            onClick={() => updateEstilo(selectedLayerId, { cor: gradientStart, cor_gradiente: [], cor_gradiente_ativo: false })}
             className="rounded-md border border-border px-2 py-1 text-[10px] font-semibold text-text-muted hover:text-text-primary"
           >
             Solido
@@ -427,7 +521,23 @@ export function TypesettingBar() {
       <div className="h-4 w-px bg-border mx-0.5 shrink-0" />
 
       {/* Contorno ▾ */}
-      <EffectPopover label="Contorno" active={contornoPx > 0}>
+      <EffectPopover label="Contorno" active={contornoAtivo}>
+        <div className="flex items-center justify-between">
+          <PopoverLabel>Ativar contorno</PopoverLabel>
+          <button
+            type="button"
+            data-testid="text-outline-toggle"
+            onClick={() => updateEstilo(selectedLayerId, {
+              contorno_ativo: !contornoAtivo,
+              ...(!contornoAtivo && contornoPx <= 0 ? { contorno_px: 2 } : {}),
+            })}
+            className={`text-[9px] font-semibold px-2 py-0.5 rounded-md transition-smooth ${
+              contornoAtivo ? "bg-accent-cyan/15 text-accent-cyan" : "bg-bg-tertiary/50 text-text-muted"
+            }`}
+          >
+            {contornoAtivo ? "ON" : "OFF"}
+          </button>
+        </div>
         <div>
           <PopoverLabel>Cor</PopoverLabel>
           <input
@@ -453,7 +563,7 @@ export function TypesettingBar() {
         <div className="flex items-center justify-between">
           <PopoverLabel>Ativar sombra</PopoverLabel>
           <button
-            onClick={() => updateEstilo(selectedLayerId, { sombra: !sombra })}
+            onClick={() => updateEstilo(selectedLayerId, { sombra: !sombra, sombra_blur: sombraBlur })}
             className={`text-[9px] font-semibold px-2 py-0.5 rounded-md transition-smooth ${
               sombra ? "bg-accent-cyan/15 text-accent-cyan" : "bg-bg-tertiary/50 text-text-muted"
             }`}
@@ -497,6 +607,21 @@ export function TypesettingBar() {
                 />
               </div>
             </div>
+            <label className="block">
+              <div className="mb-1 flex items-center justify-between">
+                <PopoverLabel>Suavidade (smooth)</PopoverLabel>
+                <span className="text-[9px] text-text-muted">{sombraBlur}px</span>
+              </div>
+              <input
+                data-testid="text-shadow-smoothness"
+                type="range"
+                min={0}
+                max={30}
+                value={sombraBlur}
+                onChange={(event) => updateEstilo(selectedLayerId, { sombra_blur: Number(event.target.value) })}
+                className="w-full accent-[rgb(var(--color-brand))]"
+              />
+            </label>
           </>
         )}
       </EffectPopover>

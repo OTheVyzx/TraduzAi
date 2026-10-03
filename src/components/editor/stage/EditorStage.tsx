@@ -14,7 +14,7 @@ import { EditorTextLayer } from "./EditorTextLayer";
 import { EditorTransformer } from "./EditorTransformer";
 import { LassoSelectionOverlay } from "./LassoSelectionOverlay";
 import { MaskInProgressOverlay } from "./MaskInProgressOverlay";
-import { strokePassesForHardness } from "./bitmapStrokePreview";
+import { strokePassesForHardness, type StudioBitmapOperationCommit } from "./bitmapStrokePreview";
 import { editingBaseImagePath, isStudioBitmapCompositeActive, originalImagePath } from "./renderModeUtils";
 import type { SnapGuide } from "./snapGuides";
 import { useEditorStageController } from "./useEditorStageController";
@@ -44,6 +44,7 @@ function readerImagePathForPage(page: PageData, viewMode: EditorViewMode) {
 type PaintStrokeCanvasOverlayHandle = {
   begin: (point: [number, number]) => void;
   append: (point: [number, number]) => void;
+  flush: () => void;
   clear: () => void;
 };
 
@@ -68,8 +69,13 @@ const PaintStrokeCanvasOverlay = forwardRef<PaintStrokeCanvasOverlayHandle, {
 }, ref) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastPointRef = useRef<[number, number] | null>(null);
+  const pendingPointsRef = useRef<[number, number][]>([]);
+  const drawFrameRef = useRef<number | null>(null);
 
   const clear = () => {
+    if (drawFrameRef.current !== null) cancelAnimationFrame(drawFrameRef.current);
+    drawFrameRef.current = null;
+    pendingPointsRef.current = [];
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -78,7 +84,7 @@ const PaintStrokeCanvasOverlay = forwardRef<PaintStrokeCanvasOverlayHandle, {
     lastPointRef.current = null;
   };
 
-  const drawSegment = (from: [number, number], to: [number, number]) => {
+  const drawPoints = (points: [number, number][]) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -111,29 +117,55 @@ const PaintStrokeCanvasOverlay = forwardRef<PaintStrokeCanvasOverlayHandle, {
       ctx.globalAlpha = pass.alpha;
       ctx.lineWidth = pass.width;
       ctx.beginPath();
-      ctx.moveTo(from[0], from[1]);
-      ctx.lineTo(to[0], to[1]);
+      ctx.moveTo(points[0][0], points[0][1]);
+      if (points.length === 1) {
+        ctx.lineTo(points[0][0] + 0.01, points[0][1] + 0.01);
+      } else if (points.length === 2) {
+        ctx.lineTo(points[1][0], points[1][1]);
+      } else {
+        for (let index = 1; index < points.length - 1; index += 1) {
+          const current = points[index];
+          const next = points[index + 1];
+          ctx.quadraticCurveTo(current[0], current[1], (current[0] + next[0]) / 2, (current[1] + next[1]) / 2);
+        }
+        const last = points[points.length - 1];
+        ctx.lineTo(last[0], last[1]);
+      }
       ctx.stroke();
     }
     ctx.restore();
+  };
+
+  const flush = () => {
+    if (drawFrameRef.current !== null) cancelAnimationFrame(drawFrameRef.current);
+    drawFrameRef.current = null;
+    const pending = pendingPointsRef.current;
+    pendingPointsRef.current = [];
+    const last = lastPointRef.current;
+    if (!last || pending.length === 0) return;
+    drawPoints([last, ...pending]);
+    lastPointRef.current = pending[pending.length - 1];
   };
 
   useImperativeHandle(ref, () => ({
     begin(point) {
       clear();
       lastPointRef.current = point;
-      drawSegment(point, [point[0] + 0.01, point[1] + 0.01]);
+      drawPoints([point]);
     },
     append(point) {
       const lastPoint = lastPointRef.current;
       if (!lastPoint) {
         lastPointRef.current = point;
-        drawSegment(point, [point[0] + 0.01, point[1] + 0.01]);
+        drawPoints([point]);
         return;
       }
-      drawSegment(lastPoint, point);
-      lastPointRef.current = point;
+      pendingPointsRef.current.push(point);
+      if (drawFrameRef.current === null) {
+        drawFrameRef.current = requestAnimationFrame(flush);
+      }
     },
+    flush,
     clear,
   }), [brushColor, brushHardness, brushOpacity, brushSize, clipPolygon, height, toolMode, width]);
 
@@ -477,16 +509,18 @@ export function EditorStage({
   selectionTargetNodeId = null,
   bitmapCompositeSource = null,
   sceneVisualNodes = null,
+  onStudioBitmapOperation,
   showFloatingTextEditor = true,
 }: {
   mode?: EditorMode;
   selectionTargetNodeId?: string | null;
   bitmapCompositeSource?: string | null;
   sceneVisualNodes?: EditorSceneVisualNode[] | null;
+  onStudioBitmapOperation?: (operation: StudioBitmapOperationCommit) => Promise<void>;
   showFloatingTextEditor?: boolean;
 }) {
   const e2e = isE2E();
-  const controller = useEditorStageController({ mode, selectionTargetNodeId, bitmapCompositeSource });
+  const controller = useEditorStageController({ mode, selectionTargetNodeId, bitmapCompositeSource, onStudioBitmapOperation });
   const [draftTextRotation, setDraftTextRotation] = useState<{ layerId: string; rotation: number } | null>(null);
   const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([]);
   const brushColor = useEditorStore((s) => s.brushColor);
@@ -861,6 +895,7 @@ export function EditorStage({
                 />
               )}
               <div
+                data-editor-preserve-text-selection="true"
                 style={{
                   width,
                   height,
@@ -876,7 +911,7 @@ export function EditorStage({
               onMouseDown={(event) => {
                 handleStageMouseDown(event);
                 if (event.cancelBubble) return;
-                if (event.target === event.target.getStage()) {
+                if (toolMode === "select" && selectedLayerId) {
                   selectLayer(null);
                 }
               }}
@@ -885,7 +920,7 @@ export function EditorStage({
               onMouseEnter={handleStageMouseEnter}
               onMouseLeave={handleStageMouseLeave}
               onTap={(event) => {
-                if (event.target === event.target.getStage()) {
+                if (!event.cancelBubble && toolMode === "select" && selectedLayerId) {
                   selectLayer(null);
                 }
               }}
@@ -939,6 +974,7 @@ export function EditorStage({
                       snapLayers={layers}
                       disabled={selectedLayer.locked === true}
                       onSnapGuidesChange={setSnapGuides}
+                      onKeepSelection={() => selectLayer(selectedLayer.id)}
                     />
                   )}
                   {translatedEditing && toolMode === "select" && selectedLayer && (
@@ -1041,6 +1077,7 @@ export function EditorStage({
                     snapLayers={layers}
                     disabled={selectedLayer.locked === true}
                     onSnapGuidesChange={setSnapGuides}
+                    onKeepSelection={() => selectLayer(selectedLayer.id)}
                   />
                 )}
                 {translatedEditing && toolMode === "select" && selectedLayer && (

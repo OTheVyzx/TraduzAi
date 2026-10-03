@@ -17,7 +17,7 @@
  *  - containerSize: dimensões do container do stage
  */
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { RotateCcw, X } from "lucide-react";
 import { useEditorStore } from "../../../lib/stores/editorStore";
 import { useTextEditSession } from "../../../lib/useTextEditSession";
@@ -66,6 +66,8 @@ export function FloatingTextEditor({
   const selectLayer = useEditorStore((s) => s.selectLayer);
 
   const panelRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
+  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; left: number; top: number } | null>(null);
 
   const entry = currentPage?.text_layers.find((t) => t.id === selectedLayerId);
   const original = entry?.original ?? "";
@@ -151,6 +153,38 @@ export function FloatingTextEditor({
   // Clamp vertical
   top = Math.max(PANEL_MARGIN, Math.min(top, containerSize.height - PANEL_MARGIN - 200));
 
+  const clampPosition = (x: number, y: number) => ({
+    x: Math.max(PANEL_MARGIN, Math.min(x, Math.max(PANEL_MARGIN, containerSize.width - PANEL_WIDTH - PANEL_MARGIN))),
+    y: Math.max(PANEL_MARGIN, Math.min(y, Math.max(PANEL_MARGIN, containerSize.height - (panelRef.current?.offsetHeight ?? 300) - PANEL_MARGIN))),
+  });
+  const panelPosition = position ? clampPosition(position.x, position.y) : { x: left, y: top };
+  const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || (event.target as Element).closest("button")) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: panelPosition.x,
+      top: panelPosition.y,
+    };
+  };
+  const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setPosition(clampPosition(drag.left + event.clientX - drag.startX, drag.top + event.clientY - drag.startY));
+  };
+  const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setPosition(clampPosition(drag.left + event.clientX - drag.startX, drag.top + event.clientY - drag.startY));
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
   const confidencePercent = Math.round(
     ((entry.confianca_ocr ?? entry.ocr_confidence ?? 0) || 0) * 100,
   );
@@ -169,10 +203,17 @@ export function FloatingTextEditor({
       <div
         ref={panelRef}
         className="pointer-events-auto absolute rounded-xl border border-border bg-bg-secondary/95 shadow-[0_8px_32px_rgba(0,0,0,0.45)] backdrop-blur-md"
-        style={{ left, top, width: PANEL_WIDTH }}
+        style={{ left: panelPosition.x, top: panelPosition.y, width: PANEL_WIDTH }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-3 py-2 border-b border-border">
+        <div
+          className="flex touch-none select-none cursor-move items-center justify-between px-3 py-2 border-b border-border"
+          title="Arraste para mover a janela"
+          onPointerDown={startDrag}
+          onPointerMove={moveDrag}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        >
           <div className="flex items-center gap-2">
             <span className="rounded-md border border-border bg-bg-tertiary/50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-text-muted">
               {entry.tipo}

@@ -52,15 +52,25 @@ function labelForAction(cmd: ReturnType<typeof getTopAction>): string {
   }
 }
 
-export function UndoRedoControls() {
+export function UndoRedoControls({
+  onUndo,
+  onRedo,
+  canUndo: canUndoOverride,
+  canRedo: canRedoOverride,
+}: {
+  onUndo?: () => void | Promise<void>;
+  onRedo?: () => void | Promise<void>;
+  canUndo?: boolean;
+  canRedo?: boolean;
+} = {}) {
   const undoEditor = useEditorStore((s) => s.undoEditor);
   const redoEditor = useEditorStore((s) => s.redoEditor);
   const currentPageKey = useEditorStore((s) => s.currentPageKey());
   const historyByPageKey = useEditorStore((s) => s.historyByPageKey);
 
   const stack = historyByPageKey[currentPageKey];
-  const canUndo = stack ? stack.index > 0 : false;
-  const canRedo = stack ? stack.index < stack.commands.length : false;
+  const canUndo = canUndoOverride ?? (stack ? stack.index > 0 : false);
+  const canRedo = canRedoOverride ?? (stack ? stack.index < stack.commands.length : false);
 
   const undoAction = getTopAction(stack, "undo");
   const redoAction = getTopAction(stack, "redo");
@@ -68,7 +78,7 @@ export function UndoRedoControls() {
   return (
     <div className="flex items-center gap-0.5">
       <button
-        onClick={() => undoEditor()}
+        onClick={() => onUndo ? void onUndo() : undoEditor()}
         disabled={!canUndo}
         title={canUndo ? `Desfazer: ${labelForAction(undoAction)} (Ctrl+Z)` : "Nada para desfazer"}
         className="rounded-md p-1.5 text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-25"
@@ -76,7 +86,7 @@ export function UndoRedoControls() {
         <Undo2 size={13} />
       </button>
       <button
-        onClick={() => redoEditor()}
+        onClick={() => onRedo ? void onRedo() : redoEditor()}
         disabled={!canRedo}
         title={canRedo ? `Refazer: ${labelForAction(redoAction)} (Ctrl+Y)` : "Nada para refazer"}
         className="rounded-md p-1.5 text-text-muted transition-smooth hover:bg-white/[0.04] hover:text-text-primary disabled:opacity-25"

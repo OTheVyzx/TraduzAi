@@ -711,6 +711,174 @@ class PaddleBlockMappingTests(unittest.TestCase):
 
         self.assertEqual([line.text for line in result.full_page_lines], ["VISIBLE ENGLISH"])
 
+    def test_crop_first_reads_detector_and_unassigned_pixels_once(self):
+        received = []
+
+        class CapturingPaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                received.append(image.copy())
+                if image.shape[:2] == (280, 300):
+                    return _raw_ocr("COMPLETE TEXT INSIDE BALLOON")
+                return [[
+                    ([[350, 350], [394, 350], [394, 375], [350, 375]], ("OUTSIDE", 0.96)),
+                    ([[12, 22], [35, 22], [35, 36], [12, 36]], ("MASK ARTIFACT", 0.40)),
+                ]]
+
+        page = np.full((400, 400, 3), 27, dtype=np.uint8)
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = CapturingPaddleModel()
+        block = SimpleNamespace(xyxy=(10, 20, 310, 300))
+        small_block = SimpleNamespace(xyxy=(340, 340, 399, 390))
+        with patch.dict(os.environ, {"TRADUZAI_OCR_CROP_FIRST": "1"}):
+            result = engine.recognize_page_with_evidence(
+                page, [block, small_block], request=_contract_request(root=page),
+            )
+
+        self.assertEqual(len(received), 2)
+        self.assertTrue(np.array_equal(received[0], page[20:300, 10:310]))
+        self.assertTrue(np.all(received[1][20:300, 10:310] == 255))
+        self.assertTrue(np.all(received[1][350:375, 350:394] == 27))
+        self.assertEqual(result.blocks[0].text, "COMPLETE TEXT INSIDE BALLOON")
+        self.assertEqual(result.blocks[1].text, "OUTSIDE")
+        self.assertEqual([line.text for line in result.observations], ["COMPLETE TEXT INSIDE BALLOON", "OUTSIDE"])
+        self.assertEqual(result.observations[0].bbox_page, (12, 23, 50, 38))
+        for attempt, physical in zip(result.attempts, received):
+            self.assertEqual(attempt.input_pixel_sha256, canonical_page_sha256(physical))
+            self.assertTrue(np.array_equal(attempt.transform_spec.replay(page), physical))
+
+    def test_crop_first_deskews_supported_slanted_lines_with_replayable_pixels(self):
+        received = []
+
+        class CapturingPaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                received.append(image.copy())
+                return _raw_ocr("SLANTED LETTER CONTENT IS READ") if len(received) == 1 else []
+
+        page = np.full((420, 420, 3), 255, dtype=np.uint8)
+        for index in range(6):
+            cv2.line(page, (40, 180 + index * 20), (260, 70 + index * 20), (10, 10, 10), 2)
+        native = page[20:320, 10:310]
+        angle = OCREngine._crop_text_skew_angle(native)
+        self.assertIsNotNone(angle)
+        self.assertAlmostEqual(angle, -26.5, delta=2.0)
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = CapturingPaddleModel()
+        with patch.dict(os.environ, {"TRADUZAI_OCR_CROP_FIRST": "1"}):
+            result = engine.recognize_page_with_evidence(
+                page, [SimpleNamespace(xyxy=(10, 20, 310, 320))],
+                request=_contract_request(root=page),
+            )
+        self.assertEqual(len(received), 2)
+        self.assertEqual(result.attempts[0].transform_spec.operations[1].kind, "deskew_affine")
+        self.assertTrue(np.array_equal(result.attempts[0].transform_spec.replay(page), received[0]))
+        self.assertEqual(result.attempts[0].input_pixel_sha256, canonical_page_sha256(received[0]))
+        self.assertEqual(result.blocks[0].text, "SLANTED LETTER CONTENT IS READ")
+        self.assertTrue(all(10 <= x <= 310 and 20 <= y <= 320 for x, y in result.observations[0].polygon_page))
+
+    def test_terminal_ink_gate_rejects_distant_and_non_punctuation_artifacts(self):
+        polygon = ((20, 30), (120, 30), (120, 50), (20, 50))
+        image = np.full((90, 170, 3), 255, dtype=np.uint8)
+        image[46:48, 123:125] = 0
+        self.assertTrue(OCREngine._terminal_ink_outside_line(image, polygon))
+        image[46:48, 123:125] = 255
+        image[8:10, 123:125] = 0
+        self.assertFalse(OCREngine._terminal_ink_outside_line(image, polygon))
+        image[8:10, 123:125] = 255
+        image[33:45, 123:125] = 0
+        self.assertFalse(OCREngine._terminal_ink_outside_line(image, polygon))
+        image[33:45, 123:125] = 255
+        image[46:48, 145:147] = 0
+        self.assertFalse(OCREngine._terminal_ink_outside_line(image, polygon))
+
+    def test_crop_first_preserves_full_page_path_for_small_regions(self):
+        received = []
+
+        class CapturingPaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                received.append(image.copy())
+                return _raw_ocr("SMALL")
+
+        page = np.full((100, 100, 3), 27, dtype=np.uint8)
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = CapturingPaddleModel()
+        with patch.dict(os.environ, {"TRADUZAI_OCR_CROP_FIRST": "1"}):
+            result = engine.recognize_page_with_evidence(
+                page, [SimpleNamespace(xyxy=(0, 0, 60, 60))], request=_contract_request(root=page),
+            )
+        self.assertEqual(len(received), 1)
+        self.assertTrue(np.array_equal(received[0], page))
+        self.assertEqual(result.blocks[0].text, "SMALL")
+
+    def test_empty_detected_crop_remains_visible_to_page_ocr(self):
+        received = []
+
+        class CapturingPaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                received.append(image.copy())
+                return [] if image.shape[:2] == (280, 300) else _raw_ocr("RECOVERED")
+
+        page = np.full((400, 400, 3), 27, dtype=np.uint8)
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = CapturingPaddleModel()
+        with patch.dict(os.environ, {"TRADUZAI_OCR_CROP_FIRST": "1"}):
+            result = engine.recognize_page_with_evidence(
+                page, [SimpleNamespace(xyxy=(10, 20, 310, 300))],
+                request=_contract_request(root=page),
+            )
+        self.assertEqual(len(received), 2)
+        self.assertTrue(np.array_equal(received[1], page))
+        self.assertEqual([line.text for line in result.observations], ["RECOVERED"])
+
+    def test_short_fragment_does_not_mask_large_sfx_region(self):
+        received = []
+
+        class CapturingPaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                received.append(image.copy())
+                return _raw_ocr("oF") if image.shape[:2] == (280, 300) else []
+
+        page = np.full((400, 400, 3), 27, dtype=np.uint8)
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = CapturingPaddleModel()
+        with patch.dict(os.environ, {"TRADUZAI_OCR_CROP_FIRST": "1"}):
+            result = engine.recognize_page_with_evidence(
+                page, [SimpleNamespace(xyxy=(10, 20, 310, 300))], request=_contract_request(root=page),
+            )
+        self.assertTrue(np.array_equal(received[1], page))
+        self.assertEqual(result.observations, ())
+        self.assertEqual(result.blocks[0].text, "")
+
+    def test_overlapping_boxes_keep_single_full_page_read(self):
+        received = []
+
+        class CapturingPaddleModel:
+            def ocr(self, image, det=True, rec=True, cls=False):
+                received.append(image.copy())
+                return _raw_ocr("SHARED")
+
+        page = np.full((400, 400, 3), 27, dtype=np.uint8)
+        engine = OCREngine.__new__(OCREngine)
+        engine._backend = "paddleocr"
+        engine._model = CapturingPaddleModel()
+        blocks = [SimpleNamespace(xyxy=(10, 20, 310, 300)), SimpleNamespace(xyxy=(20, 30, 70, 80))]
+        with patch.dict(os.environ, {"TRADUZAI_OCR_CROP_FIRST": "1"}):
+            result = engine.recognize_page_with_evidence(page, blocks, request=_contract_request(root=page))
+        self.assertEqual(len(received), 1)
+        self.assertTrue(np.array_equal(received[0], page))
+        self.assertEqual(len(result.observations), 1)
+
+    def test_mask_rectangles_rejects_out_of_bounds_at_replay(self):
+        spec = OCRTransformSpec.build((
+            OCRTransformOperation(kind="mask_rectangles", mask_bboxes=((0, 0, 200, 10),)),
+        ))
+        with self.assertRaises(ValueError):
+            spec.replay(np.zeros((100, 100, 3), dtype=np.uint8))
+
     def test_full_page_attempt_hashes_exact_array_passed_to_provider(self):
         received = []
 

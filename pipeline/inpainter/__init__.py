@@ -12448,7 +12448,20 @@ def inpaint_band_image(
                     raise UnsafeOwnerMaskError(
                         "operational owner record is no longer eligible for inpaint"
                     )
-            selected_inpainter = owner_inpainter or _get_inpainter("quality")
+            selected_inpainter = owner_inpainter
+            if selected_inpainter is None:
+                from inpainter import experimental_fastfill
+                selected_inpainter, fastfill_reason = experimental_fastfill.select(
+                    band_rgb, owner_mask_plan, matching_owner_texts[0]
+                )
+                if experimental_fastfill.enabled():
+                    ocr_page["_experimental_owner_fastfill"] = {
+                        "selected": selected_inpainter is not None,
+                        "reason": fastfill_reason,
+                        "owner_id": owner_mask_plan.owner_id,
+                    }
+            if selected_inpainter is None:
+                selected_inpainter = _get_inpainter("quality")
             mutation = execute_owner_inpaint(
                 band_rgb,
                 owner_mask_plan,

@@ -454,13 +454,9 @@ def _quality_baseline_profile(text_data: dict, estilo: Mapping[str, Any]) -> str
         raise ValueError("compact baseline requires no outline, shadow or glow")
     return profile
 
-DEFAULT_FONTS = {
-    "fala":      "ComicNeue-Bold.ttf",
-    "narracao":  "ComicNeue-Bold.ttf",
-    "sfx":       "ComicNeue-Bold.ttf",
-    "pensamento": "ComicNeue-Bold.ttf",
-}
-CANONICAL_FONT_FILE = "ComicNeue-Bold.ttf"
+from typesetter.fixed_font_family import FIXED_FONT_NAME
+DEFAULT_FONTS = {role: FIXED_FONT_NAME for role in ("fala", "narracao", "sfx", "pensamento")}
+CANONICAL_FONT_FILE = FIXED_FONT_NAME
 _OBLIQUE_RENDER_QA_MIN_ROTATION_DEG = 12.0
 _OBLIQUE_RENDER_QA_MIN_CONTAINMENT = 0.94
 _NEUTRAL_RENDER_TIPO = "texto"
@@ -1136,6 +1132,9 @@ def _apply_auto_style_policy_pre_font(img: Image.Image, text_data: dict) -> None
 
 def _apply_auto_style_policy_if_needed(img: Image.Image, text_data: dict) -> None:
     _apply_auto_style_policy_pre_font(img, text_data)
+    from typesetter.fixed_font_family import apply_fixed_font_family
+    if apply_fixed_font_family(text_data):
+        return
     if not _quality_closed_fonts_enabled():
         return
     if str(text_data.get("style_origin") or "").lower() in {"manual", "user_override"}:
@@ -1182,6 +1181,9 @@ def _get_ft2_font(font_path: str) -> _FT2Font:
         try:
             _ft2_cache[font_path] = _FT2Font(font_path)
         except Exception:
+            from typesetter.fixed_font_family import FIXED_FONT_NAME
+            if Path(font_path).name == FIXED_FONT_NAME:
+                raise
             if _quality_closed_fonts_enabled():
                 raise
             # Fallback para ComicNeue-Bold.ttf se a fonte falhar ao carregar
@@ -1249,6 +1251,9 @@ def _font_has_glyph(font_path: str, char: str) -> bool:
 @lru_cache(maxsize=2048)
 def _find_fallback_font_path(char: str, original_path: str) -> str | None:
     """Encontra uma fonte fallback que tenha o glyph para o caractere."""
+    from typesetter.fixed_font_family import FIXED_FONT_NAME
+    if Path(original_path).name == FIXED_FONT_NAME:
+        return None
     if _quality_closed_fonts_enabled():
         return None  # New revisions use a whole-block fallback before raster.
     for font_dir in FONT_DIRS:
@@ -1508,6 +1513,13 @@ def _seal_owner_materialization_plan(
     layout_sha256 = _canonical_runtime_sha256(layout_contract)
     x_height = max(1.0, float(font.size) * 0.70)
     identity = resolve_font_identity(font.font_path)
+    fixed_family = text_data.get("font_family_policy_v1")
+    if isinstance(fixed_family, dict):
+        from typesetter.fixed_font_family import validate_fixed_font_decision
+        target_text = str(text_data.get("translated_payload") or text_data.get("translated") or text_data.get("traduzido") or "")
+        fixed_family = validate_fixed_font_decision(target_text, fixed_family)
+        if identity.to_dict() != fixed_family["identity"]:
+            raise ValueError("FixedFontMaterializationIdentityMismatch")
     intent_payload = intent.to_dict()
     approved = dict(intent_payload["approved_attributes"])
     abstentions = dict(intent_payload["approved_abstentions"])
@@ -1534,6 +1546,11 @@ def _seal_owner_materialization_plan(
             continue
         if name == "font_name":
             targets[name] = identity.to_dict()
+            if fixed_family:
+                from typesetter.fixed_font_family import POLICY_REASON
+                kinds[name] = "policy_adjusted"
+                reasons[name] = POLICY_REASON
+                continue
         elif name == "font_weight":
             targets[name] = identity.weight_class
         elif name == "font_width":
@@ -1588,6 +1605,12 @@ def _seal_owner_materialization_plan(
             targets[name] = copy.deepcopy(value)
         kinds[name] = "exact"
     for name, reason in abstentions.items():
+        if name == "font_name" and fixed_family:
+            from typesetter.fixed_font_family import POLICY_REASON
+            targets[name] = identity.to_dict()
+            kinds[name] = "policy_adjusted"
+            reasons[name] = POLICY_REASON
+            continue
         kinds[name] = "abstained"
         reasons[name] = str(reason)
     plan = build_materialization_plan(
@@ -1700,6 +1723,13 @@ def _render_v2_owner_text_layer(
     *,
     core_override: np.ndarray | None = None,
     glyph_run_override: RenderedGlyphRun | None = None,
+    fixed_optical_gate: bool = False,
+    verified_inner_mask: np.ndarray | None = None,
+    inner_mask_kind: str | None = None,
+    source_observation_boxes: list[list[float]] | None = None,
+    fallback_used: bool = False,
+    declared_line_advance_px: int | None = None,
+    optical_calibration: Any | None = None,
 ) -> GlyphRasterResult | None:
     """Compose verified owner typography through the shared text/SFX rasterizer."""
 
@@ -1735,6 +1765,47 @@ def _render_v2_owner_text_layer(
         text_data["_rendered_glyph_run"] = glyph_run_override.to_dict()
     if not np.any(core):
         return None
+    if fixed_optical_gate:
+        from .comfort_contract import evaluate
+        from .stable_baseline import rasterize
+
+        line_masks = [rasterize(str(font.font_path), font.size, line) for line in lines]
+        line_heights = []
+        for mask in line_masks:
+            yy = np.nonzero(mask > 127)[0]
+            line_heights.append(int(yy.max() - yy.min() + 1) if len(yy) else 0)
+        reference = rasterize(str(font.font_path), font.size, "HATO")
+        yy = np.nonzero(reference > 127)[0]
+        calibration = int(yy.max() - yy.min() + 1) if len(yy) else None
+        positions_y = [position[1] for position in positions]
+        advances = [b - a for a, b in zip(positions_y, positions_y[1:])]
+        measured_advance = advances[0] if advances and len(set(advances)) == 1 else None
+        effective_advance = measured_advance if measured_advance is not None else declared_line_advance_px
+        if measured_advance is not None and declared_line_advance_px is not None and measured_advance != declared_line_advance_px:
+            effective_advance = -1
+        decision = evaluate(
+            font_name=font.font_path.name,
+            nominal_size_px=font.size,
+            line_advance_px=effective_advance if effective_advance is not None else -1,
+            observation_boxes=source_observation_boxes or [],
+            glyph_mask=core,
+            line_body_heights_px=line_heights,
+            calibration_body_px=calibration,
+            interior_mask=verified_inner_mask,
+            mask_kind=inner_mask_kind,
+            fallback_used=fallback_used,
+            calibration=optical_calibration,
+        )
+        text_data["fixed_optical_gate"] = {
+            "status": decision.status,
+            "reasons": list(decision.reasons),
+            "min_contour_px": decision.min_contour_px,
+            "ink_center_drift_px": decision.ink_center_drift_px,
+        }
+        if decision.status != "OK":
+            text_data["fit_status"] = "fixed_optical_review_required"
+            text_data["route_action"] = "review_required"
+            return None
     safe = np.zeros(core.shape, dtype=np.uint8)
     polygon = (
         text_data.get("paint_safe_polygon_page")
@@ -1805,6 +1876,37 @@ def _render_v2_owner_text_layer(
         raster_style,
         source_x_height_px=max(1.0, float(font.size) * 0.70),
     )
+    if fixed_optical_gate:
+        if result.status != "applied":
+            text_data["fit_status"] = "fixed_optical_style_review_required"
+            text_data["route_action"] = "review_required"
+            return None
+        final_decision = evaluate(
+            font_name=font.font_path.name,
+            nominal_size_px=font.size,
+            line_advance_px=effective_advance if effective_advance is not None else -1,
+            observation_boxes=source_observation_boxes or [],
+            glyph_mask=result.rgba[:, :, 3],
+            line_body_heights_px=line_heights,
+            calibration_body_px=calibration,
+            interior_mask=verified_inner_mask,
+            mask_kind=inner_mask_kind,
+            fallback_used=fallback_used,
+            calibration=optical_calibration,
+        )
+        text_data["fixed_optical_gate"]["final_alpha_reasons"] = list(final_decision.reasons)
+        final_alpha = result.rgba[:, :, 3] > 0
+        fringe_outside = bool(
+            verified_inner_mask is not None
+            and verified_inner_mask.shape == final_alpha.shape
+            and np.any(final_alpha & (verified_inner_mask == 0))
+        )
+        if fringe_outside:
+            text_data["fixed_optical_gate"]["final_alpha_reasons"].append("antialias_fringe_outside_interior")
+        if final_decision.status != "OK" or fringe_outside:
+            text_data["fit_status"] = "fixed_optical_final_alpha_review_required"
+            text_data["route_action"] = "review_required"
+            return None
     if result.status == "review_required":
         text_data["fit_status"] = (
             "style_core_outside_safe"
@@ -1837,6 +1939,49 @@ def _render_v2_owner_text_layer(
             [f"style_{name}_abstained" for name in result.abstained_attributes],
         )
     return result
+
+
+def _render_fixed_optical_owner_candidate(
+    image_np: np.ndarray,
+    text_data: dict,
+    plan: dict,
+    text: str,
+    font: SafeTextPathFont,
+    *,
+    source_observation_boxes: list[list[float]],
+    verified_inner_mask: np.ndarray | None,
+    inner_mask_kind: str | None,
+    fallback_used: bool = False,
+    optical_calibration: Any | None = None,
+) -> GlyphRasterResult | None:
+    """Solve word breaks and admit the real raster atomically for a pilot owner."""
+    from .fixed_optical_solver import solve_fixed_optical
+
+    layout = solve_fixed_optical(
+        text=text, font_path=str(font.font_path), font_name=font.font_path.name,
+        observation_boxes=source_observation_boxes,
+        interior_mask=verified_inner_mask, mask_kind=inner_mask_kind,
+        calibration=optical_calibration,
+    )
+    text_data['fixed_optical_layout'] = {
+        'status': layout.status, 'reason': layout.reason,
+        'lines': list(layout.lines), 'positions': [list(p) for p in layout.positions],
+        'min_contour_px': layout.min_contour_px,
+        'center_drift_px': layout.center_drift_px,
+    }
+    if layout.status != 'OK':
+        text_data['fit_status'] = 'fixed_optical_review_required'
+        text_data['route_action'] = 'review_required'
+        return None
+    return _render_v2_owner_text_layer(
+        image_np, text_data, plan, list(layout.lines), font, list(layout.positions),
+        fixed_optical_gate=True, verified_inner_mask=verified_inner_mask,
+        inner_mask_kind=inner_mask_kind,
+        source_observation_boxes=source_observation_boxes,
+        fallback_used=fallback_used,
+        declared_line_advance_px=optical_calibration.line_advance_px,
+        optical_calibration=optical_calibration,
+    )
 
 
 def _should_render_safe_arc_text(plan: dict, lines: list[str]) -> bool:
@@ -2591,6 +2736,9 @@ def _find_project_system_font(font_name: str, font_assets: dict | None = None) -
 
 
 def find_font(font_name: str, font_assets: dict | None = None) -> str | None:
+    from typesetter.fixed_font_family import FIXED_FONT_NAME, fixed_font_path
+    if font_name == FIXED_FONT_NAME:
+        return str(fixed_font_path())
     if _quality_closed_fonts_enabled():
         return str(_quality_closed_font_map().path(str(font_name)))
     cache_key = str(font_name or "").strip().lower()
@@ -3308,6 +3456,9 @@ def get_font(font_name: str, size: int):
     for fallback in fallback_paths:
         try:
             # Envolvemos atÃ© as fontes de sistema no SafeTextPathFont para garantir estabilidade
+            if not Path(fallback).is_file():
+                continue
+            _get_ft2_font(fallback)
             font = SafeTextPathFont(fallback, size)
             _font_cache[key] = font
             return font
@@ -3318,19 +3469,13 @@ def get_font(font_name: str, size: int):
     for font_dir in FONT_DIRS:
         last_resort = font_dir / "ComicNeue-Bold.ttf"
         if last_resort.exists():
+            _get_ft2_font(str(last_resort))
             font = SafeTextPathFont(str(last_resort), size)
             _font_cache[key] = font
             return font
 
     # Fallback final (pode ser instÃ¡vel, mas Ã© o absoluto fim da linha)
-    try:
-        raw_font = ImageFont.load_default()
-        # Nota: load_default() nÃ£o tem path, entÃ£o nÃ£o podemos envolver no SafeTextPathFont facilmente
-        # mas raramente chegaremos aqui.
-        _font_cache[key] = raw_font
-        return raw_font
-    except Exception:
-        raise RuntimeError(f"Nao foi possivel carregar nenhuma fonte para {font_name}")
+    raise RuntimeError(f"SafeFontUnavailable: {font_name}")
 
 
 def _typeset_single_page(args: tuple) -> int:
@@ -3389,6 +3534,21 @@ def run_typesetting(
 
     if total == 0:
         return
+
+    if any(
+        isinstance(text, dict) and isinstance(text.get("fixed_optical_contract"), dict)
+        for page in translated_results for text in page.get("texts", [])
+    ):
+        from .optical_producer import attach_optical_calibrations
+
+        widths = []
+        for path in inpainted_paths[:len(translated_results)]:
+            with Image.open(path) as source_image:
+                widths.append(source_image.width)
+        producer_report = attach_optical_calibrations(
+            translated_results[:len(widths)], widths=widths, find_font=find_font,
+        )
+        logger.info("Fixed optical calibration producer: %s", producer_report)
 
     # Serial rendering (FreeType not thread-safe), but I/O threaded:
     # prefetch next image + async save of previous result.
@@ -19580,6 +19740,10 @@ def _render_single_text_block(
     img: Image.Image, text_data: dict, plan: dict, pre_render_np=None,
 ) -> GlyphRasterResult | None:
     rotation_deg = _normalize_rotation_deg(plan.get("rotation_deg", 0))
+    if rotation_deg != 0 and isinstance(text_data.get("fixed_optical_contract"), Mapping):
+        text_data["fit_status"] = "fixed_optical_rotation_review_required"
+        text_data["route_action"] = "review_required"
+        return None
     if rotation_deg == 0:
         return _render_single_text_block_unrotated(
             img,
@@ -19664,6 +19828,78 @@ def _render_single_text_block_unrotated(
     text = text_data.get("translated", "")
     if not text:
         return
+
+    fixed_contract = text_data.get('fixed_optical_contract')
+    if isinstance(fixed_contract, Mapping):
+        # This branch precedes the variable-size resolver, Rust path and
+        # historical fallback. A rejected owner leaves img unchanged.
+        from .comfort_contract import resolve_calibration
+        import hashlib
+
+        font_name = str(fixed_contract.get('font_name') or '')
+        mask_path = fixed_contract.get('interior_mask_path')
+        expected_mask_sha256 = str(fixed_contract.get('interior_mask_file_sha256') or '').lower()
+        boxes = fixed_contract.get('source_observation_boxes')
+        observation_ids = fixed_contract.get('source_observation_ids')
+        source_sha256 = str(fixed_contract.get('source_image_sha256') or '')
+        expected_text_sha256 = str(fixed_contract.get('text_sha256') or '').lower()
+        raw_calibration = fixed_contract.get('optical_calibration')
+        if raw_calibration is None and isinstance(fixed_contract.get('source_style_samples'), list):
+            from .optical_estimator import estimate_optical_profile
+
+            candidate_font_path = find_font(font_name) if font_name else None
+            if candidate_font_path:
+                raw_calibration, estimate_status = estimate_optical_profile(
+                    fixed_contract['source_style_samples'],
+                    font_path=candidate_font_path, font_name=font_name,
+                    page_width_px=img.width,
+                )
+                text_data['optical_calibration_estimate_status'] = estimate_status
+        try:
+            calibration = resolve_calibration(raw_calibration, page_width_px=img.width)
+        except (TypeError, ValueError):
+            text_data['fit_status'] = 'fixed_optical_calibration_missing_or_invalid'
+            text_data['route_action'] = 'review_required'
+            return None
+        valid = (
+            font_name == calibration.font_name and mask_path and len(expected_mask_sha256) == 64
+            and isinstance(boxes, list) and boxes
+            and isinstance(observation_ids, list) and len(observation_ids) == len(boxes)
+            and len(source_sha256) == 64
+            and expected_text_sha256 == hashlib.sha256(str(text).encode('utf-8')).hexdigest()
+        )
+        if not valid:
+            text_data['fit_status'] = 'fixed_optical_contract_invalid'
+            text_data['route_action'] = 'review_required'
+            return None
+        try:
+            path = Path(str(mask_path)).resolve(strict=True)
+            if hashlib.sha256(path.read_bytes()).hexdigest() != expected_mask_sha256:
+                raise ValueError('interior_mask_hash_mismatch')
+            with Image.open(path) as stored_mask:
+                interior = np.asarray(stored_mask.convert('L'))
+            if interior.shape != (img.height, img.width):
+                raise ValueError('interior_mask_shape_mismatch')
+            font_path = find_font(font_name)
+            if not font_path:
+                raise ValueError('calibrated_font_missing')
+        except (OSError, ValueError) as exc:
+            text_data['fit_status'] = f'fixed_optical_contract_rejected:{exc}'
+            text_data['route_action'] = 'review_required'
+            return None
+        image_np = np.asarray(img.convert('RGB')).copy()
+        result = _render_fixed_optical_owner_candidate(
+            image_np, text_data, plan, str(text),
+            SafeTextPathFont(font_path, calibration.nominal_size_px),
+            source_observation_boxes=boxes,
+            verified_inner_mask=interior,
+            inner_mask_kind=str(fixed_contract.get('mask_kind') or ''),
+            fallback_used=bool(fixed_contract.get('fallback_used')),
+            optical_calibration=calibration,
+        )
+        if result is not None:
+            img.paste(Image.fromarray(image_np))
+        return result
 
     _apply_recovered_dark_bubble_glow_capacity(img, text_data, plan)
     _apply_existing_dark_connected_lobe_capacity_metric(text_data, plan)
@@ -20750,6 +20986,127 @@ def _mark_owner_proportional_review(
             metrics["owner_render_quality"] = copy.deepcopy(diagnostic_quality)
 
 
+def render_style_transform_active(text_data: dict) -> bool:
+    style = text_data.get("estilo") or {}
+    if not isinstance(style, dict):
+        return True
+    return bool(
+        style.get("curva") or style.get("rotacao") or style.get("rotation_deg")
+        or style.get("scale_y") or style.get("width_scale")
+    )
+
+
+@lru_cache(maxsize=4096)
+def _experimental_unit_text_ink_height(font_path: str, text: str) -> float:
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextPath
+
+    prop = FontProperties(fname=font_path, size=1)
+    return float(TextPath((0, 0), text, prop=prop, usetex=False).get_extents().height)
+
+
+def _experimental_smaller_font_cannot_win(
+    *, candidate_size: int, accepted: list, translated_text: str, font_name: str,
+) -> bool:
+    """Bound the ink height before skipping a lower-size trial.
+
+    The first quality score is distance from source ink scale. If an applied
+    candidate is already below that scale and even the upper bound for the
+    smaller font is strictly shorter, the smaller font cannot improve it.
+    All uncertain font faces or transformed text continue the full search.
+    """
+    if not accepted or not translated_text.strip() or not font_name:
+        return False
+    selected = min(accepted, key=lambda item: (
+        0 if isinstance(item[3], GlyphRasterResult) and item[3].status == "applied" else 1,
+        *item[0],
+    ))
+    if not isinstance(selected[3], GlyphRasterResult) or selected[3].status != "applied":
+        return False
+    selected_quality = selected[2].get("owner_render_quality") or {}
+    ratio = selected_quality.get("source_scale_ratio")
+    selected_height = selected_quality.get("render_ink_height_px")
+    if not isinstance(ratio, (int, float)) or not isinstance(selected_height, (int, float)):
+        return False
+    if not (0.0 < float(ratio) < 1.0 and candidate_size < int(selected[2].get("font_size_final") or 0)):
+        return False
+    font = get_font(font_name, candidate_size)
+    if not isinstance(font, SafeTextPathFont):
+        return False
+    font_path = str(font.font_path)
+    if any(not _font_has_glyph(font_path, char) for char in translated_text if not char.isspace()):
+        return False
+    unit_height = _experimental_unit_text_ink_height(font_path, translated_text)
+    if not math.isfinite(unit_height) or unit_height <= 0:
+        return False
+    # A whole-run TextPath contains the vertical ink of every possible line;
+    # two pixels cover antialiasing and resize rounding in stable_baseline.
+    smaller_height_upper_bound = math.ceil(unit_height * candidate_size) + 2
+    return smaller_height_upper_bound < float(selected_height)
+
+
+def _experimental_first_nominal_fit_index(count: int, predicate: Callable[[int], bool]) -> int:
+    """Return the first fitting index in a descending-size monotonic sequence."""
+    left, right = 0, int(count) - 1
+    first = int(count)
+    while left <= right:
+        middle = (left + right) // 2
+        if predicate(middle):
+            first = middle
+            right = middle - 1
+        else:
+            left = middle + 1
+    return first
+
+
+def _experimental_owner_nominal_fit_boundary(text_data: dict, sizes: list[int]) -> int | None:
+    """Use binary fit only when every size has identical box/font policy.
+
+    For a fixed box and font, decreasing an unhinted font size cannot increase
+    greedy wrap count or line advance. Actual raster, geometry and QA still run
+    for candidate finalists. A varying plan takes the original exhaustive path.
+    """
+    if len(sizes) < 3:
+        return None
+    signatures = set()
+    plans = []
+    for size in sizes:
+        child = copy.deepcopy(text_data)
+        child["source_font_bounds_px"] = [size, size]
+        child["container_font_bounds_px"] = [size, size]
+        plan = plan_text_layout(child)
+        signature = (
+            str(plan.get("font_name") or ""), int(plan.get("max_width", 0) or 0),
+            int(plan.get("max_height", 0) or 0),
+            float(plan.get("line_spacing_ratio", 0.2) or 0.2),
+            str(plan.get("baseline_profile") or "standard"),
+        )
+        signatures.add(signature)
+        plans.append(signature)
+    if len(signatures) != 1 or not plans[0][0] or plans[0][1] <= 0 or plans[0][2] <= 0:
+        return None
+    payload = str(text_data.get("translated") or text_data.get("translated_payload") or "")
+    if not payload:
+        return None
+    font_name, max_width, max_height, spacing, baseline = plans[0]
+    checked = {}
+
+    def fits(index: int) -> bool:
+        if index not in checked:
+            checked[index] = _fits_in_box(
+                payload, font_name, sizes[index], max_width, max_height, spacing, baseline,
+            )
+        return checked[index]
+
+    first = _experimental_first_nominal_fit_index(len(sizes), fits)
+    # Verify the boundary explicitly; a failed verification uses the old path.
+    if first < len(sizes) and not fits(first):
+        return None
+    if first > 0 and fits(first - 1):
+        return None
+    return first
+
+
 def _render_single_owner_proportionally(
     img: Image.Image,
     text_data: dict,
@@ -20779,20 +21136,43 @@ def _render_single_owner_proportionally(
     attempts: list[dict] = []
     diagnostic_quality: dict | None = None
 
-    for candidate_size in candidate_sizes:
+    nominal_fit_boundary = (
+        _experimental_owner_nominal_fit_boundary(text_data, candidate_sizes)
+        if os.environ.get("TRADUZAI_EXPERIMENTAL_FAST_FONT_SEARCH") == "1"
+        and not render_style_transform_active(text_data)
+        else None
+    )
+    for candidate_index, candidate_size in enumerate(candidate_sizes):
+        if (
+            os.environ.get("TRADUZAI_EXPERIMENTAL_FAST_FONT_SEARCH") == "1"
+            and not render_style_transform_active(text_data)
+            and _experimental_smaller_font_cannot_win(
+                candidate_size=candidate_size,
+                accepted=accepted,
+                translated_text=str(text_data.get("translated") or ""),
+                font_name=str(owner_plan.get("font_name") or ""),
+            )
+        ):
+            text_data.setdefault("_render_debug", {})["experimental_fast_font_search_stop_px"] = candidate_size
+            break
         child = copy.deepcopy(text_data)
         child["source_font_bounds_px"] = [candidate_size, candidate_size]
         child["container_font_bounds_px"] = [candidate_size, candidate_size]
         child_plan = plan_text_layout(child)
-        if not _fits_in_box(
-            str(child.get("translated") or child.get("translated_payload") or ""),
-            str(child_plan.get("font_name") or ""),
-            candidate_size,
-            int(child_plan.get("max_width", 0) or 0),
-            int(child_plan.get("max_height", 0) or 0),
-            float(child_plan.get("line_spacing_ratio", 0.2) or 0.2),
-            str(child_plan.get("baseline_profile") or "standard"),
-        ):
+        nominal_fits = (
+            candidate_index >= nominal_fit_boundary
+            if nominal_fit_boundary is not None
+            else _fits_in_box(
+                str(child.get("translated") or child.get("translated_payload") or ""),
+                str(child_plan.get("font_name") or ""),
+                candidate_size,
+                int(child_plan.get("max_width", 0) or 0),
+                int(child_plan.get("max_height", 0) or 0),
+                float(child_plan.get("line_spacing_ratio", 0.2) or 0.2),
+                str(child_plan.get("baseline_profile") or "standard"),
+            )
+        )
+        if not nominal_fits:
             attempts.append({"font_px": candidate_size, "status": "overflow", "reason": "nominal_overflow"})
             continue
         trial_image = img.copy()
@@ -24091,9 +24471,25 @@ def render_band_image(
     from PIL import Image
 
     if owner_graph is not None:
+        if any(
+            isinstance(text, dict) and isinstance(text.get("fixed_optical_contract"), dict)
+            for text in ocr_page.get("texts", [])
+        ):
+            from .optical_producer import attach_optical_calibrations
+            attach_optical_calibrations(
+                [ocr_page], widths=[band_rgb.shape[1]], find_font=find_font,
+            )
         return _render_owner_band_image(band_rgb, ocr_page, owner_graph)
     if band_rgb.size == 0 or not ocr_page.get("texts"):
         return band_rgb.copy()
+    if any(
+        isinstance(text, dict) and isinstance(text.get("fixed_optical_contract"), dict)
+        for text in ocr_page.get("texts", [])
+    ):
+        from .optical_producer import attach_optical_calibrations
+        attach_optical_calibrations(
+            [ocr_page], widths=[band_rgb.shape[1]], find_font=find_font,
+        )
     _ensure_typeset_trace_metadata(ocr_page)
 
     img = Image.fromarray(band_rgb.copy())
@@ -24225,9 +24621,96 @@ def get_line_height(font: ImageFont.FreeTypeFont, font_size: int, spacing_ratio:
     return int(base + spacing)
 
 
+@lru_cache(maxsize=4)
+def _experimental_glyph_face(font_sha256: str, font_path: str, shaping_policy: str):
+    """Keep at most four font faces; a changed file hash loads a fresh face."""
+    from matplotlib.ft2font import FT2Font
+    from matplotlib.textpath import text_to_path
+
+    font = FT2Font(font_path)
+    font.set_size(text_to_path.FONT_SCALE, text_to_path.DPI)
+    return font, {}, {}
+
+
+@lru_cache(maxsize=512)
+def _experimental_textpath_unit_ink_width(
+    font_sha256: str, font_path: str, text: str, shaping_policy: str,
+) -> float:
+    """Union exact Bezier glyph extents at Matplotlib's canonical size."""
+    if len(font_sha256) != 64 or shaping_policy != "matplotlib-textpath-nfc-usetex-false-v1":
+        raise ValueError("experimental font identity or shaping policy is invalid")
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.path import Path as MplPath
+    from matplotlib.text import Text
+    from matplotlib.textpath import TextPath, text_to_path
+
+    prop = FontProperties(fname=font_path, size=1)
+    processed, ismath = Text(usetex=False)._preprocess_math(text)
+    if ismath:
+        return float(TextPath((0, 0), text, prop=prop, usetex=False).get_extents().width)
+    font, glyph_map, glyph_bounds = _experimental_glyph_face(font_sha256, font_path, shaping_policy)
+    glyph_info, _, rects = text_to_path.get_glyphs_with_font(font, processed, glyph_map=glyph_map)
+    if rects:
+        return float(TextPath((0, 0), text, prop=prop, usetex=False).get_extents().width)
+    left, right = float("inf"), float("-inf")
+    for glyph_id, xposition, _yposition, scale in glyph_info:
+        if glyph_id not in glyph_bounds:
+            vertices, codes = glyph_map[glyph_id]
+            if len(vertices) == 0:
+                glyph_bounds[glyph_id] = None
+            else:
+                bounds = MplPath(vertices, codes).get_extents()
+                glyph_bounds[glyph_id] = (float(bounds.x0), float(bounds.x1))
+        bounds = glyph_bounds[glyph_id]
+        if bounds is not None:
+            left = min(left, bounds[0] * scale + xposition)
+            right = max(right, bounds[1] * scale + xposition)
+    # Limit retained path arrays per face without affecting this result.
+    if len(glyph_map) > 128:
+        glyph_map.clear()
+        glyph_bounds.clear()
+    if left == float("inf"):
+        return float(TextPath((0, 0), text, prop=prop, usetex=False).get_extents().width)
+    return (right - left) / text_to_path.FONT_SCALE
+
+
+def _experimental_fast_text_width(font: SafeTextPathFont, text: str) -> int:
+    """Match stable_baseline.rasterize width without painting its polygons."""
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextPath
+
+    text = unicodedata.normalize("NFC", text)
+    if not text or not text.strip():
+        return 1
+    font_path = str(font.font_path)
+    missing = sorted({char for char in text if not char.isspace()
+                      and not _font_has_glyph(font_path, char)})
+    if missing:
+        raise ValueError(f"font lacks glyphs {missing!r}; select a block fallback")
+    # The font is only 80 KiB in this profile. Hashing its current bytes on
+    # every measurement avoids stale cache entries even after an in-place edit.
+    font_sha256 = sha256(Path(font_path).read_bytes()).hexdigest()
+    cache_args = (font_sha256, font_path, text, "matplotlib-textpath-nfc-usetex-false-v1")
+    unit_width = (
+        _experimental_textpath_unit_ink_width(*cache_args)
+        if len(text) <= 512 else _experimental_textpath_unit_ink_width.__wrapped__(*cache_args)
+    )
+    scaled = unit_width * font.size
+    if not math.isfinite(scaled) or scaled < 0:
+        raise ValueError("invalid TextPath ink width")
+    # Recompute at the requested size near an integer pixel boundary, where
+    # floating point scaling could change ceil() by one pixel.
+    if abs(scaled - round(scaled)) < 1e-7:
+        prop = FontProperties(fname=font_path, size=font.size)
+        scaled = float(TextPath((0, 0), text, prop=prop, usetex=False).get_extents().width)
+    return max(1, int(math.ceil(scaled)) + 1)
+
+
 def measure_text_width(font: ImageFont.FreeTypeFont, text: str, fallback_size: int = 16) -> int:
     try:
         if isinstance(font, SafeTextPathFont):
+            if os.environ.get("TRADUZAI_EXPERIMENTAL_FAST_FONT_METRICS") == "1":
+                return _experimental_fast_text_width(font, text)
             return int(_build_textpath_mask(font, text, padding=0).shape[1])
         bbox = font.getbbox(text)
         return bbox[2] - bbox[0]

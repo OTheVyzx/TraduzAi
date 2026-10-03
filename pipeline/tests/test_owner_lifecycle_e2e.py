@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,6 +50,145 @@ def test_no_band_dialogue_recipe_completes_basic_page_first_lifecycle():
     assert result.translations[0].target_locale == "pt-BR"
     assert result.status == "candidate_ready"
     assert result.final_page is None
+
+
+def _detached_execution_rejection_services(*, mutate_candidate=None):
+    services = _services()
+
+    def execute(request, graph, translation):
+        owner = graph.owners[0]
+        binding = next(
+            item for item in translation.bindings if item.owner_id == owner.owner_id
+        )
+        component_by_id = {
+            item.component_id: item for item in graph.components
+        }
+        dispositions = []
+        for disposition in graph.component_dispositions:
+            if disposition.component_id not in owner.component_ids:
+                dispositions.append(disposition)
+                continue
+            component = component_by_id[disposition.component_id]
+            evidence_ids = tuple(
+                sorted(
+                    observation.observation_id
+                    for observation in graph.observations
+                    if disposition.component_id in observation.component_ids
+                )
+            )
+            dispositions.append(
+                replace(
+                    disposition,
+                    decision="uncertain",
+                    owner_id=None,
+                    reason="owner_execution_rejected",
+                    policy_id="coverage_ambiguous_candidate",
+                    policy_bbox_page=component.bbox_page,
+                    policy_evidence_ids=evidence_ids,
+                    policy_reason=(
+                        "source pixels preserved after owner execution rejection"
+                    ),
+                )
+            )
+        graph.owners = []
+        graph.projections = []
+        graph.component_dispositions = dispositions
+        candidate = {
+            "id": owner.owner_id,
+            "owner_id": None,
+            "candidate_owner_id": owner.owner_id,
+            "page_id": request.page_id,
+            "component_ids": list(owner.component_ids),
+            "observation_ids": list(owner.observation_ids),
+            "selected_observation_ids": list(owner.selected_observation_ids),
+            "semantic_role": owner.semantic_role,
+            "route_action": "review_required",
+            "action_mask_ref": None,
+            "layout_region_ids": [],
+            "disposition": "review",
+            "state": "review_required",
+            "execution_tile_id": None,
+            "owner_execution_rejection_reason": "unsafe source replacement",
+            "owner_graph_run_id": graph.run_id,
+            "owner_graph_origin_execution_id": graph.origin_execution_id,
+            "owner_graph_page_source_sha256": graph.page_source_sha256,
+            "execution_rejected": True,
+            "derived_qa_status": "review_required",
+            "write_authority": "revoked",
+            "source_pixels_preserved": True,
+            "committed": False,
+            "blocking": True,
+            "qa_action": "BLOCK",
+            "visible": False,
+            "render_policy": "review_required",
+            "text": binding.source_text,
+            "original": binding.source_text,
+            "source_payload": binding.source_text,
+            "translated": binding.target_text,
+            "translated_payload": binding.target_text,
+            "translation_binding_sha256": binding.translation_binding_sha256,
+            "source_payload_sha256": binding.source_payload_sha256,
+            "target_payload_sha256": binding.target_payload_sha256,
+            "qa_flags": ["owner_render_geometry_review"],
+        }
+        if mutate_candidate is not None:
+            mutate_candidate(candidate)
+        return SimpleNamespace(commits=(), records=(candidate,), graph=graph)
+
+    return replace(services, execution_fn=execute)
+
+
+def test_detached_execution_rejection_candidate_preserves_translation_binding():
+    result = run_page_owner_pipeline(
+        _request(bands=()),
+        _detached_execution_rejection_services(),
+    )
+
+    assert result.status == "candidate_ready"
+    assert result.owner_graph.read().owners == []
+    layer = result.text_layers_view.read()["texts"][0]
+    assert layer["owner_id"] is None
+    assert layer["candidate_owner_id"] == result.translations[0].owner_id
+    assert layer["source_payload"] == result.translations[0].source_text
+    assert layer["translated"] == result.translations[0].target_text
+    assert layer["translation_binding_sha256"] == result.translations[0].translation_binding_sha256
+
+
+def test_detached_execution_rejection_candidate_cannot_retain_write_authority():
+    with pytest.raises(PagePipelineIdentityError, match="detached review candidate is invalid"):
+        run_page_owner_pipeline(
+            _request(bands=()),
+            _detached_execution_rejection_services(
+                mutate_candidate=lambda candidate: candidate.update(visible=True)
+            ),
+        )
+
+
+def test_detached_execution_rejection_candidate_must_match_translation_hashes():
+    with pytest.raises(PagePipelineIdentityError, match="mismatched target_payload_sha256"):
+        run_page_owner_pipeline(
+            _request(bands=()),
+            _detached_execution_rejection_services(
+                mutate_candidate=lambda candidate: candidate.update(
+                    target_payload_sha256="0" * 64
+                )
+            ),
+        )
+
+
+def test_detached_execution_rejection_candidate_must_match_source_hash():
+    with pytest.raises(
+        PagePipelineIdentityError,
+        match="mismatched source_payload_sha256",
+    ):
+        run_page_owner_pipeline(
+            _request(bands=()),
+            _detached_execution_rejection_services(
+                mutate_candidate=lambda candidate: candidate.update(
+                    source_payload_sha256="0" * 64
+                )
+            ),
+        )
 
 
 def _qa_journal(candidate):

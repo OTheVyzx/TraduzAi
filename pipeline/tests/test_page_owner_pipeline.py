@@ -469,7 +469,7 @@ def test_page_pipeline_preserves_rejected_translation_as_review_and_continues():
     unchanged.backend_name = "fixture"
     result = run_page_owner_pipeline(
         _request(),
-        replace(_services(), translation_backends=(unchanged,)),
+        replace(_services(), translation_backends=(unchanged,), translation_allow_quality_warnings=False),
     )
 
     assert result.translations == ()
@@ -478,6 +478,21 @@ def test_page_pipeline_preserves_rejected_translation_as_review_and_continues():
         attempt.status == "rejected"
         for attempt in result.translation_attempts
     )
+    assert result.owner_graph.read().owners == []
+    rejected = result.text_layers_view.read()["texts"][0]
+    assert rejected["owner_id"] is None
+    assert rejected["candidate_owner_id"]
+    assert rejected["candidate_owner_id"] == rejected["id"]
+    assert rejected["route_action"] == "review_required"
+    assert rejected["render_policy"] == "review_required"
+    assert rejected["write_authority"] == "revoked"
+    assert rejected["source_pixels_preserved"] is True
+    assert rejected["translation_attempt_ids"] == [
+        attempt.attempt_id for attempt in result.translation_attempts
+    ]
+    assert rejected["translation_attempt_sha256s"] == [
+        attempt.attempt_sha256 for attempt in result.translation_attempts
+    ]
     assert result.owner_graph.read().owners == []
     assert result.page_commits == ()
     review = result.text_layers_view.read()["texts"][0]

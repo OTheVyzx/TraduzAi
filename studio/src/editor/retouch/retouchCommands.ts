@@ -183,18 +183,36 @@ function cloneScene(scene: StudioScene): StudioScene {
   return JSON.parse(JSON.stringify(scene)) as StudioScene;
 }
 
-function insertSiblingAfter(scene: StudioScene, target: StudioSceneNode, output: StudioSceneNode) {
-  const siblings = scene.nodes
-    .filter((node) => node.parent_id === target.parent_id && node.id !== output.id)
-    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
-  const targetIndex = siblings.findIndex((node) => node.id === target.id);
-  const ordered = [...siblings];
-  ordered.splice(targetIndex < 0 ? ordered.length : targetIndex + 1, 0, output);
-  const orderById = new Map(ordered.map((node, order) => [node.id, order]));
-  scene.nodes = scene.nodes.map((node) => orderById.has(node.id) ? { ...node, order: orderById.get(node.id)! } : node);
-  output.order = orderById.get(output.id) ?? target.order + 1;
+function appendCleanupOutput(scene: StudioScene, output: StudioSceneNode) {
+  let group = scene.nodes.find((node) =>
+    node.kind === "group" && (node.metadata.auto_category_group === "cleanup" || node.metadata.raster_operations_key === "inpaint"),
+  );
+  if (!group) {
+    const baseId = "group:auto:cleanup";
+    let id = baseId;
+    let suffix = 2;
+    while (scene.nodes.some((node) => node.id === id)) id = `${baseId}:${suffix++}`;
+    group = {
+      id,
+      kind: "group",
+      name: "Limpeza",
+      visible: true,
+      locked: false,
+      opacity: 1,
+      blend_mode: "normal",
+      parent_id: null,
+      order: scene.roots.length,
+      mask_ids: [],
+      metadata: { auto_category_group: "cleanup", scene_owned: true },
+    };
+    scene.nodes.push(group);
+    scene.roots.push(group.id);
+  }
+  output.parent_id = group.id;
+  output.order = scene.nodes
+    .filter((node) => node.parent_id === group!.id)
+    .reduce((max, node) => Math.max(max, node.order), -1) + 1;
   scene.nodes.push(output);
-  if (target.parent_id === null) scene.roots = ordered.map((node) => node.id);
 }
 
 export function applyRetouchCommandToScene(
@@ -218,7 +236,6 @@ export function applyRetouchCommandToScene(
   }
 
   const next = cloneScene(scene);
-  const nextTarget = next.nodes.find((node) => node.id === target.id)!;
   const outputNodeId = options.outputNodeId ?? `generated:${command.id}`;
   const maskNodeId = options.maskNodeId ?? `mask:${command.id}`;
   if (next.nodes.some((node) => node.id === outputNodeId || node.id === maskNodeId)) {
@@ -243,7 +260,7 @@ export function applyRetouchCommandToScene(
       retouch_command: command,
     },
   };
-  insertSiblingAfter(next, nextTarget, output);
+  appendCleanupOutput(next, output);
   const outputSelection = adjustStudioSelection(command.selection, { targetNodeId: outputNodeId });
   return attachStudioSelectionMask(next, outputSelection, {
     maskId: maskNodeId,

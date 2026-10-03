@@ -117,7 +117,7 @@ def _binding_errors(profile: dict[str, Any], contract: dict[str, Any]) -> list[s
     return [name for name, value in expected.items() if contract.get(name) != value]
 
 
-def _attribute_results(profile: dict[str, Any], contract: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def _attribute_results(profile: dict[str, Any], contract: dict[str, Any], *, fixed_font_identity: dict | None = None) -> tuple[dict[str, Any], list[str]]:
     if int(contract.get("schema_version") or 0) == 2:
         plan = contract.get("materialization_plan")
         observation = contract.get("materialization_observation")
@@ -141,6 +141,8 @@ def _attribute_results(profile: dict[str, Any], contract: dict[str, Any]) -> tup
                     if observed_row else None
                 )
                 expected_value = row.get("target_value")
+                if name == "font_name" and fixed_font_identity is not None:
+                    expected_value = fixed_font_identity
                 confidence = _attribute_confidence(profile, name)
                 if kind in {"abstained", "superseded"}:
                     status = "abstained"
@@ -185,6 +187,9 @@ def _attribute_results(profile: dict[str, Any], contract: dict[str, Any]) -> tup
     expected_applied = expected_applied if isinstance(expected_applied, dict) else {}
     expected_abstained = decision.get("abstained_attributes")
     expected_abstained = expected_abstained if isinstance(expected_abstained, dict) else {}
+    if fixed_font_identity is not None:
+        expected_applied = {**expected_applied, "font_name": fixed_font_identity}
+        expected_abstained = {key: value for key, value in expected_abstained.items() if key != "font_name"}
     observed_applied = contract.get("applied_attributes")
     observed_applied = observed_applied if isinstance(observed_applied, dict) else {}
     observed_abstained = contract.get("abstained_attributes")
@@ -345,7 +350,16 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
             backend_counts[backend] = backend_counts.get(backend, 0) + 1
             for binding in _binding_errors(profile, contract):
                 findings.append({"code": "raster_binding_mismatch", "field": binding})
-            attributes, catastrophic = _attribute_results(profile, contract)
+            fixed_identity = None
+            family_policy = layer.get("font_family_policy_v1")
+            if isinstance(family_policy, dict):
+                from typesetter.fixed_font_family import validate_fixed_font_decision
+                try:
+                    target_text = str(layer.get("translated_payload") or layer.get("translated") or layer.get("traduzido") or "")
+                    fixed_identity = validate_fixed_font_decision(target_text, family_policy)["identity"]
+                except (OSError, TypeError, ValueError) as exc:
+                    findings.append({"code": "invalid_fixed_font_family_policy", "detail": str(exc)})
+            attributes, catastrophic = _attribute_results(profile, contract, fixed_font_identity=fixed_identity)
             for name, result in attributes.items():
                 status_counts = attribute_metrics.setdefault(name, {})
                 status = str(result["status"])
@@ -369,7 +383,8 @@ def audit_style_fidelity(project: dict[str, Any], run_dir: Path, *, mode: str = 
                     color_errors[color_bucket].append(color_distance)
                 if isinstance(result.get("expected"), (int, float)) and isinstance(result.get("observed"), (int, float)):
                     geometry_errors.setdefault(name, []).append(abs(float(result["observed"]) - float(result["expected"])))
-                if kind == "policy_adjusted" and name not in POLICY_ADJUSTMENT_WHITELIST:
+                family_adjustment = name == "font_name" and fixed_identity is not None and result.get("reason") == "user_fixed_base_font_family"
+                if kind == "policy_adjusted" and name not in POLICY_ADJUSTMENT_WHITELIST and not family_adjustment:
                     unauthorized_policy_adjustments += 1
                 if kind == "superseded" and not str(result.get("superseded_by") or ""):
                     invalid_superseded_relations += 1

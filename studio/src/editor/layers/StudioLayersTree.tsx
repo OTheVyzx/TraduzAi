@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type DragEvent, type MouseEvent } from "react";
 import {
   AlertTriangle,
+  ChevronDown,
+  ChevronRight,
   Eye,
   EyeOff,
   FileImage,
@@ -16,6 +18,7 @@ import {
   ScanLine,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   Type,
   Undo2,
   type LucideIcon,
@@ -46,9 +49,13 @@ const NODE_PRESENTATION: Record<StudioSceneNodeKind, { label: string; icon: Luci
 
 export interface StudioLayersTreeProps {
   onSelectTextLayer?: (layerId: string | null) => void;
+  onUndo?: () => void | Promise<void>;
+  onRedo?: () => void | Promise<void>;
+  canUndo?: boolean;
+  canRedo?: boolean;
 }
 
-export function StudioLayersTree({ onSelectTextLayer }: StudioLayersTreeProps = {}) {
+export function StudioLayersTree({ onSelectTextLayer, onUndo, onRedo, canUndo, canRedo }: StudioLayersTreeProps = {}) {
   const reactiveState = useStudioSceneStore();
   const state = reactiveState.scene ? reactiveState : useStudioSceneStore.getState();
   const {
@@ -60,11 +67,15 @@ export function StudioLayersTree({ onSelectTextLayer }: StudioLayersTreeProps = 
     isSaving,
     error,
     groupSelected,
+    deleteSelectedNodes,
     undo,
     redo,
     clearError,
   } = state;
   const primaryNode = scene?.nodes.find((node) => node.id === primaryNodeId) ?? null;
+  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() => new Set());
+  const pageKey = reactiveState.pageKey;
+  useEffect(() => setCollapsedGroupIds(new Set()), [pageKey]);
   const rootNodes = useMemo(
     () => (scene ? [...orderedSceneChildren(scene, null)].reverse() : []),
     [scene],
@@ -97,8 +108,8 @@ export function StudioLayersTree({ onSelectTextLayer }: StudioLayersTreeProps = 
         <div className="mt-2 flex items-center gap-1">
           <button
             type="button"
-            disabled={isSaving || historyIndex <= 0}
-            onClick={() => void undo().catch(() => undefined)}
+            disabled={isSaving || !(canUndo ?? historyIndex > 0)}
+            onClick={() => void Promise.resolve(onUndo ? onUndo() : undo()).catch(() => undefined)}
             className="rounded-md border border-border bg-bg-tertiary/40 p-1.5 text-text-muted transition-smooth hover:border-brand/30 hover:text-text-primary disabled:opacity-25"
             title={historyIndex > 0 ? `Desfazer: ${history[historyIndex - 1]?.label}` : "Nada para desfazer"}
           >
@@ -106,12 +117,24 @@ export function StudioLayersTree({ onSelectTextLayer }: StudioLayersTreeProps = 
           </button>
           <button
             type="button"
-            disabled={isSaving || historyIndex >= history.length}
-            onClick={() => void redo().catch(() => undefined)}
+            disabled={isSaving || !(canRedo ?? historyIndex < history.length)}
+            onClick={() => void Promise.resolve(onRedo ? onRedo() : redo()).catch(() => undefined)}
             className="rounded-md border border-border bg-bg-tertiary/40 p-1.5 text-text-muted transition-smooth hover:border-brand/30 hover:text-text-primary disabled:opacity-25"
             title={historyIndex < history.length ? `Refazer: ${history[historyIndex]?.label}` : "Nada para refazer"}
           >
             <Redo2 size={12} />
+          </button>
+          <button
+            type="button"
+            disabled={isSaving || selectedNodeIds.length === 0}
+            onClick={() => void deleteSelectedNodes()
+              .then((changed) => { if (changed) onSelectTextLayer?.(null); })
+              .catch(() => undefined)}
+            className="rounded-md border border-border bg-bg-tertiary/40 p-1.5 text-text-muted transition-smooth hover:border-status-error/40 hover:text-status-error disabled:opacity-25"
+            aria-label="Excluir camadas selecionadas"
+            title="Excluir camadas selecionadas (pode desfazer)"
+          >
+            <Trash2 size={12} />
           </button>
           <div className="mx-0.5 h-4 w-px bg-border" />
           <button
@@ -142,6 +165,13 @@ export function StudioLayersTree({ onSelectTextLayer }: StudioLayersTreeProps = 
             node={node}
             depth={0}
             onSelectTextLayer={onSelectTextLayer}
+            collapsedGroupIds={collapsedGroupIds}
+            onToggleGroup={(groupId) => setCollapsedGroupIds((current) => {
+              const next = new Set(current);
+              if (next.has(groupId)) next.delete(groupId);
+              else next.add(groupId);
+              return next;
+            })}
           />
         ))}
         {rootNodes.length === 0 && (
@@ -160,10 +190,14 @@ function StudioLayerNodeRow({
   node,
   depth,
   onSelectTextLayer,
+  collapsedGroupIds,
+  onToggleGroup,
 }: {
   node: StudioSceneNode;
   depth: number;
   onSelectTextLayer?: (layerId: string | null) => void;
+  collapsedGroupIds: Set<string>;
+  onToggleGroup: (groupId: string) => void;
 }) {
   const reactiveState = useStudioSceneStore();
   const state = reactiveState.scene ? reactiveState : useStudioSceneStore.getState();
@@ -172,6 +206,7 @@ function StudioLayerNodeRow({
   const Icon = presentation.icon;
   const selected = selectedNodeIds.includes(node.id);
   const children = scene ? [...orderedSceneChildren(scene, node.id)].reverse() : [];
+  const collapsed = node.kind === "group" && collapsedGroupIds.has(node.id);
 
   const select = (event: MouseEvent<HTMLDivElement>) => {
     selectNode(node.id, event.ctrlKey || event.metaKey || event.shiftKey);
@@ -217,6 +252,21 @@ function StudioLayerNodeRow({
         >
           {node.visible ? <Eye size={12} /> : <EyeOff size={12} />}
         </button>
+        {node.kind === "group" ? (
+          <button
+            type="button"
+            aria-label={collapsed ? `Expandir ${node.name}` : `Recolher ${node.name}`}
+            aria-expanded={!collapsed}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleGroup(node.id);
+            }}
+            className="rounded p-1 text-text-muted transition-smooth hover:bg-white/[0.06] hover:text-text-primary"
+            title={collapsed ? "Expandir grupo" : "Recolher grupo"}
+          >
+            {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+          </button>
+        ) : <span className="w-5 shrink-0" />}
         <Icon size={14} className={`shrink-0 ${presentation.color}`} />
         <div className="min-w-0 flex-1 py-1">
           <p className={`truncate text-[11px] font-medium ${node.visible ? "text-text-primary" : "text-text-muted line-through"}`}>
@@ -241,12 +291,14 @@ function StudioLayerNodeRow({
           {node.locked ? <Lock size={12} /> : <LockOpen size={12} />}
         </button>
       </div>
-      {children.map((child) => (
+      {!collapsed && children.map((child) => (
         <StudioLayerNodeRow
           key={child.id}
           node={child}
           depth={depth + 1}
           onSelectTextLayer={onSelectTextLayer}
+          collapsedGroupIds={collapsedGroupIds}
+          onToggleGroup={onToggleGroup}
         />
       ))}
     </>

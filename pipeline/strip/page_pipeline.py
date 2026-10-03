@@ -977,6 +977,66 @@ class PageExecutionResult:
             str(getattr(item, "owner_id", "")) for item in bound_commits
         }
         execution_layers: list[Mapping[str, Any]] = []
+        layer_by_owner: dict[str, dict[str, Any]] = {}
+        review_candidate_by_id: dict[str, dict[str, Any]] = {}
+        if text_layers_view is not None:
+            layers_payload = text_layers_view.read()
+            layers = layers_payload.get("texts") if isinstance(layers_payload, dict) else None
+            if not isinstance(layers, list):
+                raise PagePipelineIdentityError("text layer snapshot is malformed")
+            from ownership.project import _retired_review_candidate_contract
+
+            graph_payload = graph_snapshot.read().to_dict()
+            graph_owner_ids = {
+                str(getattr(owner, "owner_id", ""))
+                for owner in graph_snapshot.read().owners
+                if str(getattr(owner, "owner_id", ""))
+            }
+            for index, layer in enumerate(layers):
+                if not isinstance(layer, dict):
+                    raise PagePipelineIdentityError("text layer snapshot is malformed")
+                if "candidate_owner_id" in layer:
+                    candidate_id, _candidate_contract, candidate_errors = (
+                        _retired_review_candidate_contract(
+                            layer,
+                            alias_name=f"page_execution.text_layers[{index}]",
+                            page_id=request.page_id,
+                            graph=graph_payload,
+                            owner_ids=graph_owner_ids,
+                        )
+                    )
+                    if candidate_errors or candidate_id is None:
+                        raise PagePipelineIdentityError(
+                            "detached review candidate is invalid: "
+                            + "; ".join(candidate_errors)
+                        )
+                    if candidate_id in review_candidate_by_id:
+                        raise PagePipelineIdentityError(
+                            "text layers contain duplicate candidate_owner_id"
+                        )
+                    review_candidate_by_id[candidate_id] = layer
+                else:
+                    owner_id = str(layer.get("owner_id") or "")
+                    if not owner_id or owner_id in layer_by_owner:
+                        raise PagePipelineIdentityError(
+                            "text layers contain duplicate or invalid owners"
+                        )
+                    layer_by_owner[owner_id] = layer
+            if set(layer_by_owner).intersection(review_candidate_by_id):
+                raise PagePipelineIdentityError(
+                    "text layer owner_id collides with candidate_owner_id"
+                )
+            candidate_ids = set(review_candidate_by_id)
+            bound_commit_ids = {
+                str(getattr(item, "owner_id", "")) for item in bound_commits
+            }
+            materialization_ids = {
+                str(getattr(item, "owner_id", "")) for item in materializations
+            }
+            if candidate_ids.intersection(bound_commit_ids | materialization_ids):
+                raise PagePipelineIdentityError(
+                    "detached review candidate retains pixel write authority"
+                )
         if text_layers_view is not None:
             execution_layers_payload = text_layers_view.read()
             raw_execution_layers = execution_layers_payload.get("texts")
@@ -987,7 +1047,7 @@ class PageExecutionResult:
         rejected_owner_ids = _derived_rejected_owner_ids(
             execution_layers,
             graph_snapshot.read().owners,
-        )
+        ) | set(review_candidate_by_id)
         execution_bindings = tuple(
             item for item in bindings
             if not item.preserves_original_pixels
@@ -1038,14 +1098,9 @@ class PageExecutionResult:
                 raise PagePipelineIdentityError("text layer snapshot is malformed")
             if len(layers) < len(ordered_all_bindings):
                 raise PagePipelineIdentityError("text layer cardinality is smaller than bindings")
-            layer_by_owner = {
-                str(layer.get("owner_id") or ""): layer
-                for layer in layers if isinstance(layer, dict)
-            }
-            if len(layer_by_owner) != len(layers):
-                raise PagePipelineIdentityError("text layers contain duplicate or invalid owners")
             binding_owner_ids = {binding.owner_id for binding in ordered_all_bindings}
-            if not binding_owner_ids.issubset(layer_by_owner):
+            represented_owner_ids = set(layer_by_owner) | set(review_candidate_by_id)
+            if not binding_owner_ids.issubset(represented_owner_ids):
                 raise PagePipelineIdentityError("text layer cardinality differs from bindings")
             for owner_id, layer in layer_by_owner.items():
                 if owner_id in binding_owner_ids:
@@ -1078,12 +1133,22 @@ class PageExecutionResult:
             } | rejected_owner_ids
             for binding in ordered_all_bindings:
                 layer = layer_by_owner.get(binding.owner_id)
+                if layer is None:
+                    layer = review_candidate_by_id.get(binding.owner_id)
                 target = str((layer or {}).get("translated") or "")
                 if (
                     layer is None
                     or sha256_text(target) != binding.target_payload_sha256
                 ):
                     raise PagePipelineIdentityError("text layer target binding mismatch")
+                if binding.owner_id in review_candidate_by_id and (
+                    layer.get("source_payload") != binding.source_text
+                    or layer.get("source_payload_sha256")
+                    != binding.source_payload_sha256
+                ):
+                    raise PagePipelineIdentityError(
+                        "detached review candidate source binding mismatch"
+                    )
                 if binding.owner_id in authoritative_layer_owner_ids and (
                     layer.get("translation_binding_sha256")
                     != binding.translation_binding_sha256
@@ -1367,6 +1432,8 @@ class PagePipelineServices:
     translation_attempt_fn: Callable[..., Any] | None = None
     translation_attempt_controls: tuple[Any, ...] = ()
     translation_attempt_kwargs: Any | None = None
+    translation_explicit_entities: tuple[str, ...] = ()
+    translation_allow_quality_warnings: bool = True
     execution_fn: Callable[[PagePipelineRequest, OwnerGraph, OwnerPageTranslationResult], Sequence[Any]] | None = None
     performance_recorder: Any | None = None
 
@@ -2065,7 +2132,15 @@ def finalize_and_persist_page_result(
     )
     evidence_ref = transaction.commit_verified_generation(promoted)
     reopened = evidence_ref.read_verified(root)
-    return reopened, evidence_ref
+    if (reopened.result_sha256 != promoted.result_sha256
+            or reopened.request.run_id != promoted.request.run_id
+            or reopened.request.execution_id != promoted.request.execution_id
+            or reopened.request.page_source_sha256 != promoted.request.page_source_sha256):
+        raise PagePipelineIdentityError("persisted page result differs from verified in-memory result")
+    # The canonical persisted record stores each patch hash, not its pixel arrays
+    # or renderer evidence. Retain the verified in-memory result for the caller;
+    # the readback above proves its canonical identity against disk.
+    return promoted, evidence_ref
 
 
 def _owner_graph_after_execution(
@@ -2130,7 +2205,8 @@ def _translation_review_records(
         records.append(
             {
                 "id": owner.owner_id,
-                "owner_id": owner.owner_id,
+                "owner_id": None,
+                "candidate_owner_id": owner.owner_id,
                 "page_id": owner.page_id,
                 "coordinate_space": "logical_page",
                 "component_ids": list(owner.component_ids),
@@ -2138,6 +2214,7 @@ def _translation_review_records(
                 "selected_observation_ids": list(owner.selected_observation_ids),
                 "semantic_role": owner.semantic_role,
                 "source_payload": owner.source_payload,
+                "source_payload_sha256": sha256_text(owner.source_payload),
                 "text": owner.source_payload,
                 "original": owner.source_payload,
                 "translated_payload": None,
@@ -2153,6 +2230,16 @@ def _translation_review_records(
                 "text_pixel_bbox": bbox,
                 "visible": False,
                 "render_policy": "review_required",
+                "owner_graph_run_id": graph.run_id,
+                "owner_graph_origin_execution_id": graph.origin_execution_id,
+                "owner_graph_page_source_sha256": graph.page_source_sha256,
+                "execution_rejected": True,
+                "derived_qa_status": "review_required",
+                "write_authority": "revoked",
+                "source_pixels_preserved": True,
+                "committed": False,
+                "blocking": True,
+                "qa_action": "BLOCK",
                 "owner_execution_rejection_reason": (
                     f"translation_validation_exhausted:{terminal_reason}"
                 ),
@@ -2165,7 +2252,11 @@ def _translation_review_records(
                 ],
             }
         )
-    return tuple(records)
+    from ownership.project import detach_owner_review_candidate
+    return tuple(
+        detach_owner_review_candidate(record, graph, record["id"])
+        for record in records
+    )
 
 
 def run_page_owner_pipeline(
@@ -2251,6 +2342,8 @@ def run_page_owner_pipeline(
                     repaint_already_target_pixels=True,
                     continue_on_owner_failure=True,
                     performance_recorder=services.performance_recorder,
+                    explicit_entities=services.translation_explicit_entities,
+                    allow_quality_warnings=services.translation_allow_quality_warnings,
                 )
                 bound_owner_ids = {
                     binding.owner_id for binding in translation_result.bindings
@@ -2396,6 +2489,14 @@ def adapt_page_execution_result_to_output_page(
                 for binding in result.translations
             ]
         }
+    from qa.partial_delivery import notice_for_layer
+    bindings = {binding.owner_id: binding for binding in result.translations}
+    for layer in text_layers["texts"]:
+        identity = layer.get("owner_id") or layer.get("candidate_owner_id") or layer.get("id")
+        layer["translation_delivery_notice"] = notice_for_layer(
+            layer, binding=bindings.get(identity), attempts=result.translation_attempts,
+            commits=result.page_commits,
+        )
     return OutputPage(
         y_top=0,
         y_bottom=int(image.shape[0]),

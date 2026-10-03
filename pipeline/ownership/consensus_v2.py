@@ -43,6 +43,35 @@ def _same_spatial_reading(left: TextObservation, right: TextObservation) -> bool
 
 def _same_physical_line(left: TextObservation, right: TextObservation) -> bool:
     """Compare page-space line supports, independently of OCR call and component IDs."""
+    if left.polygons_page and right.polygons_page:
+        a_poly, b_poly = left.polygons_page[0], right.polygons_page[0]
+        if len(a_poly) == len(b_poly) == 4:
+            import math
+
+            ax = a_poly[1][0] - a_poly[0][0]
+            ay = a_poly[1][1] - a_poly[0][1]
+            bx = b_poly[1][0] - b_poly[0][0]
+            by = b_poly[1][1] - b_poly[0][1]
+            alen, blen = math.hypot(ax, ay), math.hypot(bx, by)
+            if min(alen, blen) > 0:
+                dot = (ax * bx + ay * by) / (alen * blen)
+                if abs(dot) < 0.94:
+                    return False
+                tx, ty = ax / alen, ay / alen
+                nx, ny = -ty, tx
+                for axis, (dx, dy) in enumerate(((tx, ty), (nx, ny))):
+                    a_values = [point[0] * dx + point[1] * dy for point in a_poly]
+                    b_values = [point[0] * dx + point[1] * dy for point in b_poly]
+                    overlap = max(0.0, min(max(a_values), max(b_values)) - max(min(a_values), min(b_values)))
+                    smaller = min(max(a_values) - min(a_values), max(b_values) - min(b_values))
+                    if smaller <= 0 or overlap < 0.65 * smaller:
+                        return False
+                    if axis == 0 and overlap < 0.60 * max(
+                        max(a_values) - min(a_values),
+                        max(b_values) - min(b_values),
+                    ):
+                        return False
+                return True
     a, b = left.bbox_page, right.bbox_page
     aw, ah = a[2] - a[0], a[3] - a[1]
     bw, bh = b[2] - b[0], b[3] - b[1]
@@ -236,18 +265,26 @@ def select_ordered_consensus_body_with_decisions(
                 ),
                 "selected_observation_id": winner.observation_id,
             }
-    selected = tuple(
-        sorted(
-            deduplicated,
-            key=lambda item: (
-                item.bbox_page[1],
-                item.bbox_page[0],
-                item.bbox_page[3],
-                item.bbox_page[2],
-                item.observation_id,
-            ),
-        )
-    )
+    selected = tuple(sorted(deduplicated, key=lambda item: (
+        item.bbox_page[1], item.bbox_page[0], item.observation_id,
+    )))
+    oriented = [item for item in selected if item.polygons_page and len(item.polygons_page[0]) == 4]
+    if len(oriented) == len(selected) and len(selected) > 1:
+        reference = max(oriented, key=lambda item: (
+            abs(item.polygons_page[0][1][0] - item.polygons_page[0][0][0]),
+            item.observation_id,
+        ))
+        polygon = reference.polygons_page[0]
+        dx = polygon[1][0] - polygon[0][0]
+        dy = polygon[1][1] - polygon[0][1]
+        if abs(dx) > 0 and abs(dy / dx) >= 0.15:
+            slope = dy / dx
+            def reading_order(item: TextObservation) -> tuple[float, int, str]:
+                points = item.polygons_page[0]
+                center_x = sum(point[0] for point in points) / 4
+                center_y = sum(point[1] for point in points) / 4
+                return (round((center_y - slope * center_x) / 30), item.bbox_page[0], item.observation_id)
+            selected = tuple(sorted(selected, key=reading_order))
     payload = " ".join(
         " ".join(str(item.text or "").split()) for item in selected
     ).strip()

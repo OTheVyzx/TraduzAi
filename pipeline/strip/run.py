@@ -6,6 +6,7 @@ Chamado por `pipeline/main.py::_run_pipeline` após a Fase 6 do switchover.
 from __future__ import annotations
 
 import copy
+import gc
 import json
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -2997,6 +2998,26 @@ def _start_inpainter_prewarm(inpainter, work_available=True) -> tuple[ThreadPool
         return None
     prewarm = getattr(inpainter, "prewarm_band_inpainter", None)
     if not callable(prewarm):
+        return None
+    if str(os.getenv("TRADUZAI_REQUIRE_GPU_INPAINT", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        # Test-only strict path: avoid concurrent CUDA initialization with detection.
+        loaded = prewarm()
+        device = getattr(loaded, "device", None)
+        model = getattr(loaded, "_model", None)
+        model_device = getattr(model, "device", None)
+        if getattr(device, "type", None) != "cuda" or getattr(model_device, "type", None) != "cuda":
+            raise RuntimeError("GPU inpaint required but AOT loaded on CPU")
+        if str(getattr(loaded, "_backend", "")) == "aot_inpainting":
+            raster = getattr(model, "model", None)
+            first_buffer = next(raster.buffers(), None) if raster is not None else None
+            if first_buffer is None or first_buffer.device.type != "cuda":
+                raise RuntimeError("GPU inpaint required but AOT weights are not on CUDA")
+        probe_rgb = np.full((128, 128, 3), 255, dtype=np.uint8)
+        probe_mask = np.zeros((128, 128), dtype=np.uint8)
+        probe_mask[56:72, 56:72] = 255
+        probe_result = loaded.inpaint(probe_rgb, probe_mask, batch_size=1, force_no_tiling=True)
+        if np.asarray(probe_result).shape != probe_rgb.shape:
+            raise RuntimeError("GPU inpaint probe returned invalid image geometry")
         return None
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="traduzai-inpaint-prewarm")
     future = executor.submit(prewarm)
@@ -7624,8 +7645,13 @@ def _owner_bbox_for_page(graph: OwnerGraph, owner_id: str):
     )
 
 
-def _build_owner_translation_attempt_controls(control_type, *, ollama_model: str):
+def _build_owner_translation_attempt_controls(control_type, *, ollama_model: str, translation_backend: str | None = None):
     """Build the complete bounded provider sequence for one owner payload."""
+    if translation_backend == "hy_mt2_gguf_local":
+        return (control_type(
+            backend="hy_mt2_gguf_local", variant="owner_primary",
+            disable_cache=True, provider_model="Hy-MT2-7B-Q4_K_M",
+        ),)
 
     return (
         control_type(
@@ -7688,6 +7714,33 @@ def run_chapter(
     )
 
 
+def _plan_original_page_safe_parts(page_map, desired_parts: int = 6) -> tuple[list[dict], dict[str, int]]:
+    """Partition a chapter on existing source page boundaries only."""
+
+    if desired_parts < 1 or not page_map.pages:
+        raise ValueError("safe page partition requires pages and a positive count")
+    part_count = min(desired_parts, len(page_map.pages))
+    whole, remainder = divmod(len(page_map.pages), part_count)
+    cursor = 0
+    safe_parts: list[dict] = []
+    part_by_page: dict[str, int] = {}
+    for part_index in range(part_count):
+        take = whole + (1 if part_index < remainder else 0)
+        entries = page_map.pages[cursor:cursor + take]
+        safe_parts.append({
+            "part_id": part_index + 1,
+            "first_page_id": entries[0].page_id,
+            "last_page_id": entries[-1].page_id,
+            "page_count": len(entries),
+            "virtual_y_top": entries[0].virtual_y_offset,
+            "virtual_y_bottom": entries[-1].virtual_y_offset + entries[-1].height,
+            "cut_authority": "original_source_page_boundary",
+        })
+        part_by_page.update({entry.page_id: part_index + 1 for entry in entries})
+        cursor += take
+    return safe_parts, part_by_page
+
+
 def _run_page_native_chapter(
     *,
     image_files: list[Path],
@@ -7700,12 +7753,19 @@ def _run_page_native_chapter(
     from strip.page_map import ChapterPageMap
 
     page_map = ChapterPageMap.from_paths(image_files)
+    safe_parts: list[dict] = []
+    part_by_page: dict[str, int] = {}
+    if str(os.getenv("TRADUZAI_EXPERIMENTAL_SAFE_PAGE_PARTS", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        safe_parts, part_by_page = _plan_original_page_safe_parts(page_map)
+    page_manifest = page_map.to_public_dict()
+    if safe_parts:
+        page_manifest["experimental_safe_parts"] = safe_parts
     recorder = _get_debug_recorder()
     if recorder is not None:
         try:
             recorder.write_json(
                 "01_input_extract/input_manifest.json",
-                page_map.to_public_dict(),
+                page_manifest,
             )
         except Exception:
             pass
@@ -7722,7 +7782,9 @@ def _run_page_native_chapter(
             {
                 "chapter_raster_mode": "page_map_v1",
                 "physical_strip_builder_calls": 0,
-                "chapter_page_map": page_map.to_public_dict(),
+                "chapter_page_map": page_manifest,
+                "experimental_safe_parts": safe_parts,
+                "experimental_safe_parts_completed": [],
                 "input_page_count": len(page_map.pages),
                 "largest_raster_shape": [
                     max(page.height for page in page_map.pages),
@@ -7767,6 +7829,8 @@ def _run_page_native_chapter(
                 "coordinate_authority": "page_local",
             }
         )
+        if safe_parts:
+            page.page_profile["experimental_safe_part_id"] = part_by_page[entry.page_id]
         if isinstance(page.ocr_result, dict):
             page.ocr_result["page_profile"] = page.page_profile
         output_pages.append(page)
@@ -7775,6 +7839,19 @@ def _run_page_native_chapter(
         page_telemetry_records.append(
             {"page_id": entry.page_id, **copy.deepcopy(page_telemetry)}
         )
+        if safe_parts:
+            finished_part = next(
+                (part for part in safe_parts if part["last_page_id"] == entry.page_id), None
+            )
+            if finished_part is not None:
+                released = gc.collect()
+                if telemetry is not None:
+                    telemetry["experimental_safe_parts_completed"].append({
+                        "part_id": finished_part["part_id"],
+                        "last_page_id": entry.page_id,
+                        "elapsed_s": round(time.perf_counter() - started, 4),
+                        "gc_collected": released,
+                    })
     if telemetry is not None:
         telemetry["page_native_page_durations_sec"] = [round(value, 4) for value in page_durations]
         telemetry["output_page_count"] = len(output_pages)
@@ -7841,6 +7918,8 @@ def _run_chapter_impl(
     source_manifest=None,
     artifact_root: str | Path | None = None,
     owner_content_replay=None,
+    vision_stage_cache: dict | None = None,
+    vision_config_sha256: str | None = None,
     progress_callback=None,
     _page_map_entry=None,
     _ordered_context_state: dict | None = None,
@@ -7848,6 +7927,17 @@ def _run_chapter_impl(
     """Executa o pipeline strip-based ponta-a-ponta."""
     if not image_files:
         return []
+
+    cache_page_id = (
+        str(_page_map_entry.page_id)
+        if _page_map_entry is not None
+        else None
+    )
+    cached_vision = (
+        vision_stage_cache.get(cache_page_id)
+        if owner_graph_mode == "enforce" and cache_page_id and isinstance(vision_stage_cache, dict)
+        else None
+    )
 
     page_paths = image_files
     identity_nonce = time.time_ns()
@@ -7955,12 +8045,20 @@ def _run_chapter_impl(
     try:
         if progress_callback: progress_callback("detect", 0, 1)
         with _timed(chapter_telemetry, "strip_detect_balloons"):
-            balloons = detect_strip_balloons(strip, detector=detector)
+            balloons = (
+                cached_vision["stage"]["balloons"]
+                if cached_vision is not None
+                else detect_strip_balloons(strip, detector=detector)
+            )
         if chapter_telemetry is not None:
             chapter_telemetry["balloon_count"] = len(balloons)
 
         with _timed(chapter_telemetry, "source_component_discovery"):
-            source_components_by_page = _discover_source_components_for_strip(strip, balloons)
+            source_components_by_page = (
+                {cache_page_id: list(cached_vision["coverage"].components)}
+                if cached_vision is not None
+                else _discover_source_components_for_strip(strip, balloons)
+            )
         if chapter_telemetry is not None:
             chapter_telemetry["source_component_count"] = sum(
                 len(components) for components in source_components_by_page.values()
@@ -7970,13 +8068,17 @@ def _run_chapter_impl(
         page_coverages_by_page: dict[str, PageCoverageResult] = {}
         if owner_graph_mode != "legacy":
             with _timed(chapter_telemetry, "page_ocr_coverage"):
-                page_coverages_by_page = _complete_page_coverages_for_strip(
-                    strip,
-                    source_components_by_page,
-                    runtime=runtime,
-                    run_id=run_id,
-                    origin_execution_id=replay_of_execution_id or execution_id,
-                    idioma_origem=idioma_origem,
+                page_coverages_by_page = (
+                    {cache_page_id: cached_vision["coverage"]}
+                    if cached_vision is not None
+                    else _complete_page_coverages_for_strip(
+                        strip,
+                        source_components_by_page,
+                        runtime=runtime,
+                        run_id=run_id,
+                        origin_execution_id=replay_of_execution_id or execution_id,
+                        idioma_origem=idioma_origem,
+                    )
                 )
             _write_owner_coverage_debug_artifacts(page_coverages_by_page)
             if chapter_telemetry is not None:
@@ -7987,12 +8089,16 @@ def _run_chapter_impl(
 
         with _timed(chapter_telemetry, "strip_group_bands"):
             band_margin = _strip_band_margin_px(idioma_origem)
-            bands = group_balloons_into_bands(
-                balloons,
-                margin=band_margin,
-                page_breaks=list(strip.source_page_breaks or []),
+            bands = (
+                [item["band"] for item in cached_vision["stage"]["bands"]]
+                if cached_vision is not None
+                else group_balloons_into_bands(
+                    balloons,
+                    margin=band_margin,
+                    page_breaks=list(strip.source_page_breaks or []),
+                )
             )
-            if owner_graph_mode == "enforce":
+            if owner_graph_mode == "enforce" and cached_vision is None:
                 bands = _ensure_page_owner_scheduler_bands(
                     strip,
                     bands,
@@ -8016,25 +8122,23 @@ def _run_chapter_impl(
             )
         macro_ocr_precompute_stats: dict = {}
         with _timed(chapter_telemetry, "macro_ocr_precompute_wall"):
-            precomputed_macro_ocr_pages = _build_precomputed_macro_ocr_pages(
-                strip,
-                bands,
-                runtime,
-                idioma_origem=idioma_origem,
-                telemetry=macro_ocr_precompute_stats,
+            precomputed_macro_ocr_pages = (
+                {} if cached_vision is not None
+                else _build_precomputed_macro_ocr_pages(
+                    strip, bands, runtime, idioma_origem=idioma_origem,
+                    telemetry=macro_ocr_precompute_stats,
+                )
             )
         koharu_cjk_precompute_stats: dict = {}
         with _timed(chapter_telemetry, "koharu_cjk_precompute_wall"):
-            precomputed_koharu_cjk_pages = _build_precomputed_koharu_cjk_pages(
-                strip,
-                bands,
-                runtime,
-                page_paths,
-                models_dir=models_dir,
-                idioma_origem=idioma_origem,
-                telemetry=koharu_cjk_precompute_stats,
-                obra=obra,
-                work_title_user_provided=bool(work_title_user_provided),
+            precomputed_koharu_cjk_pages = (
+                {} if cached_vision is not None
+                else _build_precomputed_koharu_cjk_pages(
+                    strip, bands, runtime, page_paths,
+                    models_dir=models_dir, idioma_origem=idioma_origem,
+                    telemetry=koharu_cjk_precompute_stats, obra=obra,
+                    work_title_user_provided=bool(work_title_user_provided),
+                )
             )
         precomputed_ocr_pages = {
             **precomputed_macro_ocr_pages,
@@ -8099,25 +8203,40 @@ def _run_chapter_impl(
                     band,
                     source_page_number=source_page_number,
                 )
-                evidence = collect_band_evidence(
-                    band,
-                    runtime=runtime,
-                    page_idx=index,
-                    tile_projection=projection,
-                    components=list(source_components_by_page.get(page_id) or []),
-                    connected_reasoner_config=connected_reasoner_config,
-                    band_history=[],
-                    source_page_number=source_page_number,
-                    precomputed_ocr_page=precomputed_ocr_pages.get(index),
-                    obra=obra,
-                    work_title_user_provided=work_title_user_provided,
-                    idioma_origem=idioma_origem,
-                    layout_page_image_bgr=cv2.cvtColor(
-                        strip.image[page_y0:page_y1, :, :],
-                        cv2.COLOR_RGB2BGR,
-                    ),
-                    layout_page_y_top=page_y0,
-                )
+                if cached_vision is not None:
+                    cached_band = cached_vision["stage"]["bands"][index]
+                    evidence = BandEvidenceResult(
+                        page_id=page_id,
+                        tile_id=str(projection.tile_id),
+                        band_index=index,
+                        source_page_number=source_page_number,
+                        band=band,
+                        tile_projection=projection,
+                        ocr_page=copy.deepcopy(cached_band["ocr_page"]),
+                        observations=[], components=[],
+                        terminal_reason=cached_band["terminal_reason"],
+                        perf=copy.deepcopy(cached_band["perf"]),
+                    )
+                else:
+                    evidence = collect_band_evidence(
+                        band,
+                        runtime=runtime,
+                        page_idx=index,
+                        tile_projection=projection,
+                        components=list(source_components_by_page.get(page_id) or []),
+                        connected_reasoner_config=connected_reasoner_config,
+                        band_history=[],
+                        source_page_number=source_page_number,
+                        precomputed_ocr_page=precomputed_ocr_pages.get(index),
+                        obra=obra,
+                        work_title_user_provided=work_title_user_provided,
+                        idioma_origem=idioma_origem,
+                        layout_page_image_bgr=cv2.cvtColor(
+                            strip.image[page_y0:page_y1, :, :],
+                            cv2.COLOR_RGB2BGR,
+                        ),
+                        layout_page_y_top=page_y0,
+                    )
                 owner_evidence_by_band[id(band)] = evidence
                 return evidence
 
@@ -8169,6 +8288,45 @@ def _run_chapter_impl(
             # Publish the resolved graph before page execution so a fail-closed
             # layout or mask rejection still leaves its complete evidence chain.
             _write_owner_debug_artifacts(owner_graphs, bands, None)
+
+            if cached_vision is not None:
+                if artifact_root is not None:
+                    from shutil import copy2
+
+                    carried_root = Path(artifact_root) / "vision" / "pre_ocr"
+                    carried_root.mkdir(parents=True, exist_ok=True)
+                    for source in cached_vision["stage_paths"]:
+                        copy2(source, carried_root / source.name)
+                if chapter_telemetry is not None:
+                    chapter_telemetry["vision_pre_ocr_reused"] = True
+                    chapter_telemetry["vision_pre_ocr_provider_calls"] = 0
+            elif (
+                owner_graph_mode == "enforce" and cache_page_id
+                and vision_config_sha256 and source_manifest is not None
+            ):
+                from vision_runtime.stage_cache import save_pre_ocr_stage
+
+                source_page = source_manifest.pages[int(cache_page_id.rsplit("_", 1)[-1]) - 1]
+                try:
+                    save_pre_ocr_stage(
+                        Path(artifact_root),
+                        page_id=cache_page_id,
+                        source_file_sha256=source_page.source_file_sha256,
+                        page_pixel_sha256=page_coverages_by_page[cache_page_id].page_source_sha256,
+                        visual_config_sha256=vision_config_sha256,
+                        balloons=balloons,
+                        bands=bands,
+                        band_evidence_by_index={
+                            index: owner_evidence_by_band[id(band)]
+                            for index, band in enumerate(bands)
+                        },
+                    )
+                    if chapter_telemetry is not None:
+                        chapter_telemetry["vision_pre_ocr_cache_written"] = True
+                except (TypeError, ValueError, OSError) as exc:
+                    if chapter_telemetry is not None:
+                        chapter_telemetry["vision_pre_ocr_cache_written"] = False
+                        chapter_telemetry["vision_pre_ocr_cache_error"] = type(exc).__name__
 
         if chapter_telemetry is not None:
             chapter_telemetry["cross_band_ocr_fragments_reconciled"] = int(
@@ -8275,10 +8433,13 @@ def _run_chapter_impl(
                     controls = ()
                     backends = ()
                     attempt_kwargs = None
-                    if isinstance(owner_control_type, type) and callable(owner_attempt_fn):
+                    hy_backend = (translation_context or {}).get("_translation_backend") == "hy_mt2_gguf_local"
+                    bounded_hy = hy_backend and (translation_context or {}).get("_consumer_fast_bounded_hy") is True
+                    if isinstance(owner_control_type, type) and callable(owner_attempt_fn) and (not hy_backend or bounded_hy):
                         controls = _build_owner_translation_attempt_controls(
                             owner_control_type,
                             ollama_model=ollama_model,
+                            translation_backend="hy_mt2_gguf_local" if bounded_hy else None,
                         )
                         attempt_kwargs = {
                             "obra": obra, "context": context or {},
@@ -8294,8 +8455,9 @@ def _run_chapter_impl(
                             translated = translator.translate_pages(
                                 [{"page_id": owner_request.page_id, "texts": [{
                                     "id": owner_request.owner_id,
-                                    "owner_id": owner_request.owner_id,
-                                    "original": owner_request.source_text,
+                                      "owner_id": owner_request.owner_id,
+                                      "page_id": owner_request.page_id,
+                                      "original": owner_request.source_text,
                                     "text": owner_request.source_text,
                                 }]}],
                                 obra=obra, context=context or {}, glossario=running_glossary,
@@ -8323,6 +8485,11 @@ def _run_chapter_impl(
                             translation_attempt_fn=(owner_attempt_fn if controls else None),
                             translation_attempt_controls=controls,
                             translation_attempt_kwargs=attempt_kwargs,
+                            translation_explicit_entities=(
+                                translator.approved_preserved_entities(context or {},running_glossary)
+                                if callable(getattr(translator,"approved_preserved_entities",None)) else ()
+                            ),
+                            translation_allow_quality_warnings=True,
                             execution_fn=_execute_page,
                             performance_recorder=(
                                 chapter_telemetry.get("_performance_recorder")

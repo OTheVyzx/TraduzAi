@@ -3520,6 +3520,93 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(legacy["ui_layout_evidence"]["source"], "uied_cv")
         self.assertEqual(legacy["balloon_type"], "")
 
+    def test_sync_page_legacy_aliases_preserves_detached_review_contract(self) -> None:
+        candidate_id = "owner:0123456789abcdef01234567"
+        candidate = {
+            "id": candidate_id,
+            "owner_id": None,
+            "candidate_owner_id": candidate_id,
+            "page_id": "page_001",
+            "bbox": [20, 30, 80, 55],
+            "source_bbox": [20, 30, 80, 55],
+            "text_pixel_bbox": [20, 30, 80, 55],
+            "component_ids": ["component_0123456789abcdef01234567"],
+            "observation_ids": ["observation_0123456789abcdef"],
+            "selected_observation_ids": ["observation_0123456789abcdef"],
+            "semantic_role": "dialogue_body",
+            "action_mask_ref": None,
+            "layout_region_ids": [],
+            "disposition": "review",
+            "state": "review_required",
+            "execution_tile_id": None,
+            "route_action": "review_required",
+            "render_policy": "review_required",
+            "owner_graph_run_id": "run_0123456789abcdef",
+            "owner_graph_origin_execution_id": "execution_0123456789abcdef",
+            "owner_graph_page_source_sha256": "a" * 64,
+            "execution_rejected": True,
+            "derived_qa_status": "review_required",
+            "write_authority": "revoked",
+            "source_pixels_preserved": True,
+            "committed": False,
+            "blocking": True,
+            "qa_action": "BLOCK",
+            "visible": False,
+            "source_payload": "HELLO THERE",
+            "text": "HELLO THERE",
+            "original": "HELLO THERE",
+            "translated_payload": "OLÁ",
+            "translated": "OLÁ",
+            "translation_attempt_ids": ["attempt_0123456789abcdef"],
+            "translation_attempt_sha256s": ["b" * 64],
+        }
+        rendered_candidate = main._normalize_text_layer_for_renderer(
+            candidate, page_number=1, layer_index=0
+        )
+        self.assertEqual(rendered_candidate["candidate_owner_id"], candidate_id)
+        self.assertEqual(rendered_candidate["route_action"], "review_required")
+        self.assertEqual(rendered_candidate["render_policy"], "review_required")
+        page = {"numero": 1, "text_layers": [rendered_candidate]}
+
+        main._sync_page_legacy_aliases(page)
+
+        normalized = page["text_layers"][0]
+        legacy = page["textos"][0]
+        contract_fields = (
+            "candidate_owner_id",
+            "owner_id",
+            "component_ids",
+            "observation_ids",
+            "selected_observation_ids",
+            "semantic_role",
+            "action_mask_ref",
+            "layout_region_ids",
+            "route_action",
+            "render_policy",
+            "disposition",
+            "state",
+            "execution_tile_id",
+            "owner_graph_run_id",
+            "owner_graph_origin_execution_id",
+            "owner_graph_page_source_sha256",
+            "execution_rejected",
+            "derived_qa_status",
+            "write_authority",
+            "source_pixels_preserved",
+            "committed",
+            "blocking",
+            "qa_action",
+            "visible",
+            "source_payload",
+            "translated_payload",
+            "translation_attempt_ids",
+            "translation_attempt_sha256s",
+        )
+        self.assertEqual(normalized["route_action"], "review_required")
+        self.assertEqual(normalized["render_policy"], "review_required")
+        for field in contract_fields:
+            self.assertEqual(legacy[field], normalized[field], field)
+
     def test_build_text_layer_prefers_ui_form_profile_when_uied_evidence_exists(self) -> None:
         layer = main.build_text_layer(
             page_number=1,
@@ -4236,7 +4323,7 @@ class MainEmitTests(unittest.TestCase):
         )
 
         self.assertEqual(layer["style_origin"], "auto")
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["cor"], "#000000")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
@@ -4280,7 +4367,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["route_action"], "review_required")
         self.assertEqual(layer["estilo"]["style_origin"], "auto")
         self.assertEqual(layer["estilo"]["style_source"], "pixel_analysis")
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
@@ -4380,7 +4467,7 @@ class MainEmitTests(unittest.TestCase):
 
         self.assertEqual(seen_detectors, [(detector, "visual_card")])
         self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["estilo"]["fonte"], "LeagueGothic-Regular-VariableFont_wdth.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
 
     def test_build_text_layer_scans_review_required_renderable_text_for_source_glow_style(self) -> None:
         import numpy as np
@@ -4521,7 +4608,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["style_origin"], "auto")
         self.assertEqual(layer["style_confidence"], 0.94)
         self.assertEqual(layer["style_evidence"], evidence)
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["cor"], "#000000")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
@@ -4575,7 +4662,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["style_origin"], "auto")
         self.assertEqual(layer["style_confidence"], 0.96)
         self.assertEqual(layer["style_evidence"], evidence)
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertFalse(layer["estilo"]["glow"])
 
@@ -4619,7 +4706,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["style_origin"], "auto")
         self.assertEqual(layer["style_confidence"], 0.96)
         self.assertEqual(layer["style_evidence"], evidence)
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
@@ -4660,7 +4747,7 @@ class MainEmitTests(unittest.TestCase):
 
         self.assertEqual(layer["route_action"], "review_required")
         self.assertEqual(layer["style_origin"], "auto")
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"].get("cor_gradiente"), [])
 
     def test_build_text_layer_does_not_use_translated_text_to_allow_review_sfx_style(self) -> None:
@@ -4734,7 +4821,7 @@ class MainEmitTests(unittest.TestCase):
 
         self.assertEqual(layer["style_origin"], "auto")
         self.assertEqual(layer["style_confidence"], 0.86)
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
@@ -4779,7 +4866,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["style_evidence"], evidence)
         self.assertEqual(layer["route_action"], "review_required")
         self.assertEqual(layer["render_policy"], "review_required")
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
@@ -4945,7 +5032,7 @@ class MainEmitTests(unittest.TestCase):
 
         self.assertEqual(crop_shapes, [(90, 250, 3)])
         self.assertEqual(layer["style_origin"], "source_detected")
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["cor"], "#010100")
         self.assertEqual(
             layer["estilo"]["cor_gradiente"],
@@ -5032,7 +5119,7 @@ class MainEmitTests(unittest.TestCase):
 
         self.assertEqual(layer["style_origin"], "auto")
         self.assertEqual(layer["style_evidence"], evidence)
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
@@ -5078,7 +5165,7 @@ class MainEmitTests(unittest.TestCase):
 
         self.assertEqual(layer["style_origin"], "auto")
         self.assertEqual(layer["style_evidence"], evidence)
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
@@ -5212,7 +5299,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertEqual(layer["style_evidence"], evidence)
         self.assertIs(layer["style"], layer["estilo"])
         self.assertEqual(layer["estilo"]["style_origin"], "auto")
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["cor"], "#000000")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
@@ -10562,7 +10649,7 @@ class MainEmitTests(unittest.TestCase):
     def test_default_text_style_uses_bold_for_plain_dialogue(self) -> None:
         style = main._default_text_style()
 
-        self.assertEqual(style["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(style["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertTrue(style["bold"])
         self.assertEqual(style["cor"], "#000000")
         self.assertEqual(style["contorno"], "")
@@ -11209,7 +11296,7 @@ class MainEmitTests(unittest.TestCase):
         self.assertIs(layer["style"], layer["estilo"])
         self.assertEqual(layer["estilo"]["style_origin"], "auto")
         self.assertEqual(layer["estilo"]["style_source"], "pixel_analysis")
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["cor"], "#FFFFFF")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
@@ -11234,7 +11321,7 @@ class MainEmitTests(unittest.TestCase):
         normalized = main._neutralize_unallowed_source_style(layer)
 
         self.assertEqual(normalized["style_origin"], "auto")
-        self.assertEqual(normalized["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(normalized["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(normalized["estilo"]["contorno_px"], 0)
         self.assertFalse(normalized["estilo"]["glow"])
 
@@ -11277,7 +11364,7 @@ class MainEmitTests(unittest.TestCase):
         )
 
         self.assertEqual(layer["style_origin"], "auto")
-        self.assertEqual(layer["estilo"]["fonte"], "ComicNeue-Bold.ttf")
+        self.assertEqual(layer["estilo"]["fonte"], "CCTotallyAwesome W00 Bold.ttf")
         self.assertEqual(layer["estilo"]["contorno"], "")
         self.assertEqual(layer["estilo"]["contorno_px"], 0)
 
@@ -11986,7 +12073,16 @@ class MainEmitTests(unittest.TestCase):
 
         from project_writer import write_project_json_atomic
 
-        with tempfile.TemporaryDirectory() as tmp:
+        permitted_root = os.environ.get("TRADUZAI_TEST_TEMP_ROOT")
+        if permitted_root:
+            from uuid import uuid4
+
+            permitted_dir = Path(permitted_root) / f"main_owner_save_{uuid4().hex}"
+            permitted_dir.mkdir()
+            temp_context = contextlib.nullcontext(str(permitted_dir))
+        else:
+            temp_context = tempfile.TemporaryDirectory()
+        with temp_context as tmp:
             project_path = Path(tmp) / "project.json"
             write_project_json_atomic(project_path, project)
             loaded = json.loads(project_path.read_text(encoding="utf-8"))

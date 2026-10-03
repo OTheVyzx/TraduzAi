@@ -188,6 +188,65 @@ describe("Studio scene compositor", () => {
     expect(layers[1].masks[0].selection).toMatchObject({ feather: 2, expansion: 1 });
   });
 
+  it("composites individual brush PNGs as one hideable group and preserves cropped placement", () => {
+    const scene = makeScene();
+    const groupId = "group:auto:painting";
+    scene.roots.push(groupId);
+    scene.nodes.push(
+      {
+        id: groupId,
+        kind: "group",
+        name: "Pintura",
+        visible: true,
+        locked: false,
+        opacity: 1,
+        blend_mode: "normal",
+        parent_id: null,
+        order: scene.roots.length - 1,
+        mask_ids: [],
+        metadata: { auto_category_group: "painting", raster_operations_key: "brush" },
+      },
+      {
+        id: "generated:brush-base",
+        kind: "generated",
+        name: "Base anterior",
+        visible: true,
+        locked: false,
+        opacity: 1,
+        blend_mode: "normal",
+        parent_id: groupId,
+        order: 0,
+        mask_ids: [],
+        metadata: { image_path: "brush-base.png" },
+      },
+      {
+        id: "generated:brush-erase",
+        kind: "generated",
+        name: "Borracha",
+        visible: true,
+        locked: false,
+        opacity: 1,
+        blend_mode: "destination-out",
+        parent_id: groupId,
+        order: 1,
+        mask_ids: [],
+        metadata: { image_path: "brush-erase.png", source_bbox: [12, 16, 24, 28] },
+      },
+    );
+
+    const layers = resolveStudioSceneRenderLayers(makePage(), scene);
+    const paintGroup = layers.find((layer) => layer.nodeId === groupId);
+
+    expect(paintGroup).toMatchObject({
+      kind: "group",
+      children: [
+        { nodeId: "generated:brush-base", sourcePath: "brush-base.png" },
+        { nodeId: "generated:brush-erase", sourcePath: "brush-erase.png", sourceBBox: [12, 16, 24, 28], blendMode: "destination-out" },
+      ],
+    });
+    expect(resolveStudioSceneVisualOrder(makePage(), scene)).toContainEqual({ kind: "bitmap", nodeId: groupId });
+  });
+
   it("keeps bitmap and text nodes interleaved in the professional scene order", () => {
     expect(resolveStudioSceneVisualOrder(makePage(), makeScene())).toEqual([
       { kind: "bitmap", nodeId: "image:base" },

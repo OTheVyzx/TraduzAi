@@ -149,6 +149,14 @@ def neutralize_removed_decision_fields(layer: dict) -> dict:
     route_action = str(normalized.get("route_action") or "").strip().lower()
     render_policy = str(normalized.get("render_policy") or "").strip().lower()
     content_class = str(normalized.get("content_class") or "").strip().lower()
+    from ownership.project import neutralize_review_candidate_compatibility
+    if neutralize_review_candidate_compatibility(normalized):
+        # Detached review candidates carry an explicit fail-closed contract.
+        # Keep their routing fields intact while neutralizing only legacy hints.
+        normalized["tipo"] = "text"
+        normalized["content_class"] = "text"
+        normalized["balloon_type"] = ""
+        return normalized
     if route_action == "translate_sfx_inpaint_render" or content_class == "sfx":
         normalized = enrich_sfx_candidate(normalized)
         normalized["skip_processing"] = False
@@ -9698,6 +9706,9 @@ def _compose_runtime_export_gate(
             style_fidelity["gate"],
             override=bool(config.get("allow_p0_export_override")),
         )
+        if config.get("translation_delivery_policy", "available_translation_with_warnings_v1") == "available_translation_with_warnings_v1":
+            from qa.partial_delivery import apply_partial_delivery_policy
+            qa["export_gate"] = apply_partial_delivery_policy(project_data, qa["export_gate"])
         return qa["export_gate"]
     try:
         style_fidelity = audit_style_fidelity(project_data, work_dir, mode=style_mode)
@@ -9728,6 +9739,9 @@ def _compose_runtime_export_gate(
         style_fidelity["gate"],
         override=bool(config.get("allow_p0_export_override")),
     )
+    if config.get("translation_delivery_policy", "available_translation_with_warnings_v1") == "available_translation_with_warnings_v1":
+        from qa.partial_delivery import apply_partial_delivery_policy
+        qa["export_gate"] = apply_partial_delivery_policy(project_data, qa["export_gate"])
     return qa["export_gate"]
 
 
@@ -9935,6 +9949,9 @@ def _run_pipeline_runner_cli(config: dict) -> int:
         "owner_graph_mode": config.get("owner_graph_mode", "enforce"),
         "style_copy_mode": config.get("style_copy_mode", "shadow"),
         "replay_owner_artifacts": config.get("replay_owner_artifacts"),
+        "translation_backend": config.get("translation_backend"),
+        "hy_mt2_url": config.get("hy_mt2_url", "http://127.0.0.1:11438"),
+        "offline_context_only": bool(config.get("offline_context_only")),
     }
     config_path = work_dir / "runner_config.json"
     config_path.write_text(json.dumps(runtime_config, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -10332,7 +10349,7 @@ def _run_pipeline(
 
         # Start AniList context fetch in parallel
         _context_future = None
-        if not context.get("sinopse") and config.get("obra"):
+        if not config.get("offline_context_only") and not context.get("sinopse") and config.get("obra"):
             with pipeline_timing.measure("context_fetch_submit"):
                 from concurrent.futures import ThreadPoolExecutor as _CtxTPE
                 _ctx_pool = _CtxTPE(max_workers=1)
@@ -10530,6 +10547,8 @@ def _run_pipeline(
         owner_run_id = None
         owner_execution_id = None
         owner_replay_of_execution_id = None
+        vision_stage_cache = None
+        vision_config_sha256 = None
         if effective_owner_graph_mode == "enforce":
             import uuid
 
@@ -10554,6 +10573,41 @@ def _run_pipeline(
                 execution_id=owner_execution_id,
                 replay_of_execution_id=owner_replay_of_execution_id,
             )
+            if verified_owner_replay is None and os.getenv("TRADUZAI_EXPERIMENTAL_VISION_CACHE", "0").strip().lower() in {"1", "true", "yes", "on"}:
+                from vision_runtime.cache_key import visual_config_sha256
+                from vision_runtime.cache_reader import cached_content_lineage, read_verified_chapter_analysis
+
+                vision_config_sha256 = visual_config_sha256(config)
+                vision_cache_result = read_verified_chapter_analysis(
+                    work_dir / '.vision-cache',
+                    source_tree_sha256=verified_owner_source_manifest.source_tree_sha256,
+                    page_source_sha256s={
+                        page.page_id: page.source_file_sha256
+                        for page in verified_owner_source_manifest.pages
+                    },
+                    visual_config_sha256=vision_config_sha256,
+                )
+                strip_chapter_telemetry["vision_cache"] = {
+                    "status": vision_cache_result["status"],
+                    "reason": vision_cache_result["reason"],
+                }
+                if vision_cache_result["status"] == "hit":
+                    cached_pages = vision_cache_result["pages"]
+                    cached_lineage = cached_content_lineage(cached_pages)
+                    if cached_lineage is not None:
+                        owner_run_id, owner_replay_of_execution_id = cached_lineage
+                        vision_stage_cache = cached_pages
+                        verified_owner_source_manifest = ChapterSourceManifest.from_extracted_pages(
+                            image_files,
+                            extraction_root,
+                            run_id=owner_run_id,
+                            execution_id=owner_execution_id,
+                            replay_of_execution_id=owner_replay_of_execution_id,
+                        )
+                    else:
+                        strip_chapter_telemetry["vision_cache"] = {
+                            "status": "miss", "reason": "cached_page_lineage_inconsistent",
+                        }
             if (
                 verified_owner_replay is not None
                 and verified_owner_replay.verified_inputs.source_manifest.source_tree_sha256
@@ -10585,7 +10639,9 @@ def _run_pipeline(
                 models_dir=str(models_dir),
                 ollama_host=config.get("ollama_host", "http://localhost:11434"),
                 ollama_model=config.get("ollama_model", "traduzai-translator"),
-                translation_context=config.get("translation_context") or None,
+                translation_context={**(config.get("translation_context") or {}),
+                    "_translation_backend": config.get("translation_backend"),
+                    "_hy_mt2_url": config.get("hy_mt2_url", "http://127.0.0.1:11438")},
                 chapter_telemetry=strip_chapter_telemetry,
                 skip_page_cleanup_rerender=bool(config.get("skip_inpaint")),
                 owner_graph_mode=effective_owner_graph_mode,
@@ -10597,7 +10653,22 @@ def _run_pipeline(
                 source_manifest=verified_owner_source_manifest,
                 artifact_root=verified_owner_private_root,
                 owner_content_replay=verified_owner_replay,
+                vision_stage_cache=vision_stage_cache,
+                vision_config_sha256=vision_config_sha256,
             )
+        if effective_owner_graph_mode == "enforce" and vision_config_sha256 is not None:
+            from consumer_fast.vision_cache import publish_cached_pages
+
+            try:
+                vision_analysis_index = publish_cached_pages(
+                    work_dir / ".vision-cache", verified_owner_private_root,
+                    output_pages, config, verified_owner_source_manifest,
+                )
+            except Exception as exc:
+                vision_analysis_index = {
+                    "status": "not_written", "reason": f"cache_publish_error:{type(exc).__name__}",
+                }
+            strip_chapter_telemetry["vision_analysis_index"] = vision_analysis_index
         strip_chapter_telemetry.pop("_performance_recorder", None)
         strip_chapter_telemetry["internal_unattributed_sec"] = round(
             max(
@@ -11246,7 +11317,7 @@ def _run_pipeline(
                 functional_gate,
             )
             _synchronize_qa_summary_with_export_gate(project_data)
-            project_data["needs_review"] = export_gate["status"] == "BLOCK"
+            project_data["needs_review"] = bool(export_gate.get("needs_review"))
             project_data["output_review_state"] = _output_review_state_for_export_gate(export_gate)
             if debug_recorder:
                 _write_debug_export_gate_artifacts(debug_recorder, project_data)
@@ -11353,8 +11424,9 @@ def _run_pipeline(
 
 
 def _default_text_style() -> dict:
+    from typesetter.fixed_font_family import FIXED_FONT_NAME
     return {
-        "fonte": "ComicNeue-Bold.ttf",
+        "fonte": FIXED_FONT_NAME,
         "tamanho": 28,
         "cor": "#000000",
         "cor_gradiente": [],
@@ -13135,6 +13207,9 @@ def _ensure_project_route_action_contract(project_data: dict) -> dict:
                     continue
                 audit["checked_layers"] += 1
                 layer.update(neutralize_removed_decision_fields(layer))
+                from ownership.project import is_review_candidate
+                if is_review_candidate(layer):
+                    continue
                 before = str(layer.get("route_action") or "").strip().lower()
                 if before in ROUTE_ACTIONS:
                     layer["route_action"] = before
@@ -13651,6 +13726,10 @@ def _normalize_text_layer_for_renderer(raw_layer: dict, page_number: int, layer_
             raw_layer.get("_final_render_anchor_from_repaired_safe_text_box", False)
         ),
     }
+    from ownership.project import preserve_owner_layer_contract
+    preserve_owner_layer_contract(raw_layer, layer)
+    if "font_family_policy_v1" in raw_layer:
+        layer["font_family_policy_v1"] = copy.deepcopy(raw_layer["font_family_policy_v1"])
     normalized = neutralize_removed_decision_fields(enrich_sfx_candidate(normalize_text_geometry(layer)))
     if isinstance(raw_layer.get("render_layout_contract"), dict):
         normalized["render_layout_contract"] = copy.deepcopy(raw_layer["render_layout_contract"])
@@ -14485,6 +14564,7 @@ def _sync_page_legacy_aliases(page: dict) -> None:
     page["textos"] = [
         {
             "id": layer.get("id"),
+            "text": layer.get("text", layer.get("original", "")),
             "text_id": layer.get("text_id", layer.get("id")),
             "page_id": layer.get("page_id"),
             "band_id": layer.get("band_id"),
@@ -14495,8 +14575,10 @@ def _sync_page_legacy_aliases(page: dict) -> None:
             "ocr_merged_source_count": layer.get("ocr_merged_source_count"),
             "text_instance_id": layer.get("text_instance_id"),
             "owner_id": layer.get("owner_id"),
+            "candidate_owner_id": layer.get("candidate_owner_id"),
             "component_ids": list(layer.get("component_ids") or []),
             "observation_ids": list(layer.get("observation_ids") or []),
+            "selected_observation_ids": list(layer.get("selected_observation_ids") or []),
             "semantic_role": layer.get("semantic_role"),
             "action_mask_ref": layer.get("action_mask_ref"),
             "layout_region_ids": list(layer.get("layout_region_ids") or []),
@@ -14566,6 +14648,24 @@ def _sync_page_legacy_aliases(page: dict) -> None:
             "render_policy": layer.get("render_policy"),
             "route_action": layer.get("route_action"),
             "route_reason": layer.get("route_reason"),
+            "disposition": layer.get("disposition"),
+            "state": layer.get("state"),
+            "execution_rejected": layer.get("execution_rejected"),
+            "derived_qa_status": layer.get("derived_qa_status"),
+            "write_authority": layer.get("write_authority"),
+            "source_pixels_preserved": layer.get("source_pixels_preserved"),
+            "committed": layer.get("committed"),
+            "blocking": layer.get("blocking"),
+            "qa_action": layer.get("qa_action"),
+            "visible": layer.get("visible"),
+            "execution_tile_id": layer.get("execution_tile_id"),
+            "owner_graph_run_id": layer.get("owner_graph_run_id"),
+            "owner_graph_origin_execution_id": layer.get("owner_graph_origin_execution_id"),
+            "owner_graph_page_source_sha256": layer.get("owner_graph_page_source_sha256"),
+            "source_payload": layer.get("source_payload"),
+            "translated_payload": layer.get("translated_payload"),
+            "translation_attempt_ids": list(layer.get("translation_attempt_ids") or []),
+            "translation_attempt_sha256s": list(layer.get("translation_attempt_sha256s") or []),
             "sfx": copy.deepcopy(layer.get("sfx")) if isinstance(layer.get("sfx"), dict) else None,
             "is_watermark": bool(layer.get("is_watermark", False)),
             "is_non_english": bool(layer.get("is_non_english", False)),
@@ -14587,6 +14687,11 @@ def _sync_page_legacy_aliases(page: dict) -> None:
         for layer in text_layers
         if isinstance(layer, dict)
     ]
+    from ownership.project import preserve_owner_layer_contract
+    for layer, alias in zip(text_layers, page["textos"], strict=True):
+        preserve_owner_layer_contract(layer, alias)
+        if "font_family_policy_v1" in layer:
+            alias["font_family_policy_v1"] = copy.deepcopy(layer["font_family_policy_v1"])
 
 
 def _sync_project_legacy_aliases(project: dict) -> int:
@@ -15592,6 +15697,17 @@ def _publish_acceptance_execution_ledger(
 def _save_project_json(project_json_path: Path, project: dict) -> None:
     from project_writer import write_project_json_atomic
 
+    # Keep the full input before compatibility projections mutate it. This is
+    # diagnostic evidence, not an exported project or a replacement QA result.
+    try:
+        snapshot_path = Path(project_json_path).parent / "debug" / "project_save_input.json"
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_tmp = snapshot_path.with_suffix(".json.tmp")
+        snapshot_tmp.write_text(json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
+        snapshot_tmp.replace(snapshot_path)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("Nao foi possivel capturar project_data antes do save: %s", exc)
+
     try:
         _sync_project_legacy_aliases(project)
     except Exception as exc:
@@ -15611,6 +15727,10 @@ def _save_project_json(project_json_path: Path, project: dict) -> None:
         except Exception as exc:
             logger.warning("Falha ao atualizar log.summary antes de salvar project.json: %s", exc)
 
+    gate = (project.get("qa") or {}).get("export_gate")
+    if isinstance(gate, dict) and gate.get("status"):
+        project["needs_review"] = bool(gate.get("needs_review") or str(gate.get("status")).upper() == "BLOCK")
+        project["output_review_state"] = _output_review_state_for_export_gate(gate)
     write_project_json_atomic(project_json_path, project)
 
 
@@ -17283,6 +17403,13 @@ def _wrap_up_verified_owner_pages(
                 rebound_reports.append(rebound)
             qa_payload["final_pixel_reports"] = rebound_reports
         project_payload["qa"] = qa_payload
+        published_gate = qa_payload.get("export_gate")
+        if isinstance(published_gate, dict) and published_gate.get("status"):
+            project_payload["needs_review"] = bool(
+                published_gate.get("needs_review")
+                or str(published_gate.get("status")).upper() == "BLOCK"
+            )
+            project_payload["output_review_state"] = _output_review_state_for_export_gate(published_gate)
     project_path = staging_root / "project.json"
     project_path.write_bytes(
         json.dumps(project_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -17508,6 +17635,8 @@ def build_project_json(
         "engine_preset": config.get("engine_preset") or {},
         "_ollama_host": config.get("ollama_host"),
         "_ollama_model": config.get("ollama_model"),
+        "_translation_backend": config.get("translation_backend"),
+        "_hy_mt2_url": config.get("hy_mt2_url", "http://127.0.0.1:11438"),
         "_models_dir": config.get("models_dir"),
         "_vision_worker_path": config.get("vision_worker_path"),
         "_work_dir": config.get("work_dir"),
@@ -18211,7 +18340,9 @@ def _run_translate_page(project_path: Path, page_idx: int, region: dict | None =
             idioma_destino=project.get("idioma_destino", "pt-BR"),
             ollama_host=project.get("_ollama_host") or "http://localhost:11434",
             ollama_model=project.get("_ollama_model") or "traduzai-translator",
-            translation_context=project.get("translation_context") or None,
+            translation_context={**(project.get("translation_context") or {}),
+                "_translation_backend": project.get("_translation_backend"),
+                "_hy_mt2_url": project.get("_hy_mt2_url") or "http://127.0.0.1:11438"},
         )
         translated_targets = (
             translated_pages[0].get("texts", page_to_translate["texts"])

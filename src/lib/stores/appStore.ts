@@ -15,14 +15,18 @@ export interface TextLayerStyle {
   tamanho: number;
   cor: string;
   cor_gradiente: string[];
+  cor_gradiente_ativo?: boolean;
   contorno: string;
   contorno_px: number;
+  contorno_ativo?: boolean;
   glow: boolean;
   glow_cor: string;
   glow_px: number;
   sombra: boolean;
   sombra_cor: string;
   sombra_offset: [number, number];
+  sombra_blur?: number;
+  cor_gradiente_angulo?: number;
   bold: boolean;
   italico: boolean;
   rotacao: number;

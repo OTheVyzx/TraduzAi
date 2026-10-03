@@ -237,7 +237,7 @@ function legacyFills(source: UnknownRecord): ResolvedTextFill[] {
   if (colors.length >= 2) {
     return [{
       type: "linear-gradient",
-      angle: 90,
+      angle: boundedNumber(source.cor_gradiente_angulo, 90, -360, 360),
       opacity: 1,
       stops: colors.map((color, index) => ({
         offset: index / (colors.length - 1),
@@ -254,6 +254,14 @@ function legacyFills(source: UnknownRecord): ResolvedTextFill[] {
 }
 
 function normalizeFills(source: UnknownRecord, professional: UnknownRecord | null) {
+  if (source.cor_gradiente_ativo === false) {
+    return [{
+      type: "solid" as const,
+      color: normalizeHexColor(source.cor ?? source.color, "#000000") ?? "#000000",
+      opacity: 1,
+    }];
+  }
+  if (source.cor_gradiente_ativo === true) return legacyFills(source);
   if (!professional || !Array.isArray(professional.fills)) return legacyFills(source);
   const fills = professional.fills
     .map(normalizeProfessionalFill)
@@ -279,6 +287,12 @@ function normalizeProfessionalStroke(value: unknown): ResolvedTextStroke | null 
 }
 
 function normalizeStrokes(source: UnknownRecord, professional: UnknownRecord | null): ResolvedTextStroke[] {
+  if (source.contorno_ativo === false) return [];
+  if (source.contorno_ativo === true) {
+    const width = boundedNumber(source.strokeWidth ?? source.contorno_px, 0, 0, 200);
+    const color = normalizeHexColor(source.strokeColor ?? source.contorno);
+    return width > 0 && color ? [{ color, width, opacity: 1, position: "center" }] : [];
+  }
   if (professional && Array.isArray(professional.strokes)) {
     return professional.strokes
       .map(normalizeProfessionalStroke)
@@ -340,7 +354,9 @@ function legacyOuterGlow(source: UnknownRecord): ResolvedOuterGlow | null {
 
 function normalizeEffects(source: UnknownRecord, professional: UnknownRecord | null) {
   const effects = isRecord(professional?.effects) ? professional.effects : null;
-  const dropShadows = effects && Array.isArray(effects.dropShadows)
+  const dropShadows = source.sombra_blur !== undefined
+    ? legacyDropShadows(source)
+    : effects && Array.isArray(effects.dropShadows)
     ? effects.dropShadows.map(normalizeDropShadow).filter((shadow): shadow is ResolvedDropShadow => shadow !== null).slice(0, 8)
     : legacyDropShadows(source);
   const outerGlow = effects && Object.prototype.hasOwnProperty.call(effects, "outerGlow")

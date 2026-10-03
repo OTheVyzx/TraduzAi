@@ -205,3 +205,59 @@ def test_renderer_recipe_blocker_names_page_owner_and_no_render_commit(tmp_path:
             project_revision=1,
             ledger_sha256=_sha(b"ledger"),
         )
+
+
+def test_verified_source_preserved_page_has_no_renderer_recipe(tmp_path: Path) -> None:
+    from consumer_fast.physical_executor import _write_renderer_recipes
+
+    raster_path = tmp_path / "page.png"
+    raster_path.write_bytes(b"unchanged-raster")
+    source_pixel_sha = _sha(b"unchanged-pixels")
+    ledger_sha = _sha(b"ledger")
+    page = SimpleNamespace(
+        path=raster_path,
+        owner_page_result=SimpleNamespace(
+            status="final_verified",
+            terminal_proof=SimpleNamespace(proof_sha256=_sha(b"proof")),
+            request=SimpleNamespace(original_page=SimpleNamespace(page_source_sha256=source_pixel_sha)),
+            final_page=SimpleNamespace(page_output_pixel_sha256=source_pixel_sha),
+            coverage=SimpleNamespace(ledger=SimpleNamespace(sha256=ledger_sha)),
+            page_id="page_001",
+            page_commits=(),
+        ),
+    )
+
+    result = _write_renderer_recipes(
+        tmp_path, [page], analysis_record_sha256=_sha(b"analysis"),
+        project_id="project-1", project_revision=1, ledger_sha256=ledger_sha,
+    )
+
+    assert result["status"] == "not_applicable_source_preserved"
+    assert result["recipe_count"] == 0
+    assert not list((tmp_path / "consumer_fast").glob("renderer_recipe_lineage.json"))
+
+
+def test_changed_final_page_without_recipe_still_blocks(tmp_path: Path) -> None:
+    from consumer_fast.physical_executor import _write_renderer_recipes
+
+    raster_path = tmp_path / "page.png"
+    raster_path.write_bytes(b"changed-raster")
+    ledger_sha = _sha(b"ledger")
+    page = SimpleNamespace(
+        path=raster_path,
+        owner_page_result=SimpleNamespace(
+            status="final_verified",
+            terminal_proof=SimpleNamespace(proof_sha256=_sha(b"proof")),
+            request=SimpleNamespace(original_page=SimpleNamespace(page_source_sha256=_sha(b"original"))),
+            final_page=SimpleNamespace(page_output_pixel_sha256=_sha(b"changed")),
+            coverage=SimpleNamespace(ledger=SimpleNamespace(sha256=ledger_sha)),
+            page_id="page_001",
+            page_commits=(),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="no committed OwnerGlyphPatch"):
+        _write_renderer_recipes(
+            tmp_path, [page], analysis_record_sha256=_sha(b"analysis"),
+            project_id="project-1", project_revision=1, ledger_sha256=ledger_sha,
+        )

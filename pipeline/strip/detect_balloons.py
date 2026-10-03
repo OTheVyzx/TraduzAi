@@ -1458,6 +1458,56 @@ def detect_strip_balloons(
         require_same_class=page_native,
     )
 
+    # Local test only: Mayo proposes balloon geometry, never a cleanup mask.
+    # The normal OCR/owner gates still decide whether any text may be changed.
+    from strip import experimental_mayo
+    if experimental_mayo.enabled():
+        import json
+        import logging
+        from pathlib import Path
+
+        try:
+            proposals, mayo_stats = experimental_mayo.detect(strip.image)
+            mayo_stats["accepted_new_candidates"] = 0
+            mayo_stats["rejected_no_text_evidence"] = 0
+            mayo_stats["overlapped_existing"] = 0
+            for proposal in proposals:
+                x1, y1, x2, y2 = map(int, proposal["bbox"])
+                if not (0 <= x1 < x2 <= strip.width and 0 <= y1 < y2 <= strip.height):
+                    continue
+                bbox = BBox(x1, y1, x2, y2)
+                if any(_iou(bbox, existing.strip_bbox) >= 0.5 or
+                       _intersection_over_smaller_area(bbox, existing.strip_bbox) >= 0.8
+                       for existing in after_nms):
+                    mayo_stats["overlapped_existing"] += 1
+                    continue
+                ink = _inner_dark_text_evidence(strip.image, bbox)
+                if not (ink["has_inner_dark_text"] or ink["has_inner_light_text"]):
+                    mayo_stats["rejected_no_text_evidence"] += 1
+                    continue
+                after_nms.append(Balloon(
+                    strip_bbox=bbox,
+                    confidence=float(proposal["confidence"]),
+                    metadata={
+                        "detector_source": "experimental_mayo_safetensors",
+                        "candidate_kind": "text_region",
+                        "mayo_candidate_review_required": True,
+                        "mayo_mask_role": "ownership_candidate_only",
+                        "mayo_mask_sha256": proposal["mask_sha256"],
+                        "mayo_repair": proposal["repair"],
+                        "mayo_model": proposal["model"],
+                        "mayo_ink_evidence": ink,
+                    },
+                ))
+                mayo_stats["accepted_new_candidates"] += 1
+            log_path = os.getenv("TRADUZAI_EXPERIMENTAL_MAYO_LOG")
+            if log_path:
+                with Path(log_path).open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(mayo_stats, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            # Experiment failure cannot make the official detector invent boxes.
+            logging.getLogger(__name__).warning("Mayo experimental recusado: %s", exc)
+
     # Filtro pós-NMS: descartar false-positives gigantes
     filtered = []
     for balloon in after_nms:

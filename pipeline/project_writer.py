@@ -9,7 +9,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ownership.project import require_owner_project_consistency
+from ownership.project import (
+    neutralize_review_candidate_compatibility,
+    require_owner_project_consistency,
+)
 
 
 _FINAL_PIXEL_CONTRACTS = {
@@ -86,6 +89,10 @@ def _strip_raster_mask_fields(record: Any) -> None:
 def _neutralize_removed_decision_fields(layer: dict[str, Any]) -> None:
     route_action = str(layer.get("route_action") or "").strip().lower()
     content_class = str(layer.get("content_class") or "").strip().lower()
+    if neutralize_review_candidate_compatibility(layer):
+        # Review candidates cannot execute or render; preserve their strict
+        # route/render contract while neutralizing legacy compatibility hints.
+        return
     if (
         route_action == "translate_sfx_inpaint_render"
         or content_class == "sfx"

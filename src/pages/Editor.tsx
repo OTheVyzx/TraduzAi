@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../lib/stores/appStore";
 import { EditorStage } from "../components/editor/stage/EditorStage";
+import type { StudioBitmapOperationCommit } from "../components/editor/stage/bitmapStrokePreview";
 import type { EditorSceneVisualNode } from "../components/editor/stage/editorSceneVisual";
 import { EditorLayersPanelSlot } from "../components/editor/EditorLayersPanelSlot";
 import { PageThumbnails } from "../components/editor/PageThumbnails";
@@ -408,6 +409,11 @@ export interface EditorProps {
   bitmapCompositeSource?: string | null;
   sceneVisualNodes?: EditorSceneVisualNode[] | null;
   onRequestPageChange?: (pageIndex: number) => void | Promise<void>;
+  onStudioBitmapOperation?: (operation: StudioBitmapOperationCommit) => Promise<void>;
+  onUndo?: () => void | Promise<void>;
+  onRedo?: () => void | Promise<void>;
+  canUndo?: boolean;
+  canRedo?: boolean;
 }
 
 export function Editor({
@@ -425,6 +431,11 @@ export function Editor({
   bitmapCompositeSource = null,
   sceneVisualNodes = null,
   onRequestPageChange,
+  onStudioBitmapOperation,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
 }: EditorProps = {}) {
   const navigate = useNavigate();
   const capabilities = resolveEditorCapabilities(toolProfile);
@@ -474,6 +485,8 @@ export function Editor({
     lastPaintedLayer,
     setEraserTarget,
   } = useEditorStore();
+  const handleUndo = onUndo ?? undoEditor;
+  const handleRedo = onRedo ?? redoEditor;
 
   const totalPages = project?.paginas.length ?? 0;
   const projectId = project?.id ?? null;
@@ -577,13 +590,13 @@ export function Editor({
       if (!isTyping) {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
           event.preventDefault();
-          if (event.shiftKey) redoEditor();
-          else undoEditor();
+          if (event.shiftKey) void handleRedo();
+          else void handleUndo();
           return;
         }
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") {
           event.preventDefault();
-          redoEditor();
+          void handleRedo();
           return;
         }
         if (event.key === "1" && isEditorViewAvailable(toolProfile, "original", hasInpaintLayer)) setViewMode("original");
@@ -666,7 +679,8 @@ export function Editor({
     deleteSelectedLayer,
     eraserTarget,
     forceFidelityRender,
-    redoEditor,
+    handleRedo,
+    handleUndo,
     renderPreviewPage,
     resetViewport,
     selectedLayerId,
@@ -679,7 +693,6 @@ export function Editor({
     toolMode,
     toolProfile,
     totalPages,
-    undoEditor,
     zoomIn,
     zoomOut,
     visibleTools,
@@ -768,7 +781,7 @@ export function Editor({
             {workspaceSwitcher ? (
               <div data-editor-preserve-text-selection="true">{workspaceSwitcher}</div>
             ) : null}
-            <UndoRedoControls />
+            <UndoRedoControls onUndo={onUndo} onRedo={onRedo} canUndo={canUndo} canRedo={canRedo} />
             <AutoSaveIndicator />
             {capabilities.renderPreviewOnSave
               ? <RenderStatusBadge />
@@ -1029,6 +1042,7 @@ export function Editor({
             selectionTargetNodeId={selectionTargetNodeId}
             bitmapCompositeSource={bitmapCompositeSource}
             sceneVisualNodes={sceneVisualNodes}
+            onStudioBitmapOperation={onStudioBitmapOperation}
           />
           {capabilities.showPipelineActions && <PipelineActionSidebar />}
         </div>

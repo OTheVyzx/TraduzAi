@@ -23,7 +23,8 @@ from typesetter.style_contract import (
 from typesetter.gradient_model import canonicalize_linear_gradient
 
 
-CANONICAL_AUTO_FONT = "ComicNeue-Bold.ttf"
+from typesetter.fixed_font_family import FIXED_FONT_NAME
+CANONICAL_AUTO_FONT = FIXED_FONT_NAME
 SOURCE_STYLE_CONFIDENCE_THRESHOLD = 0.70
 SOURCE_STYLE_GRADIENT_CONFIDENCE_THRESHOLD = 0.60
 FORCE_UPPER_SEMANTIC_ROLES = frozenset(

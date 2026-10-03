@@ -133,13 +133,26 @@ def _english_only_markers(token: str) -> tuple[str, ...]:
     return tuple(marker for marker in _ENGLISH_JOIN_MARKERS if marker in compact)
 
 
-def _looks_like_neutral_proper_name(value: str, tokens: tuple[str, ...]) -> bool:
-    words = re.findall(r"[A-Za-z][A-Za-z'-]*", str(value or ""))
-    if not (1 <= len(words) <= 4) or len(words) != len(tokens):
-        return False
-    if any(_english_only_markers(token) or _is_ptbr_token(token) for token in tokens):
-        return False
-    return all(word[:1].isupper() for word in words)
+def _entity_pattern(value: str) -> re.Pattern:
+    body = r"\s+".join(re.escape(part) for part in _normalize(value).split())
+    body = re.sub("['’]", "['’]", body)
+    return re.compile(r"(?<!\w)" + body + r"(?!\w)", re.IGNORECASE)
+
+
+def _looks_like_neutral_proper_name(value: str, tokens: tuple[str, ...], explicit_entities: tuple[str, ...] = ()) -> bool:
+    """Preservation requires complete coverage by approved entity spans.
+
+    Capitalization, OCR confidence and absence from a small lexicon are not
+    entity evidence. Adjacent unapproved prose must still reach translation.
+    """
+    remainder = _normalize(value)
+    matched = False
+    for entity in sorted(explicit_entities, key=len, reverse=True):
+        if not _normalize(entity):
+            continue
+        remainder, count = _entity_pattern(entity).subn(" ", remainder)
+        matched = matched or count > 0
+    return matched and not any(char.isalnum() for char in remainder)
 
 
 def _looks_like_unit_glyph_fragment(tokens: tuple[str, ...]) -> bool:
@@ -286,8 +299,8 @@ def _entities_equivalent(
     source_folded = _normalize(source).casefold()
     target_folded = _normalize(target).casefold()
     return all(
-        _normalize(entity).casefold() in source_folded
-        and _normalize(entity).casefold() in target_folded
+        _entity_pattern(entity).search(source_folded) is not None
+        and _entity_pattern(entity).search(target_folded) is not None
         for entity in explicit_entities
         if _normalize(entity)
     )
@@ -452,7 +465,13 @@ def validate_target_language(
             and len(ptbr_only_tokens) > 0
             and len(english_only_tokens) == 0
         )
-        if structured_identifiers:
+        if bool(evidence is not None and evidence.coverage_complete
+                and _looks_like_neutral_proper_name(normalized_target, target_tokens, explicit_entities)):
+            accepted = True
+            retryable = False
+            reason = "source_neutral_proper_name"
+            policy_id = "source_neutral_proper_name"
+        elif structured_identifiers:
             accepted = True
             retryable = False
             reason = "source_neutral_structured_identifiers"
@@ -466,25 +485,12 @@ def validate_target_language(
             evidence is not None
             and evidence.coverage_complete
             and not evidence.source_only_tokens
-            and (
-                not target_tokens
-                or _looks_like_unit_glyph_fragment(target_tokens)
-            )
+            and not any(char.isalpha() for char in normalized_target)
         ):
             accepted = True
             retryable = False
             reason = "source_neutral_nonlexical"
             policy_id = "source_neutral_nonlexical"
-        elif bool(
-            evidence is not None
-            and evidence.coverage_complete
-            and not evidence.source_only_tokens
-            and _looks_like_neutral_proper_name(normalized_target, target_tokens)
-        ):
-            accepted = True
-            retryable = False
-            reason = "source_neutral_proper_name"
-            policy_id = "source_neutral_proper_name"
         else:
             normalized_role = str(role or "dialogue").casefold()
             reason = (

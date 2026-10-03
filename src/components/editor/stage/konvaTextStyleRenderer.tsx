@@ -98,17 +98,20 @@ export function buildStyledKonvaTextNodeConfigs(config: StyledKonvaTextConfig): 
   const nodes: StyledTextNodeConfig[] = [];
 
   resolved.effects.dropShadows.forEach((shadow, index) => {
+    const soft = shadow.blur > 0;
     nodes.push({
       ...base,
       key: index === 0 ? "shadow" : `shadow-${index}`,
-      x: Number(base.x ?? config.x) + shadow.offsetX,
-      y: Number(base.y ?? config.y) + shadow.offsetY,
+      x: Number(base.x ?? config.x) + (soft ? 0 : shadow.offsetX),
+      y: Number(base.y ?? config.y) + (soft ? 0 : shadow.offsetY),
       fill: shadow.color,
       stroke: shadow.color,
       strokeWidth: 0,
-      shadowEnabled: shadow.blur > 0,
+      shadowEnabled: soft,
       shadowColor: shadow.color,
       shadowBlur: shadow.blur,
+      shadowOffsetX: soft ? shadow.offsetX : 0,
+      shadowOffsetY: soft ? shadow.offsetY : 0,
       shadowOpacity: shadow.opacity,
       opacity: shadow.opacity,
     });

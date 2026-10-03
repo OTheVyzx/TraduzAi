@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 
 
-DEFAULT_FONT_FAMILY = "ComicNeue-Bold.ttf"
+from typesetter.fixed_font_family import FIXED_FONT_NAME
+DEFAULT_FONT_FAMILY = FIXED_FONT_NAME
 DEFAULT_FONT_WEIGHT = "bold"
 
 KOHARU_RUST_CAPABILITIES = frozenset(

@@ -7,6 +7,8 @@ const source = readFileSync(
   "utf8",
 );
 
+const normalizedSource = source.replace(/\r\n/g, "\n");
+
 describe("StudioSharedEditor job integration", () => {
   it("keeps Consumer Fast controls visible in translation and editing workspaces", () => {
     expect(source).toContain('import { StudioJobControls } from "../jobs/StudioJobControls"');
@@ -17,7 +19,7 @@ describe("StudioSharedEditor job integration", () => {
   });
 
   it("binds the selected owner to the persisted Renderer A/B flow", () => {
-    expect(source).toContain("<StudioTranslationWorkspace\n            project={translationProject}\n            projectPath={projectPath}");
+    expect(normalizedSource).toContain("<StudioTranslationWorkspace\n            project={translationProject}\n            projectPath={projectPath}");
     expect(source).toContain("createTauriStudioIpcClient().retypesetOwner");
     expect(source).toContain("error={translationCommitError}");
   });

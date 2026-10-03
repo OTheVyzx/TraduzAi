@@ -3,6 +3,131 @@ import studioProjectSchema from "../../../schemas/studio_project.schema.json";
 import { finalImagePathForPage, importStudioProject, toTraduzAiV2Compat } from "../adapters";
 
 describe("studio project adapters", () => {
+  it("groups editable categories while leaving the original raster at the root", () => {
+    const result = importStudioProject({
+      versao: "2.0",
+      paginas: [{
+        numero: 1,
+        arquivo_original: "original.png",
+        image_layers: {
+          inpaint: { path: "cleanup.png" },
+          brush: { path: "painting.png" },
+          recovery: { path: "recovery.png" },
+        },
+        text_layers: [
+          { id: "a", bbox: [0, 0, 10, 10], original: "A", translated: "B" },
+          { id: "b", bbox: [0, 10, 10, 20], original: "C", translated: "D" },
+        ],
+      }],
+    });
+
+    const scene = result.project.paginas[0].studio_scene;
+    const byId = new Map(scene.nodes.map((node) => [node.id, node]));
+    expect(byId.get("image:base")?.parent_id).toBeNull();
+    expect(byId.get("group:auto:painting")).toMatchObject({ kind: "group", name: "Pintura" });
+    expect(byId.get("group:auto:cleanup")).toMatchObject({ kind: "group", name: "Limpeza" });
+    expect(byId.get("group:auto:recovery")).toMatchObject({ kind: "group", name: "Recuperação" });
+    expect(byId.get("group:auto:text")).toMatchObject({ kind: "group", name: "Texto" });
+    expect(byId.get("image:brush")?.parent_id).toBe("group:auto:painting");
+    expect(byId.get("image:inpaint")?.parent_id).toBe("group:auto:cleanup");
+    expect(byId.get("text:a")?.parent_id).toBe("group:auto:text");
+    expect(byId.get("text:b")?.parent_id).toBe("group:auto:text");
+    expect(scene.roots).toContain("image:base");
+  });
+
+  it("reopens raster operation groups without duplicating the projected brush composite", () => {
+    const result = importStudioProject({
+      versao: "2.0",
+      paginas: [{
+        numero: 1,
+        arquivo_original: "original.png",
+        image_layers: {
+          base: { path: "original.png" },
+          brush: { path: "legacy-brush-composite.png" },
+        },
+        studio_scene: {
+          version: "1.0",
+          roots: ["image:base", "group:auto:painting"],
+          nodes: [
+            {
+              id: "image:base",
+              kind: "raster",
+              name: "Original",
+              visible: true,
+              locked: true,
+              opacity: 1,
+              blend_mode: "normal",
+              parent_id: null,
+              order: 0,
+              mask_ids: [],
+              image_layer_key: "base",
+              metadata: { projected_from: "image_layers", scene_owned: true },
+            },
+            {
+              id: "group:auto:painting",
+              kind: "group",
+              name: "Pintura",
+              visible: true,
+              locked: false,
+              opacity: 1,
+              blend_mode: "normal",
+              parent_id: null,
+              order: 1,
+              mask_ids: [],
+              metadata: { auto_category_group: "painting", raster_operations_key: "brush", scene_owned: true },
+            },
+            {
+              id: "generated:brush-stroke",
+              kind: "generated",
+              name: "Pincelada",
+              visible: true,
+              locked: false,
+              opacity: 1,
+              blend_mode: "normal",
+              parent_id: "group:auto:painting",
+              order: 0,
+              mask_ids: [],
+              metadata: { generator: "studio-bitmap-operation", image_path: "brush/stroke.png", scene_owned: true },
+            },
+          ],
+        },
+      }],
+    });
+
+    const scene = result.project.paginas[0].studio_scene;
+    expect(scene.nodes.some((node) => node.id === "image:brush")).toBe(false);
+    expect(scene.nodes.find((node) => node.id === "generated:brush-stroke")?.parent_id).toBe("group:auto:painting");
+    expect(scene.roots).toEqual(["image:base", "group:auto:painting"]);
+  });
+
+  it("migrates flat legacy category nodes even when they lack projection metadata", () => {
+    const result = importStudioProject({
+      versao: "2.0",
+      paginas: [{
+        numero: 1,
+        image_layers: {
+          base: { path: "original.png" },
+          brush: { path: "painting.png" },
+        },
+        text_layers: [{ id: "legacy-text", bbox: [0, 0, 10, 10], original: "A", translated: "B" }],
+        studio_scene: {
+          version: "1.0",
+          roots: ["image:base", "image:brush", "text:legacy-text"],
+          nodes: [
+            { id: "image:base", kind: "raster", name: "Original", image_layer_key: "base", parent_id: null, order: 0, metadata: {} },
+            { id: "image:brush", kind: "raster", name: "Pintura", image_layer_key: "brush", parent_id: null, order: 1, metadata: {} },
+            { id: "text:legacy-text", kind: "text", name: "B", text_layer_id: "legacy-text", parent_id: null, order: 2, metadata: {} },
+          ],
+        },
+      }],
+    });
+
+    const nodes = new Map(result.project.paginas[0].studio_scene.nodes.map((node) => [node.id, node]));
+    expect(nodes.get("image:base")?.parent_id).toBeNull();
+    expect(nodes.get("image:brush")?.parent_id).toBe("group:auto:painting");
+    expect(nodes.get("text:legacy-text")?.parent_id).toBe("group:auto:text");
+  });
+
   it("imports legacy v1 pages and regenerates text aliases", () => {
     const result = importStudioProject({
       versao: "1.0",
@@ -446,7 +571,8 @@ describe("studio project adapters", () => {
         }),
       ]),
     );
-    expect(scene.roots).toEqual(expect.arrayContaining(["image:base", "image:mask", "text:dialogue-1"]));
+    expect(scene.roots).toEqual(expect.arrayContaining(["image:base", "image:mask", "group:auto:text"]));
+    expect(scene.nodes.find((node) => node.id === "text:dialogue-1")?.parent_id).toBe("group:auto:text");
     expect(scene.nodes.some((node) => node.id === "image:rendered")).toBe(false);
   });
 

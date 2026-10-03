@@ -60,6 +60,7 @@ from ownership.render_geometry import (
     positive_evidence_excluding_protected,
     release_source_replacement_from_protection,
 )
+from ownership.coordinate_contract import pixel_polygon_component_half_open
 from typesetter.owner_style import (
     attach_owner_visual_profile,
     build_base_owner_visual_profiles,
@@ -79,6 +80,19 @@ from vision_stack.bubble_shape_refiner import refine_bubble_shape_mask
 
 
 logger = logging.getLogger(__name__)
+
+
+def _planner_component_geometry(
+    component: SourceTextComponent, *, page_width: int, page_height: int,
+) -> tuple[SourceTextComponent, dict | None]:
+    """Adapt only OCR pixel-vertex boxes at the mask-planner boundary."""
+    if not set(component.detector_sources) & {
+        'ocr_full_page_materialization', 'current_paddle_local_cpu',
+    }:
+        return component, None
+    return pixel_polygon_component_half_open(
+        component, page_width=page_width, page_height=page_height,
+    )
 
 
 IMAGE_WHITE_BUBBLE_MASK_SOURCE = "image_white_bubble_mask"
@@ -12102,17 +12116,17 @@ def _owner_execution_rejection_record(
 ) -> dict[str, Any]:
     """Fail closed without introducing legacy review state into enforce graphs."""
 
-    if not enforce_graph:
-        _transition_owner_to_review(graph, owner.owner_id)
+    # Callers may already have retired the owner. Repair exhaustion reaches
+    # this helper directly, so retire it here before detaching a candidate.
+    if any(item.owner_id == owner.owner_id for item in graph.owners):
+        if enforce_graph or owner.disposition != "review":
+            _transition_owner_to_review(
+                graph, owner.owner_id, enforce_graph=enforce_graph,
+            )
     record = _owner_non_rendering_record(graph, owner, seed=seed)
     if enforce_graph:
-        record.update(
-            {
-                "derived_qa_status": "review_required",
-                "execution_rejected": True,
-                "write_authority": "revoked",
-            }
-        )
+        from ownership.project import detach_owner_review_candidate
+        record = detach_owner_review_candidate(record, graph, owner.owner_id)
     return record
 
 
@@ -12252,13 +12266,16 @@ def _owner_preserve_original_record(
 
 def _owner_translation_binding_fields(
     binding: TranslationBinding,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Return the immutable source/target identity required by final text layers."""
 
     return {
         "translation_binding_sha256": binding.translation_binding_sha256,
         "source_payload_sha256": binding.source_payload_sha256,
         "target_payload_sha256": binding.target_payload_sha256,
+        "language_verdict": binding.language_verdict.to_dict(),
+        "translation_quality_usage_policy_id": binding.quality_usage_policy_id,
+        "translation_quality_warning_reason": binding.quality_warning_reason,
     }
 
 
@@ -12869,6 +12886,12 @@ def execute_owner_page_graph(
         )
         for component_id in owner.component_ids:
             component = components[component_id]
+            component, coordinate_audit = _planner_component_geometry(
+                component, page_width=int(source.shape[1]),
+                page_height=int(source.shape[0]),
+            )
+            if coordinate_audit is not None:
+                record.setdefault('component_coordinate_contracts', []).append(coordinate_audit)
             component_bbox = (
                 max(0, int(component.bbox_page[0])),
                 max(0, int(component.bbox_page[1])),

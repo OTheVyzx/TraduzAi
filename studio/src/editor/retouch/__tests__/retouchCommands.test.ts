@@ -113,11 +113,16 @@ describe("Studio retouch commands", () => {
     });
 
     expect(original.nodes).toHaveLength(2);
-    expect(next.roots).toEqual(["image:base", "generated:retouch:clone", "text:a"]);
+    expect(next.roots).toEqual(["image:base", "text:a", "group:auto:cleanup"]);
+    expect(next.nodes.find((node) => node.id === "group:auto:cleanup")).toMatchObject({
+      kind: "group",
+      name: "Limpeza",
+      metadata: { auto_category_group: "cleanup" },
+    });
     expect(next.nodes.find((node) => node.id === "image:base")?.mask_ids).toEqual([]);
     expect(next.nodes.find((node) => node.id === "generated:retouch:clone")).toMatchObject({
       kind: "generated",
-      parent_id: null,
+      parent_id: "group:auto:cleanup",
       mask_ids: ["mask:retouch:clone"],
       metadata: {
         generator: "retouch",

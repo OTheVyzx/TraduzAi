@@ -7,7 +7,7 @@ import { StudioLayersTree } from "../StudioLayersTree";
 
 const scene: StudioScene = {
   version: "1.0",
-  roots: ["image:base", "text:a"],
+  roots: ["image:base", "group:text"],
   nodes: [
     {
       id: "image:base",
@@ -24,6 +24,19 @@ const scene: StudioScene = {
       metadata: {},
     },
     {
+      id: "group:text",
+      kind: "group",
+      name: "Texto",
+      visible: true,
+      locked: false,
+      opacity: 1,
+      blend_mode: "normal",
+      parent_id: null,
+      order: 1,
+      mask_ids: [],
+      metadata: { auto_category_group: "text" },
+    },
+    {
       id: "text:a",
       kind: "text",
       name: "Olá, mundo",
@@ -31,7 +44,7 @@ const scene: StudioScene = {
       locked: false,
       opacity: 0.8,
       blend_mode: "multiply",
-      parent_id: null,
+      parent_id: "group:text",
       order: 1,
       mask_ids: [],
       text_layer_id: "a",
@@ -53,5 +66,6 @@ describe("StudioLayersTree", () => {
     expect(html).toContain("Opacidade");
     expect(html).toContain("Modo de mesclagem");
     expect(html).toContain("Criar grupo com a seleção");
+    expect(html).toContain("Recolher Texto");
   });
 });

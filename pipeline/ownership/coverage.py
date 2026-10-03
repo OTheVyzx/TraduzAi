@@ -6,7 +6,9 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields, replace
 import json
 import logging
+import os
 import re
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
 
 from .ocr_contract import (
@@ -1932,10 +1934,24 @@ def complete_page_coverage(
         invocation_id=f"{page_id}:coverage:full-page",
         provider_family="paddleocr",
     )
-    full = ocr_runner(page_rgb, request=full_request, bbox_page=None, variants=("full_page",))
+    crop_first = os.getenv("TRADUZAI_OCR_CROP_FIRST", "0").strip().lower() in {"1", "true", "yes", "on"}
+    primary_components = [
+        component for component in components
+        if "primary_region_detector" in component.detector_sources
+    ] if crop_first else []
+    primary_blocks = [SimpleNamespace(xyxy=component.bbox_page) for component in primary_components]
+    full_kwargs = {"coverage_blocks": primary_blocks} if primary_blocks else {}
+    full = ocr_runner(page_rgb, request=full_request, bbox_page=None, variants=("full_page",), **full_kwargs)
     requests.append(full_request)
     invocations.append(full)
     full_records = tuple(full.observations or full.full_page_lines)
+    crop_component_by_attempt = {
+        attempt.attempt_id: component
+        for attempt in full.attempts
+        if attempt.input_kind in {"detected_crop", "terminal_recrop"}
+        for component in primary_components
+        if tuple(attempt.input_bbox_page or ()) == tuple(component.bbox_page)
+    }
     associated: dict[str, list[OCRObservationRecord]] = {
         component.component_id: [] for component in components
     }
@@ -1946,8 +1962,9 @@ def complete_page_coverage(
         component.component_id: set() for component in components
     }
     for record in full_records:
+        selected_component = crop_component_by_attempt.get(record.attempt_id)
         matches = []
-        for component in components:
+        for component in ([] if selected_component is not None else components):
             observation_fraction = _bbox_overlap_fraction(
                 record.bbox_page, component.bbox_page
             )
@@ -1969,7 +1986,6 @@ def complete_page_coverage(
                     component,
                 )
             )
-        selected_component = None
         if len(matches) == 1:
             selected_component = matches[0][3]
         elif len(matches) > 1:

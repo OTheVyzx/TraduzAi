@@ -770,6 +770,14 @@ def build_owner_render_geometry(
                 layout_bbox = layout_polygon = None
                 layout_source = "none"
                 status, reason = "review_required", unsafe_reason
+            elif any(str(item).startswith("full_page_visual_container:") for item in evidence_ids):
+                # The protected-art mask only excludes known foreign ink.
+                # It cannot certify the balloon interior or its curved edge.
+                # A full-page recovery remains an envelope even when its
+                # rectangular dimensions pass the source-slot heuristic.
+                layout_bbox = layout_polygon = None
+                layout_source = "none"
+                status, reason = "review_required", "unverified_full_page_balloon_interior"
     elif visual_card_slot:
         layout_bbox = semantic_bbox
         layout_polygon = _rect_polygon(semantic_bbox)
@@ -791,6 +799,33 @@ def build_owner_render_geometry(
         status = "review_required"
         reason = "missing_independent_dialogue_container" if dialogue else "missing_verified_card_container" if card else "missing_independent_layout_container"
         evidence_ids, evidence_confidence = (), 0.0
+        if dialogue:
+            from . import experimental_ocr_region
+            if experimental_ocr_region.enabled():
+                foreign_boxes = tuple(
+                    component.bbox_page for component in graph.components
+                    if component.component_id not in component_set
+                )
+                proposal, refusal = experimental_ocr_region.propose(
+                    source_bbox, width=width, height=height,
+                    protected_art_mask=protected_art_mask,
+                    foreign_boxes=foreign_boxes,
+                )
+                if proposal is not None:
+                    layout_bbox, layout_polygon = proposal
+                    layout_polygon = _polygon(
+                        layout_polygon, width=width, height=height,
+                        label="experimental virtual OCR layout polygon",
+                    )
+                    layout_source = "experimental_virtual_ocr_region"
+                    status, reason = "ready", "experimental_ocr_layout_requires_review"
+                    evidence_ids = tuple(sorted(selected_ids))
+                    evidence_confidence = min(
+                        (observation.confidence for observation in observations),
+                        default=0.0,
+                    )
+                else:
+                    reason = f"experimental_ocr_region_refused:{refusal}"
 
     subregions = []
     for order, component in enumerate(semantic_components):

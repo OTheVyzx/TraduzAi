@@ -13,6 +13,7 @@ export function EditorTransformer({
   snapLayers = [],
   disabled = false,
   onSnapGuidesChange,
+  onKeepSelection,
 }: {
   selectedNodeName: string | null;
   pageSize: PageSize | null;
@@ -20,6 +21,7 @@ export function EditorTransformer({
   snapLayers?: TextEntry[];
   disabled?: boolean;
   onSnapGuidesChange?: (guides: SnapGuide[]) => void;
+  onKeepSelection?: () => void;
 }) {
   const transformerRef = useRef<Konva.Transformer>(null);
 
@@ -69,6 +71,21 @@ export function EditorTransformer({
       anchorStrokeWidth={2}
       anchorSize={16}
       anchorCornerRadius={3}
+      onMouseDown={(event) => {
+        event.cancelBubble = true;
+        onKeepSelection?.();
+      }}
+      onTouchStart={(event) => {
+        event.cancelBubble = true;
+        onKeepSelection?.();
+      }}
+      onTap={(event) => {
+        event.cancelBubble = true;
+      }}
+      onTransformStart={(event) => {
+        event.cancelBubble = true;
+        onKeepSelection?.();
+      }}
     />
   );
 }

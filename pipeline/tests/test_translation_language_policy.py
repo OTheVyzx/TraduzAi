@@ -213,6 +213,7 @@ def test_language_neutral_proper_name_uses_explicit_non_dialogue_policy() -> Non
         source=source,
         target=source,
         role="dialogue_body",
+        explicit_entities=("KIM SHYEOK",),
         page_language_evidence=build_page_language_evidence(
             texts=(source,),
             coverage_complete=True,
@@ -260,7 +261,7 @@ def test_joined_ptbr_marker_and_nonlexical_text_do_not_exhaust_translation() -> 
     assert numeric.policy_id == "source_neutral_nonlexical"
 
 
-def test_unit_glyph_fragment_is_nonlexical_but_english_pronoun_still_retries() -> None:
+def test_uncertain_alphabetic_fragment_and_english_pronoun_still_retry() -> None:
     fragment = "t!"
     fragment_verdict = validate_target_language(
         source=fragment,
@@ -282,8 +283,8 @@ def test_unit_glyph_fragment_is_nonlexical_but_english_pronoun_still_retries() -
         ),
     )
 
-    assert fragment_verdict.accepted
-    assert fragment_verdict.policy_id == "source_neutral_nonlexical"
+    assert not fragment_verdict.accepted
+    assert fragment_verdict.policy_id != "source_neutral_nonlexical"
     assert not pronoun_verdict.accepted
 
 

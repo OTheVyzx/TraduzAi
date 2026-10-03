@@ -37,6 +37,38 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _verify_materialized_base(worktree: Path, manifest: dict[str, Any]) -> tuple[list[dict[str, str]], dict[str, str], list[dict[str, str]]]:
+    """Check full content; accept only declared CRLF-to-LF equivalence."""
+    files = manifest["files"]
+    overrides = manifest.get("materialized_overrides", {})
+    equivalent = manifest.get("line_ending_equivalent_paths", [])
+    if (not isinstance(equivalent, list) or len(equivalent) != len(set(equivalent))
+            or any(path not in files for path in equivalent)):
+        raise ConsumerFastPreflightError("invalid line-ending equivalence manifest")
+    allowed = set(equivalent)
+    mismatches: list[dict[str, str]] = []
+    raw_hashes: dict[str, str] = {}
+    accepted: list[dict[str, str]] = []
+    for relative, source_hash in files.items():
+        materialized = worktree / relative
+        expected = overrides.get(relative, source_hash)
+        if not materialized.is_file():
+            mismatches.append({"path": relative, "expected": expected, "actual": "missing"})
+            continue
+        data = materialized.read_bytes()
+        actual = hashlib.sha256(data).hexdigest()
+        raw_hashes[relative] = actual
+        if actual == expected:
+            continue
+        if relative in allowed and b"\r\n" in data:
+            normalized = data.replace(b"\r\n", b"\n")
+            if b"\r" not in normalized and hashlib.sha256(normalized).hexdigest() == expected:
+                accepted.append({"path": relative, "expected_lf_sha256": expected, "raw_sha256": actual})
+                continue
+        mismatches.append({"path": relative, "expected": expected, "actual": actual})
+    return mismatches, raw_hashes, accepted
+
+
 def _canonical_hash(value: Any) -> str:
     encoded = json.dumps(
         value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
@@ -73,6 +105,12 @@ def build_preflight(config: dict[str, Any], *, pipeline_root: Path | None = None
     worktree = root.parent.resolve()
     if config.get("runtime_id") != RUNTIME_ID:
         raise ConsumerFastPreflightError(f"runtime_id deve ser {RUNTIME_ID}")
+    if config.get("translation_backend") == "hy_mt2_gguf_local":
+        from urllib.parse import urlparse
+        endpoint = urlparse(str(config.get("hy_mt2_url") or ""))
+        if (endpoint.scheme != "http" or endpoint.hostname not in {"127.0.0.1", "localhost"}
+                or endpoint.username or endpoint.password or not config.get("offline_context_only")):
+            raise ConsumerFastPreflightError("HY-MT2 Consumer Fast requires an offline loopback endpoint")
     if config.get("owner_graph_mode") != "enforce" or config.get("style_copy_mode") != "shadow":
         raise ConsumerFastPreflightError("owner_graph_mode=enforce e style_copy_mode=shadow são obrigatórios")
 
@@ -83,14 +121,7 @@ def build_preflight(config: dict[str, Any], *, pipeline_root: Path | None = None
 
     manifest_path = root / "consumer_fast" / "BASE_SOURCES.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    overrides = manifest.get("materialized_overrides", {})
-    mismatches: list[dict[str, str]] = []
-    for relative, source_hash in manifest["files"].items():
-        materialized = worktree / relative
-        expected = overrides.get(relative, source_hash)
-        actual = _sha256_file(materialized) if materialized.is_file() else "missing"
-        if actual != expected:
-            mismatches.append({"path": relative, "expected": expected, "actual": actual})
+    mismatches, materialized_raw_hashes, line_ending_equivalent = _verify_materialized_base(worktree, manifest)
     if mismatches:
         raise ConsumerFastPreflightError(f"BASE_SOURCES divergente: {mismatches}")
 
@@ -103,7 +134,18 @@ def build_preflight(config: dict[str, Any], *, pipeline_root: Path | None = None
         "integration_v1.contracts",
         "integration_v1.providers",
         "vision_runtime.analysis_payload",
+        "vision_runtime.cache_key",
+        "vision_runtime.cache_reader",
+        "vision_runtime.page_record",
+        "vision_runtime.stage_cache",
+        "consumer_fast.vision_cache",
+        "ownership.coverage",
+        "ownership.ocr_contract",
+        "ownership.consensus_v2",
+        "vision_stack.ocr",
+        "qa.partial_delivery",
         "typesetter.renderer",
+        "typesetter.fixed_font_family",
         "typesetter.recipe_contract",
         "consumer_fast.provider_adapter",
         "consumer_fast.physical_executor",
@@ -111,6 +153,15 @@ def build_preflight(config: dict[str, Any], *, pipeline_root: Path | None = None
         "inpainter",
         "ownership.chapter_contract",
         "strip.run",
+        "strip.process_bands",
+        "strip.page_pipeline",
+        "strip.detect_balloons",
+        "strip.experimental_mayo",
+        "inpainter.experimental_fastfill",
+        "ownership.render_geometry",
+        "ownership.experimental_ocr_region",
+        "translator.translate",
+        "translator.hy_mt2_local",
         "vision_stack.runtime",
         "vision_stack.engine_presets",
         "project_writer",
@@ -134,11 +185,24 @@ def build_preflight(config: dict[str, Any], *, pipeline_root: Path | None = None
     )
     runtime_binding = {
         "base_sources_manifest": _sha256_file(manifest_path),
+        "base_materialized_raw_sha256": _canonical_hash(materialized_raw_hashes),
         "chapter_runner": _sha256_file(Path(__file__).resolve()),
         "provider_adapter": next(
             row["sha256"] for row in resolved_modules if row["name"] == "consumer_fast.provider_adapter"
         ),
+        "integrated_modules": {
+            row["name"]: row["sha256"] for row in resolved_modules
+            if row["name"] in {
+                "strip.run", "strip.process_bands", "strip.page_pipeline",
+                "strip.detect_balloons", "strip.experimental_mayo",
+                "inpainter.experimental_fastfill", "ownership.render_geometry",
+                "ownership.experimental_ocr_region", "translator.translate",
+                "translator.hy_mt2_local", "typesetter.fixed_font_family",
+            }
+        },
     }
+    from typesetter.fixed_font_family import fixed_font_path
+    runtime_binding["fixed_font_asset_sha256"] = _sha256_file(fixed_font_path())
     dependency_hashes = {
         "source": _sha256_file(source),
         "config": _canonical_hash(config),
@@ -206,6 +270,8 @@ def build_preflight(config: dict[str, Any], *, pipeline_root: Path | None = None
             "manifest_sha256": _sha256_file(manifest_path),
             "checked": len(manifest["files"]),
             "mismatches": mismatches,
+            "line_ending_equivalent": line_ending_equivalent,
+            "materialized_raw_sha256": materialized_raw_hashes,
         },
     }
 
@@ -265,9 +331,20 @@ def finalize_project(project_path: Path, preflight: dict[str, Any]) -> dict[str,
         and not blockers
         and criticals == 0
     )
-    if not legitimately_approved:
+    hard_block = (
+        gate.get("status") == "BLOCK"
+        or criticals > 0
+        or any(str(item.get("reason") or "").lower() in {"block", "blocked"} for item in blockers)
+    )
+    if hard_block:
         gate["status"] = "BLOCK"
         gate["allowed"] = False
+    elif not legitimately_approved:
+        # Keep the reviewed gate's evidence and warnings. A review state is not
+        # quality approval, but it must not be silently rewritten to BLOCK.
+        gate["status"] = "REVIEW"
+        gate["allowed"] = False
+        gate["needs_review"] = True
     gate["critical_issue_count"] = criticals
     gate["critical_flag_count"] = int(gate.get("critical_flag_count", criticals) or criticals)
     gate["blocker_count"] = len(blockers)

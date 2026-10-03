@@ -62,6 +62,75 @@ export const BUNDLE_FONTS: Record<string, FontEntry> = {
     source: "bundle",
     files: { regular: "/fonts/CCDaveGibbonsLower W00 Regular.ttf" },
   },
+  astronautCity: {
+    key: "astronautCity",
+    cssFamily: "Astronaut City",
+    source: "bundle",
+    files: { regular: "/fonts/Astronaut City.ttf" },
+  },
+  ccWildWords: {
+    key: "ccWildWords",
+    cssFamily: "CC Wild Words",
+    source: "bundle",
+    files: {
+      regular: "/fonts/Cc-Wild-Words-Roman-Font.ttf",
+      italic: "/fonts/Wild-Words-Font/CC Wild Words Italic.ttf",
+      boldItalic: "/fonts/Wild-Words-Font/CC Wild Words Bold Italic.ttf",
+    },
+  },
+  leagueGothic: {
+    key: "leagueGothic",
+    cssFamily: "League Gothic",
+    source: "bundle",
+    files: { regular: "/fonts/LeagueGothic-Regular-VariableFont_wdth.ttf" },
+  },
+  ccTotallyAwesome: {
+    key: "ccTotallyAwesome",
+    cssFamily: "CC Totally Awesome",
+    source: "bundle",
+    files: { bold: "/fonts/commercial/CCTotallyAwesome W00 Bold.ttf" },
+  },
+  atma: {
+    key: "atma",
+    cssFamily: "Atma",
+    source: "bundle",
+    files: { regular: "/fonts/google/Atma-SemiBold.ttf" },
+  },
+  bangers: {
+    key: "bangers",
+    cssFamily: "Bangers",
+    source: "bundle",
+    files: { regular: "/fonts/google/Bangers-Regular.ttf" },
+  },
+  deliusUnicase: {
+    key: "deliusUnicase",
+    cssFamily: "Delius Unicase",
+    source: "bundle",
+    files: { bold: "/fonts/google/DeliusUnicase-Bold.ttf" },
+  },
+  luckiestGuy: {
+    key: "luckiestGuy",
+    cssFamily: "Luckiest Guy",
+    source: "bundle",
+    files: { regular: "/fonts/google/LuckiestGuy-Regular.ttf" },
+  },
+  permanentMarker: {
+    key: "permanentMarker",
+    cssFamily: "Permanent Marker",
+    source: "bundle",
+    files: { regular: "/fonts/google/PermanentMarker-Regular.ttf" },
+  },
+  readyForAnything: {
+    key: "readyForAnything",
+    cssFamily: "Ready for Anything BB",
+    source: "bundle",
+    files: {
+      regular: "/fonts/Ready For Anything BB/ReadyforAnythingBB-Regular.ttf",
+      bold: "/fonts/Ready For Anything BB/ReadyforAnythingBB-Bold.ttf",
+      italic: "/fonts/Ready For Anything BB/ReadyforAnythingBB-Italic.ttf",
+      boldItalic: "/fonts/Ready For Anything BB/ReadyforAnythingBB-BoldItalic.ttf",
+    },
+  },
 };
 
 /**
@@ -84,9 +153,10 @@ export async function preloadEditorFonts(): Promise<void> {
 
   bundleFontsPreloadPromise = (async () => {
     const loaders: Promise<FontFace>[] = [];
+    const fontFaceUrl = (path: string) => `url("${encodeURI(path)}")`;
     for (const entry of Object.values(BUNDLE_FONTS)) {
       if (entry.files.regular) {
-        const ff = new FontFace(entry.cssFamily, `url(${entry.files.regular})`, {
+        const ff = new FontFace(entry.cssFamily, `${fontFaceUrl(entry.files.regular)}`, {
           weight: "400",
           style: "normal",
           display: "block",
@@ -97,7 +167,7 @@ export async function preloadEditorFonts(): Promise<void> {
         }));
       }
       if (entry.files.bold) {
-        const ff = new FontFace(entry.cssFamily, `url(${entry.files.bold})`, {
+        const ff = new FontFace(entry.cssFamily, `${fontFaceUrl(entry.files.bold)}`, {
           weight: "700",
           style: "normal",
           display: "block",
@@ -108,7 +178,7 @@ export async function preloadEditorFonts(): Promise<void> {
         }));
       }
       if (entry.files.italic) {
-        const ff = new FontFace(entry.cssFamily, `url(${entry.files.italic})`, {
+        const ff = new FontFace(entry.cssFamily, `${fontFaceUrl(entry.files.italic)}`, {
           weight: "400",
           style: "italic",
           display: "block",
@@ -119,7 +189,7 @@ export async function preloadEditorFonts(): Promise<void> {
         }));
       }
       if (entry.files.boldItalic) {
-        const ff = new FontFace(entry.cssFamily, `url(${entry.files.boldItalic})`, {
+        const ff = new FontFace(entry.cssFamily, `${fontFaceUrl(entry.files.boldItalic)}`, {
           weight: "700",
           style: "italic",
           display: "block",
@@ -237,10 +307,12 @@ export async function listSystemFontFamilies(): Promise<string[]> {
  */
 export function resolveLegacyFontFamily(legacyName: string): string {
   const stripped = legacyName.replace(/\.(ttf|otf)$/i, "").trim();
-  // Lookup direto por filename
+  // Lookup por filename em todas as variantes locais.
+  const filename = legacyName.replaceAll(String.fromCharCode(92), "/").split("/").pop()?.toLowerCase();
   for (const entry of Object.values(BUNDLE_FONTS)) {
-    if (entry.files.regular && entry.files.regular.endsWith(legacyName)) return entry.cssFamily;
-    if (entry.files.bold && entry.files.bold.endsWith(legacyName)) return entry.cssFamily;
+    if (Object.values(entry.files).some((path) => path?.split("/").pop()?.toLowerCase() === filename)) {
+      return entry.cssFamily;
+    }
   }
   const googleFamily = resolveGoogleFontFilename(legacyName);
   if (googleFamily) return googleFamily;
@@ -251,6 +323,7 @@ export function resolveLegacyFontFamily(legacyName: string): string {
   if (/newrotic/i.test(stripped)) return BUNDLE_FONTS.newrotic.cssFamily;
   if (/komikax/i.test(stripped)) return BUNDLE_FONTS.komikax.cssFamily;
   if (/cc\s*dave|gibbons/i.test(stripped)) return BUNDLE_FONTS.ccDaveGibbons.cssFamily;
+  if (/cc[\s-]*wild[\s-]*words/i.test(stripped)) return BUNDLE_FONTS.ccWildWords.cssFamily;
   // Nome desconhecido = retorna como veio (browser tentará system match)
   return stripped;
 }

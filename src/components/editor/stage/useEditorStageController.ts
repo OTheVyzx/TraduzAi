@@ -22,7 +22,7 @@ import {
 } from "../../../lib/stores/editorStore";
 import { useAppStore, type PageData, type TextEntry } from "../../../lib/stores/appStore";
 import { LayeredBitmapCanvas } from "../../../editor-shared/bitmap/layeredBitmapCanvas";
-import { createBitmapStrokePreviewOnCanvas, encodeDataUrl } from "./bitmapStrokePreview";
+import { createBitmapStrokeOperationPatch, createBitmapStrokePreviewOnCanvas, createMaskedImageOperationPatch, encodeDataUrl, type StudioBitmapOperationCommit } from "./bitmapStrokePreview";
 import {
   applyRecoveryStrokeToCanvas,
   createRecoveryStrokePreviewPatch,
@@ -43,9 +43,34 @@ import type { EditorMode } from "../editorMode";
 const EMPTY_PAGES: PageData[] = [];
 const WHEEL_ZOOM_SPEED = 0.0012;
 
+async function loadDecodedImage(path: string) {
+  const loaded = await loadImageSource(path, "image/png", Date.now());
+  const image = new Image();
+  image.decoding = "async";
+  image.src = loaded.src;
+  try {
+    await image.decode();
+    return { image, revoke: loaded.revoke };
+  } catch (error) {
+    loaded.revoke?.();
+    throw error;
+  }
+}
+
+function imageToPngDataUrl(image: CanvasImageSource, width: number, height: number) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.drawImage(image, 0, 0, width, height);
+  return canvas.toDataURL("image/png");
+}
+
 type PaintPreviewOverlayHandle = {
   begin: (point: [number, number]) => void;
   append: (point: [number, number]) => void;
+  flush: () => void;
   clear: () => void;
 };
 
@@ -134,10 +159,12 @@ export function useEditorStageController({
   mode = "traduzai",
   selectionTargetNodeId = null,
   bitmapCompositeSource = null,
+  onStudioBitmapOperation,
 }: {
   mode?: EditorMode;
   selectionTargetNodeId?: string | null;
   bitmapCompositeSource?: string | null;
+  onStudioBitmapOperation?: (operation: StudioBitmapOperationCommit) => Promise<void>;
 } = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const projectPages = useAppStore((state) => state.project?.paginas ?? EMPTY_PAGES);
@@ -187,7 +214,6 @@ export function useEditorStageController({
   const [isPaintStrokeActive, setIsPaintStrokeActive] = useState(false);
   const [recoveryPreviewPatches, setRecoveryPreviewPatches] = useState<RecoveryStrokePreviewPatch[]>([]);
   const [reinpaintPreviewPatches, setReinpaintPreviewPatches] = useState<RecoveryStrokePreviewPatch[]>([]);
-  const [cursorPoint, setCursorPoint] = useState<{ x: number; y: number } | null>(null);
   const [cursorViewportPoint, setCursorViewportPoint] = useState<{ x: number; y: number } | null>(null);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   // Ref para garantir acesso ao finishPaintStroke mais recente sem criar stale closure
@@ -195,6 +221,8 @@ export function useEditorStageController({
   const activeRecoveryPreviewIdsRef = useRef<Set<string>>(new Set());
   const paintStrokeRef = useRef<[number, number][]>([]);
   const paintPreviewOverlayRef = useRef<PaintPreviewOverlayHandle | null>(null);
+  const cursorViewportPendingRef = useRef<{ x: number; y: number } | null | undefined>(undefined);
+  const cursorViewportFrameRef = useRef<number | null>(null);
   const paintPreviewClearTimeoutRef = useRef<number | null>(null);
   const paintPreviewPendingCommitRef = useRef(false);
   const bitmapWorkingCanvasRef = useRef<LayeredBitmapCanvas | null>(null);
@@ -210,6 +238,28 @@ export function useEditorStageController({
     startX: number;
     startSize: number;
   } | null>(null);
+
+  const queueCursorViewportPoint = (point: { x: number; y: number } | null) => {
+    cursorViewportPendingRef.current = point;
+    if (cursorViewportFrameRef.current !== null) return;
+    cursorViewportFrameRef.current = requestAnimationFrame(() => {
+      cursorViewportFrameRef.current = null;
+      if (cursorViewportPendingRef.current === undefined) return;
+      setCursorViewportPoint(cursorViewportPendingRef.current);
+      cursorViewportPendingRef.current = undefined;
+    });
+  };
+
+  const clearCursorViewportPoint = () => {
+    if (cursorViewportFrameRef.current !== null) cancelAnimationFrame(cursorViewportFrameRef.current);
+    cursorViewportFrameRef.current = null;
+    cursorViewportPendingRef.current = undefined;
+    setCursorViewportPoint(null);
+  };
+
+  useEffect(() => () => {
+    if (cursorViewportFrameRef.current !== null) cancelAnimationFrame(cursorViewportFrameRef.current);
+  }, []);
 
   useEffect(() => {
     const node = containerRef.current;
@@ -537,8 +587,7 @@ export function useEditorStageController({
   // <canvas> do Konva Stage dentro do container e usa seu rect.
   useEffect(() => {
     if (toolMode !== "brush" && toolMode !== "repairBrush" && toolMode !== "reinpaintBrush" && toolMode !== "eraser") {
-      setCursorPoint(null);
-      setCursorViewportPoint(null);
+      clearCursorViewportPoint();
       return;
     }
     const node = containerRef.current;
@@ -555,38 +604,17 @@ export function useEditorStageController({
         viewportY > containerRect.height
       ) {
         if (paintStrokeRef.current.length === 0) {
-          setCursorPoint(null);
-          setCursorViewportPoint(null);
+          clearCursorViewportPoint();
         }
         return;
       }
-      setCursorViewportPoint({ x: viewportX, y: viewportY });
+      queueCursorViewportPoint({ x: viewportX, y: viewportY });
 
-      const stageCanvas = node.querySelector("canvas");
-      if (!stageCanvas || !baseImage.size.width || !baseImage.size.height) return;
-      const rect = stageCanvas.getBoundingClientRect();
-      if (
-        event.clientX < rect.left ||
-        event.clientX > rect.left + rect.width ||
-        event.clientY < rect.top ||
-        event.clientY > rect.top + rect.height
-      ) {
-        if (paintStrokeRef.current.length === 0) setCursorPoint(null);
-        return;
-      }
-      const point = pointFromStageClientRect({
-        clientX: event.clientX,
-        clientY: event.clientY,
-        rect,
-        imageWidth: baseImage.size.width,
-        imageHeight: baseImage.size.height,
-      });
-      if (point) setCursorPoint(point);
     };
 
     window.addEventListener("mousemove", onMove);
     return () => window.removeEventListener("mousemove", onMove);
-  }, [toolMode, baseImage.size.width, baseImage.size.height, isPaintStrokeActive]);
+  }, [toolMode, isPaintStrokeActive]);
 
   const stageScale = useMemo(() => {
     if (!baseImage.size.width || !baseImage.size.height || !containerSize.width || !containerSize.height) return 1;
@@ -697,7 +725,7 @@ export function useEditorStageController({
   const handleStageMouseMove = (event: Konva.KonvaEventObject<MouseEvent>) => {
     const containerRect = containerRef.current?.getBoundingClientRect();
     if (containerRect && (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser")) {
-      setCursorViewportPoint({
+      queueCursorViewportPoint({
         x: event.evt.clientX - containerRect.left,
         y: event.evt.clientY - containerRect.top,
       });
@@ -725,30 +753,22 @@ export function useEditorStageController({
         setMaskInProgress({ points: [...maskInProgress.points, [point.x, point.y]] });
       }
     }
-    // Atualizar posição do cursor circular em modos de pintura
-    if (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser") {
-      setCursorPoint(point);
-    }
   };
 
   const handleStageMouseEnter = (event: Konva.KonvaEventObject<MouseEvent>) => {
     const containerRect = containerRef.current?.getBoundingClientRect();
     if (containerRect && (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser")) {
-      setCursorViewportPoint({
+      queueCursorViewportPoint({
         x: event.evt.clientX - containerRect.left,
         y: event.evt.clientY - containerRect.top,
       });
-    }
-    const point = pointFromStageEvent(event);
-    if (point && (toolMode === "brush" || toolMode === "repairBrush" || toolMode === "reinpaintBrush" || toolMode === "eraser")) {
-      setCursorPoint(point);
     }
   };
 
   const handleStageMouseLeave = () => {
     // Manter cursor visível enquanto está pintando (stroke ativo).
     // O ponteiro visual continua via cursorViewportPoint mesmo fora da pagina.
-    if (paintStrokeRef.current.length === 0) setCursorPoint(null);
+    if (paintStrokeRef.current.length === 0) clearCursorViewportPoint();
   };
 
   const finishBlockDraft = async () => {
@@ -772,6 +792,7 @@ export function useEditorStageController({
     const strokeBrushHardness = brushHardness;
     paintStrokeRef.current = [];
     setIsPaintStrokeActive(false);
+    paintPreviewOverlayRef.current?.flush();
     schedulePaintPreviewClear();
     if (!baseImage.size.width || !baseImage.size.height || stroke.length === 0) return;
     const basicDirtyBBox = strokeDirtyBbox({
@@ -832,8 +853,13 @@ export function useEditorStageController({
         ) ?? undefined;
       }
 
+      const recoveryPatch = originalImage.image
+        ? await createRecoveryStrokePreviewPatch(originalImage.image, stroke, strokeBrushSize, dirty_bbox, clipPolygon)
+        : null;
+      let recoveryCommandId: string | null = null;
       if (recoveryBeforeDataUrl && recoveryPngData) {
         const commandId = `bitmap-${crypto.randomUUID()}`;
+        recoveryCommandId = commandId;
         bitmapCache.set(commandId, {
           pageKey: currentPageKey,
           commandId,
@@ -874,6 +900,22 @@ export function useEditorStageController({
             pngData: recoveryPngData,
             optimisticPath: recoveryPngData,
           });
+          if (recoveryPatch?.dataUrl && recoveryBeforeDataUrl && recoveryCommandId && onStudioBitmapOperation) {
+            try {
+              await onStudioBitmapOperation({
+                commandId: recoveryCommandId,
+                pageIndex: context.pageIndex,
+                layerKey: "recovery",
+                name: "Recuperacao",
+                pngData: recoveryPatch.dataUrl,
+                baselineDataUrl: recoveryBeforeDataUrl,
+                bbox: [recoveryPatch.x, recoveryPatch.y, recoveryPatch.x + recoveryPatch.width, recoveryPatch.y + recoveryPatch.height],
+                blendMode: "normal",
+              });
+            } catch (error) {
+              console.error("Failed to create recovery PNG layer:", error);
+            }
+          }
           activeRecoveryPreviewIdsRef.current.delete(previewId);
           window.setTimeout(() => {
             setRecoveryPreviewPatches((patches) => patches.filter((patch) => patch.id !== previewId));
@@ -906,7 +948,61 @@ export function useEditorStageController({
 
       const persistHealingStroke = async (context: { pageKey: string; pageIndex: number }) => {
         try {
+          const editorBefore = useEditorStore.getState();
+          const beforePage = editorBefore.currentPageIndex === context.pageIndex
+            ? editorBefore.currentPage
+            : useAppStore.getState().project?.paginas[context.pageIndex];
+          const previousInpaintPath = beforePage?.image_layers?.inpaint?.path ?? null;
+          const historyIndexBefore = useEditorStore.getState().historyByPageKey[context.pageKey]?.index ?? 0;
+          let baselineDataUrl: string | null = null;
+          if (previousInpaintPath) {
+            const loaded = await loadDecodedImage(previousInpaintPath);
+            baselineDataUrl = imageToPngDataUrl(loaded.image, baseImage.size.width, baseImage.size.height);
+            loaded.revoke?.();
+          }
           await healPaintedRegionPersist({ pageKey: context.pageKey, pageIndex: context.pageIndex, bbox: dirty_bbox, maskPngData });
+          if (onStudioBitmapOperation) {
+            const editorState = useEditorStore.getState();
+            const sceneState = useAppStore.getState();
+            const afterPage = editorState.currentPageIndex === context.pageIndex
+              ? editorState.currentPage
+              : sceneState.project?.paginas[context.pageIndex];
+            const afterPath = afterPage?.image_layers?.inpaint?.path;
+            const stack = editorState.historyByPageKey[context.pageKey];
+            const command = stack && stack.index > historyIndexBefore
+              ? stack.commands[stack.index - 1]
+              : null;
+            if (afterPath && command?.type === "bitmap-stroke" && command.layerKey === "inpaint") {
+              const [result, mask] = await Promise.all([
+                loadDecodedImage(afterPath),
+                loadDecodedImage(maskPngData),
+              ]);
+              try {
+                const patch = createMaskedImageOperationPatch({
+                  image: result.image,
+                  maskImage: mask.image,
+                  width: baseImage.size.width,
+                  height: baseImage.size.height,
+                  bbox: dirty_bbox,
+                });
+                if (patch) {
+                  await onStudioBitmapOperation({
+                    commandId: command.commandId,
+                    pageIndex: context.pageIndex,
+                    layerKey: "inpaint",
+                    name: "Limpeza",
+                    pngData: patch.pngData,
+                    baselineDataUrl,
+                    bbox: patch.bbox,
+                    blendMode: "normal",
+                  });
+                }
+              } finally {
+                result.revoke?.();
+                mask.revoke?.();
+              }
+            }
+          }
           setReinpaintPreviewPatches([]);
         } catch (error) {
           setReinpaintPreviewPatches([]);
@@ -935,8 +1031,25 @@ export function useEditorStageController({
       clipMaskImage: clipMaskCanvas ?? undefined,
     });
 
+    const operationPatch = layerKey === "brush" && preview
+      ? createBitmapStrokeOperationPatch({
+          width: baseImage.size.width,
+          height: baseImage.size.height,
+          stroke,
+          brushSize: strokeBrushSize,
+          color: strokeBrushColor,
+          opacity: strokeBrushOpacity,
+          hardness: strokeBrushHardness,
+          erase,
+          bbox: dirty_bbox,
+          clipPolygon: clipMaskCanvas ? undefined : clipPolygon,
+          clipMaskImage: clipMaskCanvas ?? undefined,
+        })
+      : null;
+    let bitmapCommandId: string | null = null;
     if (preview) {
       const commandId = `bitmap-${crypto.randomUUID()}`;
+      bitmapCommandId = commandId;
       bitmapCache.set(commandId, {
         pageKey: currentPageKey,
         commandId,
@@ -967,6 +1080,18 @@ export function useEditorStageController({
         hardness: strokeBrushHardness,
         optimisticPath: preview?.afterDataUrl,
       });
+      if (operationPatch && preview && bitmapCommandId && onStudioBitmapOperation && layerKey === "brush") {
+        await onStudioBitmapOperation({
+          commandId: bitmapCommandId,
+          pageIndex: context.pageIndex,
+          layerKey: "brush",
+          name: erase ? "Borracha" : "Pincelada",
+          pngData: operationPatch.pngData,
+          baselineDataUrl: preview.beforeDataUrl,
+          bbox: operationPatch.bbox,
+          blendMode: erase ? "destination-out" : "normal",
+        });
+      }
     };
 
     void enqueueBitmapPersist(layerKey, persistBitmapStroke).catch((error) => {
@@ -1142,7 +1267,6 @@ export function useEditorStageController({
     setPaintPreviewOverlay: (handle: PaintPreviewOverlayHandle | null) => {
       paintPreviewOverlayRef.current = handle;
     },
-    cursorPoint,
     cursorViewportPoint,
     // Fase 8 — Lasso
     maskInProgress,

@@ -1,5 +1,5 @@
 import { BUNDLE_FONTS, ensureEditorFontLoaded, registerImportedFont, registerRemoteFont, type FontEntry } from "./fonts";
-import { GOOGLE_FONTS_CATALOG, type GoogleFontCatalogEntry } from "./googleFontsCatalog";
+import { GOOGLE_FONTS_CATALOG, resolveGoogleFontFilename, type GoogleFontCatalogEntry } from "./googleFontsCatalog";
 import type { CacheGoogleFontInput, GoogleFontSearchResult, SystemFontInfo } from "./tauri";
 
 export type EditorFontCatalogSource = "bundle" | "google" | "system";
@@ -186,6 +186,16 @@ export function searchEditorFontGroups(query: string): EditorFontGroup[] {
 export function findEditorFontOption(value: string): EditorFontOption | null {
   const catalogOption = buildEditorFontCatalog().find((option) => option.value === value);
   if (catalogOption) return catalogOption;
+  const localFamily = resolveGoogleFontFilename(value);
+  for (const entry of Object.values(BUNDLE_FONTS)) {
+    const matchesVariant = Object.values(entry.files).some(
+      (path) => path && filenameFromPath(path).toLowerCase() === value.toLowerCase(),
+    );
+    if (matchesVariant || (localFamily && entry.cssFamily.toLowerCase() === localFamily.toLowerCase())) {
+      const option = bundleFontOption(entry);
+      return option ? { ...option, value } : null;
+    }
+  }
   if (isSystemFontValue(value)) {
     const label = value
       .replace(/^SystemFont__/i, "")

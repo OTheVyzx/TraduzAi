@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import KW_ONLY, dataclass, field, fields, replace
 from hashlib import sha256
 import json
+import os
 import math
 from pathlib import PurePosixPath
 import re
@@ -14,7 +15,7 @@ from typing import Any, ClassVar, Iterable, Literal, Mapping
 import numpy as np
 
 from .coverage import CANONICAL_COVERAGE_STATES
-from .hash_contract import canonical_json_sha256
+from .hash_contract import canonical_json_sha256, sha256_text
 
 try:
     from typesetter.owner_render_quality import OwnerRenderQuality
@@ -123,12 +124,62 @@ def _immutable_array_sha256(value: Any) -> str:
     return digest.hexdigest()
 
 
+class _CompactOwnerMap:
+    """Immutable palette coding of a page's per-pixel owner identities."""
+
+    __slots__ = ("_codes", "_palette", "shape", "dtype")
+
+    def __init__(self, value: np.ndarray) -> None:
+        palette, inverse = np.unique(value, return_inverse=True)
+        if len(palette) <= 256:
+            code_dtype = np.uint8
+        elif len(palette) <= 65536:
+            code_dtype = np.uint16
+        else:
+            code_dtype = np.uint32
+        codes = np.asarray(inverse.reshape(value.shape), dtype=code_dtype)
+        codes.setflags(write=False)
+        palette.setflags(write=False)
+        self._codes = codes
+        self._palette = palette
+        self.shape = value.shape
+        self.dtype = value.dtype
+
+    def __array__(self, dtype=None, copy=None) -> np.ndarray:
+        if copy is False:
+            raise ValueError("owner map expansion requires a copy")
+        expanded = self._palette[self._codes]
+        if dtype is not None:
+            expanded = expanded.astype(dtype, copy=False)
+        expanded.setflags(write=False)
+        return expanded
+
+    def __getitem__(self, key):
+        return self._palette[self._codes[key]]
+
+    def __eq__(self, other):
+        return np.asarray(self) == other
+
+    def __ne__(self, other):
+        return np.asarray(self) != other
+
+    def __deepcopy__(self, memo):
+        return self
+
+
 def _deep_frozen_array_copy(value: Any) -> Any:
     """Copy ndarray evidence onto an immutable bytes-backed buffer."""
 
     if not isinstance(value, np.ndarray):
         copy_value = getattr(value, "copy", None)
         return copy_value() if callable(copy_value) else value
+    if (
+        value.ndim == 2
+        and value.dtype.kind == "U"
+        and str(os.getenv("TRADUZAI_COMPACT_OWNER_MAPS", "")).strip().lower()
+        in {"1", "true", "yes", "on"}
+    ):
+        return _CompactOwnerMap(value)
     array = np.ascontiguousarray(value)
     frozen = np.frombuffer(array.tobytes(order="C"), dtype=array.dtype).reshape(
         array.shape
@@ -292,6 +343,7 @@ class ComponentDisposition:
     policy_bbox_page: BBox | None = None
     policy_evidence_ids: tuple[str, ...] = ()
     policy_reason: str | None = None
+    related_component_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -1309,7 +1361,9 @@ class PageCompositionResult:
                 else (geometry.logical_height, geometry.logical_width)
             )
             if any(
-                tuple(np.asarray(value).shape[:2]) != expected_shape
+                tuple(
+                    value.shape[:2] if hasattr(value, "shape") else np.asarray(value).shape[:2]
+                ) != expected_shape
                 for value in (self.final_rgb, self.cleanup_owner_map, self.glyph_owner_map)
             ):
                 raise ValueError("page surface geometry shape mismatch")
@@ -1890,6 +1944,125 @@ class OwnerGraph:
                         disposition.component_id,
                     )
                 )
+            unknown_related = sorted(set(disposition.related_component_ids) - component_ids)
+            if unknown_related:
+                violations.append(
+                    _violation(
+                        "disposition_related_component_unknown",
+                        "Disposition association references an unknown source component.",
+                        disposition.component_id,
+                        *unknown_related,
+                    )
+                )
+            if disposition.related_component_ids and (
+                disposition.decision != "uncertain"
+                or disposition.policy_id != "coverage_ambiguous_candidate"
+                or not str(disposition.policy_reason or "").strip()
+            ):
+                violations.append(
+                    _violation(
+                        "disposition_related_component_unverified",
+                        "Related components require an uncertain, evidence-backed disposition.",
+                        disposition.component_id,
+                    )
+                )
+            if disposition.related_component_ids:
+                try:
+                    proof = json.loads(disposition.policy_reason or "")
+                    supplied_hash = proof.pop("proof_sha256")
+                    components_by_id = {item.component_id: item for item in self.components}
+                    source = components_by_id[disposition.component_id]
+                    canonical_id = str(proof["canonical_component_id"])
+                    canonical = components_by_id[canonical_id]
+                    owner = next(
+                        (item for item in self.owners if canonical_id in item.component_ids),
+                        None,
+                    )
+                    canonical_disposition = next(
+                        (item for item in self.component_dispositions if item.component_id == canonical_id),
+                        None,
+                    )
+                    source_ids = set(map(str, proof["source_observation_ids"]))
+                    canonical_ids = set(map(str, proof["canonical_observation_ids"]))
+                    proof_observations = [observations_by_id[item] for item in sorted(source_ids | canonical_ids)]
+                    sx1, sy1, sx2, sy2 = source.bbox_page
+                    cx1, cy1, cx2, cy2 = canonical.bbox_page
+                    source_area = (sx2 - sx1) * (sy2 - sy1)
+                    canonical_area = (cx2 - cx1) * (cy2 - cy1)
+                    normalize = lambda value: "".join(ch.casefold() for ch in value if ch.isalnum())
+                    source_text = "".join(
+                        item.text for item in sorted(
+                            (observations_by_id[item] for item in source_ids),
+                            key=lambda item: (item.bbox_page[1], item.bbox_page[0], item.observation_id),
+                        )
+                    )
+                    canonical_text = "".join(
+                        item.text for item in sorted(
+                            (observations_by_id[item] for item in canonical_ids),
+                            key=lambda item: (item.bbox_page[1], item.bbox_page[0], item.observation_id),
+                        )
+                    )
+                    area_ratio = canonical_area / source_area if source_area > 0 else 1.0
+                    area_ratio_limit = proof.get("area_ratio_limit", 0.25)
+                    bbox_allowance = proof.get(
+                        "observation_bbox_allowance_px",
+                        proof.get("source_observation_bbox_allowance_px", 6),
+                    )
+                    proof_policy_valid = (
+                        (area_ratio <= 0.25 and area_ratio_limit == 0.25 and bbox_allowance == 6)
+                        or (0.25 < area_ratio <= 0.35 and area_ratio_limit == 0.35 and bbox_allowance == 1)
+                    )
+                    proof_valid = (
+                        supplied_hash == canonical_json_sha256(proof)
+                        and proof.get("version") == 1
+                        and proof.get("page_id") == self.page_id
+                        and proof.get("page_source_sha256") == self.page_source_sha256
+                        and proof.get("source_component_id") == disposition.component_id
+                        and proof.get("source_bbox_page") == list(source.bbox_page)
+                        and canonical_id in disposition.related_component_ids
+                        and proof.get("canonical_bbox_page") == list(canonical.bbox_page)
+                        and bool(str(proof.get("owner_id") or "").strip())
+                        and (
+                            (owner is not None and canonical_id in owner.component_ids)
+                            or (
+                                owner is None
+                                and canonical_disposition is not None
+                                and canonical_disposition.decision == "uncertain"
+                                and canonical_disposition.reason == "owner_execution_rejected"
+                                and canonical_ids.issubset(set(canonical_disposition.policy_evidence_ids))
+                            )
+                        )
+                        and source_area > canonical_area > 0
+                        and sx1 <= cx1 and sy1 <= cy1 and sx2 >= cx2 and sy2 >= cy2
+                        and proof_policy_valid
+                        and abs(float(proof.get("area_ratio", -1)) - area_ratio) < 1e-9
+                        and source_ids and canonical_ids and source_ids.isdisjoint(canonical_ids)
+                        and set(disposition.policy_evidence_ids) == source_ids | canonical_ids
+                        and set(proof.get("source_observation_ids", ())) == source_ids
+                        and set(proof.get("canonical_observation_ids", ())) == canonical_ids
+                        and all(disposition.component_id in observations_by_id[value].component_ids for value in source_ids)
+                        and all(canonical_id in observations_by_id[value].component_ids for value in canonical_ids)
+                        and all(
+                            item.rejection_reason is None
+                            and cx1 - bbox_allowance <= item.bbox_page[0] <= item.bbox_page[2] <= cx2 + bbox_allowance
+                            and cy1 - bbox_allowance <= item.bbox_page[1] <= item.bbox_page[3] <= cy2 + bbox_allowance
+                            for item in proof_observations
+                        )
+                        and proof.get("normalized_payload_sha256") == sha256_text(normalize(canonical_text))
+                        and normalize(source_text) == normalize(canonical_text)
+                        and (owner is None or normalize(owner.source_payload) == normalize(canonical_text))
+                    )
+                    if not proof_valid:
+                        raise ValueError("overlap proof does not match graph evidence")
+                except (KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError):
+                    violations.append(
+                        _violation(
+                            "disposition_related_component_proof_invalid",
+                            "Related component association lacks reproducible source evidence.",
+                            disposition.component_id,
+                            *disposition.related_component_ids,
+                        )
+                    )
             if disposition.decision not in FINAL_COMPONENT_DECISIONS:
                 violations.append(
                     _violation(
@@ -2501,6 +2674,7 @@ class OwnerGraph:
                     ),
                     "policy_evidence_ids": list(disposition.policy_evidence_ids),
                     "policy_reason": disposition.policy_reason,
+                    "related_component_ids": list(disposition.related_component_ids),
                 }
                 for disposition in sorted(
                     self.component_dispositions,
@@ -2718,6 +2892,9 @@ class OwnerGraph:
                         str(item["policy_reason"])
                         if item.get("policy_reason") is not None
                         else None
+                    ),
+                    related_component_ids=tuple(
+                        str(value) for value in item.get("related_component_ids") or ()
                     ),
                 )
                 for item in data.get("component_dispositions") or ()

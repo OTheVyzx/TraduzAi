@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from hashlib import sha256
 import sys
 from pathlib import Path
@@ -8,9 +9,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from main import _save_project_json
-from project_writer import validate_project_consistency, write_project_json_atomic
+from project_writer import (
+    neutralize_project_compatibility_metadata,
+    validate_project_consistency,
+    write_project_json_atomic,
+)
 from style_v2_fixtures import valid_owner_style_raster_contract
 from ownership.model import OWNER_GRAPH_SCHEMA_VERSION
+from ownership.project import (
+    build_owner_invariant_summary,
+    owner_project_validation_errors,
+)
 
 
 def _project():
@@ -121,6 +130,322 @@ def _verified_owner_project():
             "critical_violation_count": 0,
         },
     }
+
+
+def _two_page_retired_review_project():
+    """A merged review candidate on page 1 and split candidates on page 2."""
+    def component(component_id, page_id, x):
+        return {
+            "component_id": component_id,
+            "page_id": page_id,
+            "bbox_page": [x, 20, x + 20, 40],
+            "polygon_page": [[x, 20], [x + 20, 20], [x + 20, 40], [x, 40]],
+            "detector_sources": ["test_fixture"],
+        }
+
+    def observation(observation_id, page_id, component_id, text):
+        return {
+            "observation_id": observation_id,
+            "page_id": page_id,
+            "component_ids": [component_id],
+            "text": text,
+            "confidence": 0.95,
+            "provider": "test_fixture",
+            "bbox_page": [10, 20, 80, 40],
+            "run_id": f"run-{page_id}",
+            "origin_execution_id": f"execution-{page_id}",
+            "invocation_id": f"invocation-{observation_id}",
+            "attempt_id": f"attempt-{observation_id}",
+            "provider_family": "test_fixture",
+            "page_source_sha256": "a" * 64 if page_id == "page_001" else "b" * 64,
+            "root_input_pixel_sha256": "a" * 64 if page_id == "page_001" else "b" * 64,
+            "input_pixel_sha256": "c" * 64,
+            "payload_sha256": sha256(text.encode("utf-8")).hexdigest(),
+        }
+
+    def retired_disposition(component_id, observation_id, x):
+        return {
+            "component_id": component_id,
+            "decision": "uncertain",
+            "owner_id": None,
+            "reason": "owner_execution_rejected",
+            "policy_id": "coverage_ambiguous_candidate",
+            "policy_bbox_page": [x, 20, x + 20, 40],
+            "policy_evidence_ids": [observation_id],
+            "policy_reason": "source pixels preserved after owner execution rejection",
+        }
+
+    def graph(page_id, components, observations, owners, dispositions):
+        page_sha = "a" * 64 if page_id == "page_001" else "b" * 64
+        return {
+            "schema_version": OWNER_GRAPH_SCHEMA_VERSION,
+            "page_id": page_id,
+            "run_id": f"run-{page_id}",
+            "origin_execution_id": f"execution-{page_id}",
+            "page_source_sha256": page_sha,
+            "verification_status": "verified",
+            "components": components,
+            "observations": observations,
+            "owners": owners,
+            "projections": [],
+            "component_dispositions": dispositions,
+            "violations": [],
+        }
+
+    def review_layer(candidate_id, page_id, component_ids, observation_ids, source, translated):
+        return {
+            "id": candidate_id,
+            "owner_id": None,
+            "candidate_owner_id": candidate_id,
+            "page_id": page_id,
+            "component_ids": component_ids,
+            "observation_ids": observation_ids,
+            "selected_observation_ids": observation_ids,
+            "semantic_role": "dialogue_body",
+            "route_action": "review_required",
+            "action_mask_ref": None,
+            "layout_region_ids": [],
+            "disposition": "review",
+            "state": "review_required",
+            "execution_tile_id": None,
+            "owner_execution_rejection_reason": "unverified_full_page_balloon_interior",
+            "owner_graph_run_id": f"run-{page_id}",
+            "owner_graph_origin_execution_id": f"execution-{page_id}",
+            "owner_graph_page_source_sha256": "a" * 64 if page_id == "page_001" else "b" * 64,
+            "execution_rejected": True,
+            "derived_qa_status": "review_required",
+            "write_authority": "revoked",
+            "source_pixels_preserved": True,
+            "committed": False,
+            "blocking": True,
+            "qa_action": "BLOCK",
+            "visible": False,
+            "render_policy": "review_required",
+            "text": source,
+            "original": source,
+            "source_payload": source,
+            "translated": translated,
+            "translated_payload": translated,
+            "qa_flags": ["owner_render_geometry_review"],
+        }
+
+    page1_id = "page_001"
+    p1_keep = "component_page_001_kept"
+    p1_a, p1_b = "component_page_001_split_a", "component_page_001_split_b"
+    o1_keep = "observation_page_001_kept"
+    o1_a, o1_b = "observation_page_001_split_a", "observation_page_001_split_b"
+    kept_owner_id = "owner_page_001_kept"
+    graph1 = graph(
+        page1_id,
+        [component(p1_keep, page1_id, 10), component(p1_a, page1_id, 40), component(p1_b, page1_id, 70)],
+        [observation(o1_keep, page1_id, p1_keep, "HELLO"),
+         observation(o1_a, page1_id, p1_a, "LEFT HALF"),
+         observation(o1_b, page1_id, p1_b, "RIGHT HALF")],
+        [{
+            "owner_id": kept_owner_id, "page_id": page1_id,
+            "component_ids": [p1_keep], "observation_ids": [o1_keep],
+            "selected_observation_ids": [o1_keep], "semantic_role": "dialogue_body",
+            "source_payload": "HELLO", "translated_payload": "OLÁ",
+            "disposition": "owned", "state": "owned",
+            "route_action": "translate_inpaint_render", "execution_tile_id": None,
+            "action_mask_ref": None,
+        }],
+        [{"component_id": p1_keep, "decision": "owned", "owner_id": kept_owner_id,
+          "reason": "fixture"}, retired_disposition(p1_a, o1_a, 40),
+         retired_disposition(p1_b, o1_b, 70)],
+    )
+    page1_keep_layer = {
+        "id": kept_owner_id, "owner_id": kept_owner_id, "page_id": page1_id,
+        "component_ids": [p1_keep], "observation_ids": [o1_keep],
+        "semantic_role": "dialogue_body", "route_action": "translate_inpaint_render",
+        "action_mask_ref": None, "layout_region_ids": [], "qa_flags": [],
+    }
+    page1_review = review_layer(
+        "retired_merge_candidate_page_001", page1_id, [p1_a, p1_b], [o1_a, o1_b],
+        "LEFT HALF RIGHT HALF", "METADE ESQUERDA METADE DIREITA",
+    )
+
+    page2_id = "page_002"
+    p2_a, p2_b = "component_page_002_split_a", "component_page_002_split_b"
+    o2_a, o2_b = "observation_page_002_split_a", "observation_page_002_split_b"
+    graph2 = graph(
+        page2_id,
+        [component(p2_a, page2_id, 10), component(p2_b, page2_id, 40)],
+        [observation(o2_a, page2_id, p2_a, "FIRST LINE"),
+         observation(o2_b, page2_id, p2_b, "SECOND LINE")],
+        [],
+        [retired_disposition(p2_a, o2_a, 10), retired_disposition(p2_b, o2_b, 40)],
+    )
+    page2_reviews = [
+        review_layer("retired_split_candidate_page_002_a", page2_id, [p2_a], [o2_a], "FIRST LINE", "PRIMEIRA LINHA"),
+        review_layer("retired_split_candidate_page_002_b", page2_id, [p2_b], [o2_b], "SECOND LINE", "SEGUNDA LINHA"),
+    ]
+    pages = [
+        {"numero": 1, "text_layers": [page1_keep_layer, page1_review],
+         "textos": deepcopy([page1_keep_layer, page1_review])},
+        {"numero": 2, "text_layers": deepcopy(page2_reviews),
+         "textos": deepcopy(page2_reviews)},
+    ]
+    graphs = [graph1, graph2]
+    return {
+        "paginas": pages,
+        "estatisticas": {"total_paginas": 2},
+        "qa": {"summary": {"total": 0}},
+        "owner_graph_schema_version": OWNER_GRAPH_SCHEMA_VERSION,
+        "owner_graph_status": "verified",
+        "page_owner_graphs": graphs,
+        "owner_invariant_summary": build_owner_invariant_summary(graphs),
+    }
+
+
+def test_verified_project_persists_split_and_merged_retired_reviews():
+    project = _two_page_retired_review_project()
+
+    assert owner_project_validation_errors(project) == []
+    canonical_owner_ids = {
+        owner["owner_id"]
+        for graph in project["page_owner_graphs"]
+        for owner in graph["owners"]
+    }
+    review_layers = [
+        layer
+        for page in project["paginas"]
+        for layer in page["text_layers"]
+        if layer.get("candidate_owner_id")
+    ]
+    assert len(review_layers) == 3
+    assert len(canonical_owner_ids) == 1
+    assert all(layer["owner_id"] is None for layer in review_layers)
+    assert all(layer["candidate_owner_id"] not in canonical_owner_ids for layer in review_layers)
+    assert review_layers[0]["source_payload"] == "LEFT HALF RIGHT HALF"
+    assert review_layers[0]["translated_payload"] == "METADE ESQUERDA METADE DIREITA"
+    assert {layer["source_payload"] for layer in review_layers[1:]} == {
+        "FIRST LINE",
+        "SECOND LINE",
+    }
+    assert {layer["translated_payload"] for layer in review_layers[1:]} == {
+        "PRIMEIRA LINHA",
+        "SEGUNDA LINHA",
+    }
+
+
+def test_verified_project_writer_neutralization_preserves_review_candidate_contract():
+    project = _two_page_retired_review_project()
+    expected = {
+        layer["candidate_owner_id"]: (
+            layer["route_action"],
+            layer["render_policy"],
+            layer["text"],
+            layer["source_payload"],
+        )
+        for page in project["paginas"]
+        for layer in page["text_layers"]
+        if layer.get("candidate_owner_id")
+    }
+
+    neutralize_project_compatibility_metadata(project)
+
+    for page in project["paginas"]:
+        for alias in ("text_layers", "textos"):
+            for layer in page[alias]:
+                candidate_id = layer.get("candidate_owner_id")
+                if not candidate_id:
+                    continue
+                self_contract = (
+                    layer["route_action"],
+                    layer["render_policy"],
+                    layer["text"],
+                    layer["source_payload"],
+                )
+                assert self_contract == expected[candidate_id]
+    assert owner_project_validation_errors(project) == []
+
+
+def test_verified_project_rejects_unknown_owner_even_with_review_candidate_id():
+    project = _two_page_retired_review_project()
+    for page in project["paginas"]:
+        for alias in ("text_layers", "textos"):
+            for layer in page[alias]:
+                if layer.get("candidate_owner_id"):
+                    layer["owner_id"] = "owner_not_in_graph"
+
+    errors = owner_project_validation_errors(project)
+
+    assert any("unknown owner_id" in error for error in errors)
+
+
+def test_verified_project_rejects_stale_review_candidate_snapshot_binding():
+    project = _two_page_retired_review_project()
+    for page in project["paginas"]:
+        for alias in ("text_layers", "textos"):
+            for layer in page[alias]:
+                if layer.get("candidate_owner_id"):
+                    layer["owner_graph_page_source_sha256"] = "f" * 64
+
+    errors = owner_project_validation_errors(project)
+
+    assert any("stale owner_graph_page_source_sha256" in error for error in errors)
+
+
+def test_verified_project_rejects_review_candidate_with_write_authority():
+    project = _two_page_retired_review_project()
+    for page in project["paginas"]:
+        for alias in ("text_layers", "textos"):
+            for layer in page[alias]:
+                if layer.get("candidate_owner_id"):
+                    layer["write_authority"] = "granted"
+
+    errors = owner_project_validation_errors(project)
+
+    assert any("unsafe write_authority" in error for error in errors)
+
+
+def test_verified_project_rejects_review_candidate_from_another_page():
+    project = _two_page_retired_review_project()
+    for alias in ("text_layers", "textos"):
+        layer = project["paginas"][0][alias][1]
+        layer["component_ids"] = ["component_page_002_split_a"]
+        layer["observation_ids"] = ["observation_page_002_split_a"]
+        layer["selected_observation_ids"] = ["observation_page_002_split_a"]
+
+    errors = owner_project_validation_errors(project)
+
+    assert any("unknown components" in error for error in errors)
+    assert any("unknown observations" in error for error in errors)
+
+
+def test_verified_project_persists_translation_rejection_attempt_evidence():
+    project = _two_page_retired_review_project()
+    graph = project["page_owner_graphs"][1]
+    layer_id = "retired_split_candidate_page_002_a"
+    layer_component = "component_page_002_split_a"
+    attempt_id = "translation-attempt:0123456789abcdef01234567"
+    attempt_sha256 = "d" * 64
+    disposition = next(
+        item
+        for item in graph["component_dispositions"]
+        if item["component_id"] == layer_component
+    )
+    disposition.update(
+        {
+            "reason": "owner_translation_rejected",
+            "policy_evidence_ids": [attempt_id],
+            "policy_reason": "translation validation exhausted; source pixels preserved for review",
+        }
+    )
+    for alias in ("text_layers", "textos"):
+        layer = next(
+            item
+            for item in project["paginas"][1][alias]
+            if item["candidate_owner_id"] == layer_id
+        )
+        layer["translation_attempt_ids"] = [attempt_id]
+        layer["translation_attempt_sha256s"] = [attempt_sha256]
+    project["owner_invariant_summary"] = build_owner_invariant_summary(
+        project["page_owner_graphs"]
+    )
+
+    assert owner_project_validation_errors(project) == []
 
 
 def test_atomic_write_creates_project_json(tmp_path):

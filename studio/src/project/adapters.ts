@@ -153,9 +153,14 @@ function sceneTextName(layer: StudioTextLayer, index: number) {
 function deriveSceneNodes(
   imageLayers: Partial<Record<ImageLayerKey, StudioImageLayer>>,
   textLayers: StudioTextLayer[],
+  includeEmptyCategoryLayers = false,
 ): StudioSceneNode[] {
-  const imageNodes = IMAGE_LAYER_KEYS.map((key, index) => ({ key, index, layer: imageLayers[key] }))
-    .filter((entry): entry is { key: ImageLayerKey; index: number; layer: StudioImageLayer } => Boolean(entry.layer?.path))
+  const imageNodes = IMAGE_LAYER_KEYS
+    .map((key, index) => ({ key, index, layer: imageLayers[key] ?? normalizeImageLayer(key, null) }))
+    .filter((entry) => Boolean(entry.layer.path) || (
+      includeEmptyCategoryLayers
+      && (entry.key === "inpaint" || entry.key === "brush" || entry.key === "recovery")
+    ))
     .sort((left, right) => {
       const leftOrder = left.layer.order ?? left.index;
       const rightOrder = right.layer.order ?? right.index;
@@ -242,17 +247,129 @@ function sameProjectionSource(left: StudioSceneNode, right: StudioSceneNode) {
   return left.id === right.id;
 }
 
+const AUTO_LAYER_GROUPS = [
+  { category: "cleanup", name: "Limpeza", matches: (node: StudioSceneNode) => node.image_layer_key === "inpaint" },
+  { category: "painting", name: "Pintura", matches: (node: StudioSceneNode) => node.image_layer_key === "brush" },
+  { category: "recovery", name: "Recuperação", matches: (node: StudioSceneNode) => node.image_layer_key === "recovery" },
+  { category: "text", name: "Texto", matches: (node: StudioSceneNode) => node.text_layer_id !== undefined },
+] as const;
+
+function groupProjectedSceneNodes(nodes: StudioSceneNode[], initialRoots: string[]) {
+  const nextNodes = [...nodes];
+  const rootIds = [...initialRoots];
+  const byId = new Map(nextNodes.map((node) => [node.id, node]));
+
+  for (const definition of AUTO_LAYER_GROUPS) {
+    const existingGroup = nextNodes.find(
+      (node) => node.kind === "group" && node.metadata.auto_category_group === definition.category,
+    );
+    const candidateIds = rootIds.filter((id) => {
+      const node = byId.get(id);
+      return Boolean(
+        node
+        && node.parent_id === null
+        && definition.matches(node),
+      );
+    });
+    if (candidateIds.length === 0 && !existingGroup) continue;
+
+    const baseGroupId = `group:auto:${definition.category}`;
+    let groupId = existingGroup?.id ?? baseGroupId;
+    let collisionSuffix = 2;
+    while (!existingGroup && byId.has(groupId)) {
+      groupId = `${baseGroupId}:${collisionSuffix}`;
+      collisionSuffix += 1;
+    }
+    const firstCandidateIndex = candidateIds.length > 0
+      ? Math.min(...candidateIds.map((id) => rootIds.indexOf(id)))
+      : rootIds.length;
+    const existingGroupIndex = rootIds.indexOf(groupId);
+    const insertionIndex = existingGroupIndex >= 0 ? existingGroupIndex : firstCandidateIndex;
+    const childrenAlreadyInGroup = nextNodes
+      .filter((node) => node.parent_id === groupId)
+      .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
+    const nextChildren = candidateIds
+      .map((id) => byId.get(id)!)
+      .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id));
+    const childOrder = new Map<string, number>();
+    [...childrenAlreadyInGroup, ...nextChildren].forEach((node, index) => childOrder.set(node.id, index));
+
+    for (const node of nextNodes) {
+      if (candidateIds.includes(node.id)) {
+        const index = childOrder.get(node.id) ?? 0;
+        const updated = {
+          ...node,
+          parent_id: groupId,
+          order: index,
+        };
+        byId.set(node.id, updated);
+        nextNodes[nextNodes.findIndex((item) => item.id === node.id)] = updated;
+      } else if (node.parent_id === groupId && childOrder.has(node.id)) {
+        const updated = { ...node, order: childOrder.get(node.id)! };
+        byId.set(node.id, updated);
+        nextNodes[nextNodes.findIndex((item) => item.id === node.id)] = updated;
+      }
+    }
+
+    if (!existingGroup) {
+      const group: StudioSceneNode = {
+        id: groupId,
+        kind: "group",
+        name: definition.name,
+        visible: true,
+        locked: false,
+        opacity: 1,
+        blend_mode: "normal",
+        parent_id: null,
+        order: insertionIndex,
+        mask_ids: [],
+        metadata: { auto_category_group: definition.category, scene_owned: true },
+      };
+      nextNodes.push(group);
+      byId.set(group.id, group);
+    }
+
+    const candidateSet = new Set(candidateIds);
+    const nextRoots = rootIds.filter((id) => id !== groupId && !candidateSet.has(id));
+    nextRoots.splice(Math.min(insertionIndex, nextRoots.length), 0, groupId);
+    rootIds.splice(0, rootIds.length, ...nextRoots);
+  }
+
+  rootIds.forEach((id, order) => {
+    const node = byId.get(id);
+    if (!node) return;
+    const updated = { ...node, order };
+    byId.set(id, updated);
+    nextNodes[nextNodes.findIndex((item) => item.id === id)] = updated;
+  });
+  return { nodes: nextNodes, roots: rootIds };
+}
+
 function normalizeStudioScene(
   value: unknown,
   imageLayers: Partial<Record<ImageLayerKey, StudioImageLayer>>,
   textLayers: StudioTextLayer[],
 ): StudioScene {
-  const projectedNodes = deriveSceneNodes(imageLayers, textLayers);
+  const rawDeletedIds = isRecord(value) && isRecord(value.metadata)
+    ? value.metadata.deleted_node_ids
+    : undefined;
+  const deletedNodeIds = new Set(Array.isArray(rawDeletedIds)
+    ? rawDeletedIds.filter((id): id is string => typeof id === "string")
+    : []);
+  const projectedNodes = deriveSceneNodes(imageLayers, textLayers, !isRecord(value)).filter((node) => {
+    if (deletedNodeIds.has(node.id)) return false;
+    if (!node.image_layer_key || !isRecord(value) || !Array.isArray(value.nodes)) return true;
+    return !value.nodes.some((candidate) => {
+      if (!isRecord(candidate) || candidate.kind !== "group" || !isRecord(candidate.metadata)) return false;
+      return candidate.metadata.raster_operations_key === node.image_layer_key;
+    });
+  });
   if (!isRecord(value)) {
+    const grouped = groupProjectedSceneNodes(projectedNodes, projectedNodes.map((node) => node.id));
     return {
       version: STUDIO_SCENE_VERSION,
-      roots: projectedNodes.map((node) => node.id),
-      nodes: projectedNodes,
+      roots: grouped.roots,
+      nodes: grouped.nodes,
       metadata: { projection_source: "traduzai_v2" },
     };
   }
@@ -311,11 +428,12 @@ function normalizeStudioScene(
     if (node.parent_id === null && !roots.includes(node.id)) roots.push(node.id);
   }
 
+  const grouped = groupProjectedSceneNodes(nodes, roots);
   return {
     ...value,
     version: STUDIO_SCENE_VERSION,
-    roots,
-    nodes,
+    roots: grouped.roots,
+    nodes: grouped.nodes,
     metadata: isRecord(value.metadata) ? { ...value.metadata } : undefined,
   };
 }

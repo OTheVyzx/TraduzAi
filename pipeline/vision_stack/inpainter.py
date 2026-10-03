@@ -69,10 +69,23 @@ class Inpainter:
         self._load_model(model, model_path)
 
     def _resolve_device(self, device: str) -> torch.device:
+        require_gpu = str(os.getenv("TRADUZAI_REQUIRE_GPU_INPAINT", "")).strip().lower() in {
+            "1", "true", "yes", "on",
+        }
         if device == "cuda" and torch.cuda.is_available():
-            vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-            logger.info(f"Inpainter: GPU com {vram_gb:.1f}GB VRAM")
-            return torch.device("cuda")
+            try:
+                if torch.cuda.device_count() < 1:
+                    raise AssertionError("CUDA device unavailable after initialization")
+                vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+            except (AssertionError, RuntimeError) as exc:
+                if require_gpu:
+                    raise RuntimeError("GPU inpaint required but CUDA initialization failed") from exc
+                logger.warning("Inpainter: CUDA indisponivel apos inicializacao; usando CPU: %s", exc)
+            else:
+                logger.info(f"Inpainter: GPU com {vram_gb:.1f}GB VRAM")
+                return torch.device("cuda")
+        if require_gpu:
+            raise RuntimeError("GPU inpaint required but CUDA is unavailable or not requested")
         return torch.device("cpu")
 
     def _load_model(self, model_name: str, model_path: Optional[str] = None):

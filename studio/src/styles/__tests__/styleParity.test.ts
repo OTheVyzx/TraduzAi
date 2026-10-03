@@ -140,4 +140,43 @@ describe("paridade do motor de estilos", () => {
     expect(layer?.effects?.dropShadow).toHaveLength(1);
     expect(layer?.effects?.outerGlow?.size?.value).toBe(8);
   });
+
+  it("keeps a smooth shadow offset without a displaced solid text copy", () => {
+    const textConfig = {
+      x: 10,
+      y: 20,
+      width: 160,
+      height: 80,
+      text: "SOMBRA",
+      align: "center" as const,
+      fontSize: 36,
+      fontFamily: "Comic Neue",
+      fontStyle: "bold",
+      lineHeight: 1.25,
+    };
+    const shadowStyle = {
+      ...professionalStyle,
+      sombra: true,
+      sombra_cor: "#000000",
+      sombra_offset: [12, 7] as [number, number],
+    };
+    const smooth = buildStyledKonvaTextNodeConfigs({
+      ...textConfig,
+      style: { ...shadowStyle, sombra_blur: 16 },
+    }).find((node) => node.key === "shadow");
+    expect(smooth).toMatchObject({
+      x: 10,
+      y: 19,
+      shadowEnabled: true,
+      shadowBlur: 16,
+      shadowOffsetX: 12,
+      shadowOffsetY: 7,
+    });
+
+    const hard = buildStyledKonvaTextNodeConfigs({
+      ...textConfig,
+      style: { ...shadowStyle, sombra_blur: 0 },
+    }).find((node) => node.key === "shadow");
+    expect(hard).toMatchObject({ x: 22, y: 26, shadowEnabled: false });
+  });
 });

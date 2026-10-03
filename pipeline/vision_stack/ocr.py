@@ -1159,6 +1159,10 @@ class OCREngine:
         provider = getattr(model, "ocr", None)
         if not callable(provider):
             raise OcrBackendUnavailable("PaddleOCR provider is unavailable")
+        if (blocks and _env_bool("TRADUZAI_OCR_CROP_FIRST", False)
+                and not options.get("force_full_page")
+                and self._crop_first_indices(blocks)):
+            return self._recognize_page_crop_first(root_rgb, blocks, request, provider)
         operations = [OCRTransformOperation(kind="identity")]
         if bool(options.get("force_downscale")):
             operations.append(
@@ -1243,6 +1247,398 @@ class OCREngine:
             full_page_lines=full_page_lines,
             attempts=(attempt,),
             diagnostics=diagnostics,
+        )
+
+    @staticmethod
+    def _prefer_detected_crop(block) -> bool:
+        """Large tall regions lose detail when the entire page is resized by OCR."""
+        try:
+            x1, y1, x2, y2 = (float(value) for value in block.xyxy)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return x2 - x1 >= 280 and y2 - y1 >= 220
+
+    @classmethod
+    def _crop_first_indices(cls, blocks: list) -> tuple[int, ...]:
+        """Do not independently crop overlapping detections with ambiguous owners."""
+        selected = []
+        grouped = _env_bool("TRADUZAI_EXPERIMENTAL_GROUPED_CROP", False)
+        for index, block in enumerate(blocks):
+            if not cls._prefer_detected_crop(block):
+                if not grouped:
+                    continue
+                try:
+                    gx1, gy1, gx2, gy2 = (float(value) for value in block.xyxy)
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if min(gx2 - gx1, gy2 - gy1) < 30 or (gx2 - gx1) * (gy2 - gy1) < 2000:
+                    continue
+            x1, y1, x2, y2 = (float(value) for value in block.xyxy)
+            if any(
+                other_index != index
+                and max(0.0, min(x2, float(other.xyxy[2])) - max(x1, float(other.xyxy[0])))
+                * max(0.0, min(y2, float(other.xyxy[3])) - max(y1, float(other.xyxy[1]))) > 0
+                for other_index, other in enumerate(blocks)
+            ):
+                continue
+            selected.append(index)
+            if grouped and len(selected) > 48:
+                return ()
+        return tuple(selected)
+
+    @staticmethod
+    def _crop_text_skew_angle(crop: np.ndarray) -> float | None:
+        """Estimate a dominant text baseline only when Hough support is unambiguous."""
+        import math
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 70, 150)
+        lines = cv2.HoughLinesP(
+            edges, 1, np.pi / 180, threshold=30,
+            minLineLength=max(35, int(crop.shape[1] * 0.2)), maxLineGap=8,
+        )
+        if lines is None:
+            return None
+        candidates = []
+        for line in lines[:, 0]:
+            x1, y1, x2, y2 = (int(value) for value in line)
+            angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+            if abs(angle) <= 40:
+                candidates.append((angle, math.hypot(x2 - x1, y2 - y1)))
+        if len(candidates) < 6:
+            return None
+        best = max(
+            range(-40, 41),
+            key=lambda center: sum(length for angle, length in candidates if abs(angle - center) <= 3),
+        )
+        inliers = sorted((angle, length) for angle, length in candidates if abs(angle - best) <= 3)
+        total = sum(length for _, length in candidates)
+        supported = sum(length for _, length in inliers)
+        if supported < 0.65 * total:
+            return None
+        cumulative = 0.0
+        for angle, length in inliers:
+            cumulative += length
+            # Slanted glyph edges tend to extend below the baseline; the upper
+            # supported quantile avoids over-rotating the small end punctuation.
+            if cumulative >= supported * 0.70:
+                quantized = round(angle * 2) / 2
+                return quantized if 12 <= abs(quantized) <= 40 else None
+        return None
+
+    @staticmethod
+    def _project_deskewed_records(records, box, matrix, crop_shape):
+        inverse = cv2.invertAffineTransform(matrix)
+        width, height = crop_shape[1], crop_shape[0]
+        projected = []
+        for record in records:
+            points = []
+            for x, y in record.polygon_page:
+                px, py = inverse @ np.asarray((x, y, 1.0), dtype=np.float64)
+                points.append((
+                    box[0] + int(round(np.clip(px, 0, width - 1))),
+                    box[1] + int(round(np.clip(py, 0, height - 1))),
+                ))
+            if not points:
+                continue
+            xs, ys = zip(*points)
+            projected.append(replace(
+                record, polygon_page=tuple(points),
+                bbox_page=(min(xs), min(ys), max(xs), max(ys)),
+            ))
+        return tuple(projected)
+
+    @staticmethod
+    def _terminal_ink_outside_line(image: np.ndarray, polygon) -> bool:
+        """Find a small isolated terminal mark just beyond a detected line."""
+        if len(polygon) != 4:
+            return False
+        xs, ys = zip(*polygon)
+        right, bottom = max(xs), max(ys)
+        height, width = image.shape[:2]
+        if right + 2 >= width:
+            return False
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        _, _, stats, _ = cv2.connectedComponentsWithStats((gray < 120).astype(np.uint8))
+        for x, y, w, h, area in stats[1:]:
+            if (
+                2 <= area <= 12 and w <= 4 and h <= 4
+                and right < x <= min(width - 1, right + 8)
+                and bottom - 8 <= y <= bottom + 3
+            ):
+                return True
+        return False
+
+    def _recognize_page_crop_first(
+        self,
+        root_rgb: np.ndarray,
+        blocks: list,
+        request: OCRRequest,
+        provider,
+    ) -> OCRInvocationResult:
+        """Read detected regions first, then only the unassigned page pixels."""
+
+        height, width = root_rgb.shape[:2]
+        crop_boxes = []
+        crop_indices = self._crop_first_indices(blocks)
+        for index in crop_indices:
+            block = blocks[index]
+            try:
+                x1, y1, x2, y2 = (float(value) for value in block.xyxy)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError("crop-first OCR requires a valid detector box") from exc
+            box = (
+                max(0, int(x1)),
+                max(0, int(y1)),
+                min(width, int(x2)),
+                min(height, int(y2)),
+            )
+            if box[2] <= box[0] or box[3] <= box[1]:
+                raise ValueError("crop-first OCR detector box has no pixels")
+            crop_boxes.append(box)
+
+        original_boxes_by_index = dict(zip(crop_indices, crop_boxes))
+        crop_jobs = [(tuple([index]), box) for index, box in zip(crop_indices, crop_boxes)]
+        grouped_crop_active = False
+        grouped_crop_refusal = ""
+        if crop_jobs and _env_bool("TRADUZAI_EXPERIMENTAL_GROUPED_CROP", False):
+            from .grouped_crop import GroupedCropRefused, Region, plan_grouped_crops
+
+            regions = [Region(str(indices[0]), box) for indices, box in crop_jobs]
+            try:
+                planned = plan_grouped_crops(
+                    root_rgb, regions,
+                    context_px=max(0, min(24, _env_int("TRADUZAI_GROUPED_CROP_CONTEXT_PX", 12))),
+                    group_gap_px=max(0, min(48, _env_int("TRADUZAI_GROUPED_CROP_GAP_PX", 24))),
+                    max_height_px=max(256, _env_int("TRADUZAI_GROUPED_CROP_MAX_HEIGHT", 1600)),
+                    max_pixels=max(250_000, _env_int("TRADUZAI_GROUPED_CROP_MAX_PIXELS", 2_000_000)),
+                )
+            except GroupedCropRefused as exc:
+                grouped_crop_refusal = str(exc)
+                logger.warning("grouped OCR crop refused page=%s reason=%s", request.page_id, exc)
+            else:
+                crop_jobs = [(tuple(int(region_id) for region_id in crop.region_ids), crop.box)
+                             for crop in planned]
+                grouped_crop_active = True
+                logger.warning(
+                    "grouped OCR crop applied page=%s regions=%d jobs=%d merged_jobs=%d",
+                    request.page_id, len(crop_indices), len(crop_jobs),
+                    sum(len(indices) > 1 for indices, _box in crop_jobs),
+                )
+
+        attempts = []
+        observations = []
+        crop_lines_by_index = {}
+        preserved_boxes = []
+        short_crop_lines = []
+        for ordinal, (indices, box) in enumerate(crop_jobs, 1):
+            native = root_rgb[box[1]:box[3], box[0]:box[2]]
+            angle = self._crop_text_skew_angle(native)
+            matrix = None
+            operations = [OCRTransformOperation(kind="crop", bbox_page=box)]
+            if angle is not None:
+                crop_height, crop_width = native.shape[:2]
+                matrix = cv2.getRotationMatrix2D((crop_width / 2, crop_height / 2), angle, 1.0)
+                cosine, sine = abs(matrix[0, 0]), abs(matrix[0, 1])
+                new_width = int(crop_height * sine + crop_width * cosine)
+                new_height = int(crop_height * cosine + crop_width * sine)
+                matrix[0, 2] += new_width / 2 - crop_width / 2
+                matrix[1, 2] += new_height / 2 - crop_height / 2
+                fixed = tuple(int(round(value * 1_000_000)) for value in matrix.reshape(-1))
+                matrix = np.asarray(fixed, dtype=np.float64).reshape(2, 3) / 1_000_000
+                operations.append(OCRTransformOperation(
+                    kind="deskew_affine", output_size=(new_width, new_height),
+                    interpolation="linear", border_mode="constant", border_value_rgb=(255, 255, 255),
+                    affine_matrix_fixed_1e6=fixed, algorithm_id="hough_text_baseline_v1",
+                ))
+            spec = OCRTransformSpec.build(tuple(operations))
+            crop = spec.replay(root_rgb)
+            attempt, lines = execute_hash_bound_provider_attempt(
+                request=request, root_input_rgb=root_rgb, actual_input_rgb=crop,
+                transform_spec=spec, variant_id=f"detected_crop_{ordinal:04d}" + ("_deskew" if angle is not None else ""), provider=provider,
+                expected_input_pixel_sha256=canonical_page_sha256(crop),
+                input_bbox_page=box, input_kind="detected_crop",
+                provider_kwargs={"det": True, "rec": True, "cls": False},
+                attempt_ordinal=ordinal, source="paddle_detected_crop",
+                execution_recorder=self._record_raw_model_execution,
+            )
+            projected = (
+                self._project_deskewed_records(lines, box, matrix, native.shape)
+                if matrix is not None else _records_in_page_space(
+                    lines, bbox_page=box, input_width=crop.shape[1], input_height=crop.shape[0],
+                )
+            )
+            attempts.append(attempt)
+            if matrix is not None:
+                refined = list(projected)
+                for line_number, raw_line in enumerate(lines):
+                    if not raw_line.polygon_page or not self._terminal_ink_outside_line(crop, raw_line.polygon_page):
+                        continue
+                    xs, ys = zip(*raw_line.polygon_page)
+                    left = max(0, min(xs) - 6)
+                    top = max(0, min(ys) - 6)
+                    right = min(crop.shape[1], max(xs) + 10)
+                    bottom = min(crop.shape[0], max(ys) + 7)
+                    if right <= left or bottom <= top:
+                        continue
+                    terminal_spec = OCRTransformSpec.build((*operations, OCRTransformOperation(
+                        kind="crop", bbox_page=(left, top, right, bottom),
+                    )))
+                    terminal_input = terminal_spec.replay(root_rgb)
+
+                    def recognition_only(image, **_kwargs):
+                        raw = provider(image, det=False, rec=True, cls=False)
+                        candidate = raw[0][0] if isinstance(raw, list) and raw and raw[0] else None
+                        if not isinstance(candidate, (tuple, list)) or len(candidate) < 2:
+                            return []
+                        width, height = image.shape[1], image.shape[0]
+                        polygon = ((0, 0), (width - 1, 0), (width - 1, height - 1), (0, height - 1))
+                        return [[(polygon, (candidate[0], candidate[1]))]]
+
+                    retry_attempt, retry_lines = execute_hash_bound_provider_attempt(
+                        request=request, root_input_rgb=root_rgb, actual_input_rgb=terminal_input,
+                        transform_spec=terminal_spec,
+                        variant_id=f"detected_crop_{ordinal:04d}_terminal_{line_number + 1:02d}",
+                        provider=recognition_only,
+                        expected_input_pixel_sha256=canonical_page_sha256(terminal_input),
+                        input_bbox_page=box, input_kind="terminal_recrop",
+                        attempt_ordinal=len(attempts) + 1, source="paddle_terminal_recrop",
+                        execution_recorder=self._record_raw_model_execution,
+                    )
+                    attempts.append(retry_attempt)
+                    if len(retry_lines) != 1:
+                        continue
+                    retry = retry_lines[0]
+                    previous = raw_line.text.rstrip()
+                    if retry.text not in {previous + mark for mark in (".", ",", "!", "?", ";", ":")}:
+                        continue
+                    local_polygon = tuple((x + left, y + top) for x, y in retry.polygon_page)
+                    local_record = replace(retry, polygon_page=local_polygon)
+                    refined[line_number] = self._project_deskewed_records(
+                        (local_record,), box, matrix, native.shape,
+                    )[0]
+                projected = tuple(refined)
+            if not grouped_crop_active:
+                # Preserve the existing per-region crop contract by default.
+                index = indices[0]
+                recognized = " ".join(line.text.strip() for line in projected if line.text.strip())
+                if sum(char.isalnum() for char in recognized) >= 24:
+                    observations.extend(projected)
+                    crop_lines_by_index[index] = projected
+                    preserved_boxes.append(box)
+                else:
+                    short_crop_lines.extend(projected)
+                continue
+            # Attribute grouped lines only to one unambiguous original
+            # detector box. Unassigned pixels remain visible to the residual OCR.
+            lines_by_index = {index: [] for index in indices}
+            for line in projected:
+                lx1, ly1, lx2, ly2 = line.bbox_page
+                line_area = max(1, (lx2 - lx1) * (ly2 - ly1))
+                matches = []
+                for index in indices:
+                    bx1, by1, bx2, by2 = original_boxes_by_index[index]
+                    overlap = max(0, min(lx2, bx2) - max(lx1, bx1)) * max(0, min(ly2, by2) - max(ly1, by1))
+                    fraction = overlap / line_area
+                    if fraction >= 0.18:
+                        matches.append((fraction, index))
+                matches.sort(reverse=True)
+                if matches and (len(matches) == 1 or matches[0][0] > matches[1][0] * 1.5):
+                    lines_by_index[matches[0][1]].append(line)
+            for index in indices:
+                attributed = tuple(lines_by_index[index])
+                recognized = " ".join(line.text.strip() for line in attributed if line.text.strip())
+                if sum(char.isalnum() for char in recognized) >= 24:
+                    observations.extend(attributed)
+                    crop_lines_by_index[index] = attributed
+                    # Mask only the original source box, never the grouped
+                    # context that may include another owner's text or art.
+                    preserved_boxes.append(original_boxes_by_index[index])
+                else:
+                    short_crop_lines.extend(attributed)
+
+        # A masked sweep retains the historical coverage of text outside
+        # detector boxes without reading the detected text a second time.
+        mask_spec = OCRTransformSpec.build((
+            OCRTransformOperation(kind="mask_rectangles", mask_bboxes=tuple(preserved_boxes))
+            if preserved_boxes else OCRTransformOperation(kind="identity"),
+        ))
+        residual = mask_spec.replay(root_rgb)
+        residual_attempt, residual_lines = execute_hash_bound_provider_attempt(
+            request=request, root_input_rgb=root_rgb, actual_input_rgb=residual,
+            transform_spec=mask_spec, variant_id="unassigned_page", provider=provider,
+            expected_input_pixel_sha256=canonical_page_sha256(residual),
+            input_kind="unassigned_page", provider_kwargs={"det": True, "rec": True, "cls": False},
+            attempt_ordinal=len(attempts) + 1, source="paddle_unassigned_page",
+            execution_recorder=self._record_raw_model_execution,
+        )
+        attempts.append(residual_attempt)
+        residual_lines = list(residual_lines)
+        used_residual = set()
+        for crop_line in short_crop_lines:
+            crop_text = "".join(char for char in crop_line.text.casefold() if char.isalnum())
+            if len(crop_text) < 4 or crop_line.confidence < 0.70:
+                continue
+            matches = []
+            cx1, cy1, cx2, cy2 = crop_line.bbox_page
+            crop_area = max(1, (cx2-cx1) * (cy2-cy1))
+            for residual_index, residual_line in enumerate(residual_lines):
+                if residual_index in used_residual:
+                    continue
+                residual_text = "".join(char for char in residual_line.text.casefold() if char.isalnum())
+                if not (3 <= len(residual_text) < len(crop_text)):
+                    continue
+                if crop_line.confidence < residual_line.confidence - 0.15:
+                    continue
+                if SequenceMatcher(None, crop_text, residual_text).ratio() < 0.72:
+                    continue
+                rx1, ry1, rx2, ry2 = residual_line.bbox_page
+                overlap = max(0, min(cx2, rx2)-max(cx1, rx1)) * max(0, min(cy2, ry2)-max(cy1, ry1))
+                residual_area = max(1, (rx2-rx1) * (ry2-ry1))
+                if overlap / min(crop_area, residual_area) >= 0.45:
+                    matches.append((overlap, residual_index))
+            if len(matches) == 1:
+                residual_index = matches[0][1]
+                residual_lines[residual_index] = crop_line
+                used_residual.add(residual_index)
+        for line in residual_lines:
+            x1, y1, x2, y2 = line.bbox_page
+            if any(max(0, min(x2, bx2) - max(x1, bx1)) * max(0, min(y2, by2) - max(y1, by1)) > 0
+                   for bx1, by1, bx2, by2 in preserved_boxes):
+                continue
+            observations.append(line)
+        output_blocks = []
+        for index, block in enumerate(blocks):
+            raw_bbox = tuple(int(round(float(value))) for value in block.xyxy)
+            if index in crop_lines_by_index:
+                matching = crop_lines_by_index[index]
+            else:
+                bx1, by1, bx2, by2 = raw_bbox
+                matching = tuple(record for record in residual_lines if (
+                    max(0, min(bx2, record.bbox_page[2]) - max(bx1, record.bbox_page[0]))
+                    * max(0, min(by2, record.bbox_page[3]) - max(by1, record.bbox_page[1]))
+                    / max(1, (record.bbox_page[2] - record.bbox_page[0]) * (record.bbox_page[3] - record.bbox_page[1]))
+                ) >= 0.18)
+            block_id = str(getattr(block, "region_id", "") or getattr(block, "component_id", "") or f"ocr_block_{index + 1:04d}")
+            output_blocks.append(OCRBlock(
+                block_id, " ".join(line.text for line in matching if line.text).strip(),
+                max((line.confidence for line in matching), default=0.0), raw_bbox,
+                tuple(point for line in matching for point in line.polygon_page),
+            ))
+        diagnostics = OCRDiagnostics(request.provider_family, {
+            "block_count": len(blocks),
+            "full_page_line_count": len(observations),
+            "full_page_mapped": sum(bool(block.text) for block in output_blocks),
+            "crop_first_calls": len(attempts),
+            "grouped_crop_active": grouped_crop_active,
+            "grouped_crop_jobs": len(crop_jobs) if grouped_crop_active else 0,
+            "grouped_crop_merged_jobs": sum(len(indices) > 1 for indices, _box in crop_jobs)
+            if grouped_crop_active else 0,
+            "grouped_crop_refusal": grouped_crop_refusal,
+        })
+        return OCRInvocationResult.build(
+            request=request, blocks=tuple(output_blocks), observations=tuple(observations),
+            full_page_lines=tuple(observations), attempts=tuple(attempts), diagnostics=diagnostics,
         )
 
     def recognize_region_with_evidence(

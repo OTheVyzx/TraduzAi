@@ -63,10 +63,18 @@ function optionGroupsFromSearchResults(
   google: EditorFontOption[],
 ): EditorFontGroup[] {
   const groups: EditorFontGroup[] = [...localGroups];
-  const seenValues = new Set(localGroups.flatMap((group) => group.options.map((option) => option.value)));
-  const systemOptions = system.filter((option) => !seenValues.has(option.value));
-  for (const option of systemOptions) seenValues.add(option.value);
-  const googleOptions = google.filter((option) => !seenValues.has(option.value));
+  const localOptions = localGroups.flatMap((group) => group.options);
+  const seenValues = new Set(localOptions.map((option) => option.value));
+  const seenFamilies = new Set(localOptions.map((option) => option.cssFamily.toLowerCase()));
+  const uniqueOption = (option: EditorFontOption) => {
+    const family = option.cssFamily.toLowerCase();
+    if (seenValues.has(option.value) || seenFamilies.has(family)) return false;
+    seenValues.add(option.value);
+    seenFamilies.add(family);
+    return true;
+  };
+  const systemOptions = system.filter(uniqueOption);
+  const googleOptions = google.filter(uniqueOption);
   if (systemOptions.length > 0) groups.push({ label: "Sistema", source: "system", options: systemOptions });
   if (googleOptions.length > 0) groups.push({ label: "Google Fonts", source: "google", options: googleOptions });
   return groups;

@@ -47,6 +47,7 @@ export function composeRecoveryImage(
 export type RecoveryStrokePreviewPatch = {
   id: string;
   image: HTMLImageElement;
+  dataUrl: string;
   x: number;
   y: number;
   width: number;
@@ -187,10 +188,12 @@ export function createRecoveryStrokePreviewPatch(
 
   return new Promise((resolve) => {
     const image = new Image();
+    const dataUrl = canvas.toDataURL("image/png");
     image.onload = () => {
       resolve({
         id: crypto.randomUUID(),
         image,
+        dataUrl,
         x: x1,
         y: y1,
         width,
@@ -198,6 +201,6 @@ export function createRecoveryStrokePreviewPatch(
       });
     };
     image.onerror = () => resolve(null);
-    image.src = canvas.toDataURL("image/png");
+    image.src = dataUrl;
   });
 }

@@ -18,6 +18,7 @@ _ALLOWED_CONTROLS = {
     ("ollama", "owner_configured"),
     ("ollama", "owner_contextual"),
     ("ocr_recovery", "owner_ocr_recovery"),
+    ("hy_mt2_gguf_local", "owner_primary"),
 }
 
 

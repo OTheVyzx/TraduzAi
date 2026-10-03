@@ -50,25 +50,25 @@ describe("editor font catalog", () => {
     expect(catalog).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          label: "Bangers",
-          cssFamily: "Bangers",
+          label: "Patrick Hand",
+          cssFamily: "Patrick Hand",
           source: "google",
-          value: "GoogleFont__Bangers__regular.ttf",
+          value: "GoogleFont__Patrick_Hand__regular.ttf",
           groupLabel: "Google Fonts",
           variants: ["regular"],
           variant: "regular",
-          downloadUrl: "https://raw.githubusercontent.com/google/fonts/main/ofl/bangers/Bangers-Regular.ttf",
+          downloadUrl: "https://raw.githubusercontent.com/google/fonts/main/ofl/patrickhand/PatrickHand-Regular.ttf",
         }),
       ]),
     );
   });
 
   it("finds a Google font option by the stable cached filename", () => {
-    expect(findEditorFontOption("GoogleFont__Bangers__regular.ttf")).toMatchObject({
-      label: "Bangers",
+    expect(findEditorFontOption("GoogleFont__Patrick_Hand__regular.ttf")).toMatchObject({
+      label: "Patrick Hand",
       source: "google",
-      value: "GoogleFont__Bangers__regular.ttf",
-      downloadUrl: "https://raw.githubusercontent.com/google/fonts/main/ofl/bangers/Bangers-Regular.ttf",
+      value: "GoogleFont__Patrick_Hand__regular.ttf",
+      downloadUrl: "https://raw.githubusercontent.com/google/fonts/main/ofl/patrickhand/PatrickHand-Regular.ttf",
     });
   });
 

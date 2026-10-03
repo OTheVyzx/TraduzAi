@@ -41,6 +41,126 @@
   src: url("/fonts/CCDaveGibbonsLower W00 Regular.ttf") format("truetype");
 }
 
+@font-face {
+  font-family: "Astronaut City";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/Astronaut City.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "CC Wild Words";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/Cc-Wild-Words-Roman-Font.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "CC Wild Words";
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+  src: url("/fonts/Wild-Words-Font/CC Wild Words Italic.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "CC Wild Words";
+  font-weight: 700;
+  font-style: italic;
+  font-display: block;
+  src: url("/fonts/Wild-Words-Font/CC Wild Words Bold Italic.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "League Gothic";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/LeagueGothic-Regular-VariableFont_wdth.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "CC Totally Awesome";
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/commercial/CCTotallyAwesome W00 Bold.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Atma";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/google/Atma-SemiBold.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Bangers";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/google/Bangers-Regular.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Delius Unicase";
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/google/DeliusUnicase-Bold.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Luckiest Guy";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/google/LuckiestGuy-Regular.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Permanent Marker";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/google/PermanentMarker-Regular.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Ready for Anything BB";
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/Ready For Anything BB/ReadyforAnythingBB-Regular.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Ready for Anything BB";
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+  src: url("/fonts/Ready For Anything BB/ReadyforAnythingBB-Bold.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Ready for Anything BB";
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+  src: url("/fonts/Ready For Anything BB/ReadyforAnythingBB-Italic.ttf") format("truetype");
+}
+
+@font-face {
+  font-family: "Ready for Anything BB";
+  font-weight: 700;
+  font-style: italic;
+  font-display: block;
+  src: url("/fonts/Ready For Anything BB/ReadyforAnythingBB-BoldItalic.ttf") format("truetype");
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

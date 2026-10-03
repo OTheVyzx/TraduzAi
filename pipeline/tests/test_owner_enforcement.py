@@ -879,6 +879,42 @@ def test_atomic_rejection_retires_owner_from_enforced_graph_for_review():
     reviewed.require_valid(mode="enforce")
 
 
+def test_enforced_rejection_record_detaches_owner_and_binds_review_candidate():
+    from test_final_pixel_qa import _graph
+    from strip.process_bands import (
+        _owner_execution_rejection_record,
+        _transition_owner_to_review,
+    )
+
+    graph = _graph(state="owned")
+    owner = graph.owners[0]
+    owner_id = owner.owner_id
+    _transition_owner_to_review(graph, owner_id, enforce_graph=True)
+
+    record = _owner_execution_rejection_record(
+        graph,
+        owner,
+        seed={"translated_payload": owner.translated_payload},
+        enforce_graph=True,
+    )
+
+    assert graph.owners == []
+    assert record["id"] == owner_id
+    assert record["candidate_owner_id"] == owner_id
+    assert record["owner_id"] is None
+    assert record["owner_graph_run_id"] == graph.run_id
+    assert record["owner_graph_origin_execution_id"] == graph.origin_execution_id
+    assert record["owner_graph_page_source_sha256"] == graph.page_source_sha256
+    assert record["source_payload"] == "SOURCE BODY"
+    assert record["translated_payload"] == "CORPO TRADUZIDO"
+    assert record["source_pixels_preserved"] is True
+    assert record["committed"] is False
+    assert record["blocking"] is True
+    assert record["qa_action"] == "BLOCK"
+    assert record["write_authority"] == "revoked"
+    assert record["visible"] is False
+
+
 def test_owner_layout_safe_polygon_uses_raster_coordinates_at_page_edges():
     from test_final_pixel_qa import _graph
     from strip.process_bands import _owner_layout_regions
@@ -1253,11 +1289,15 @@ def test_enforce_unsafe_mask_emits_invisible_qa_without_legacy_graph_state(monke
     )
 
     assert execution.commits == ()
-    assert execution.graph.owners[0].disposition == "owned"
-    assert execution.graph.owners[0].state != "review_required"
-    assert execution.graph.owners[0].route_action != "review_required"
+    assert execution.graph.owners == []
+    disposition = execution.graph.component_dispositions[0]
+    assert disposition.decision == "uncertain"
+    assert disposition.owner_id is None
+    assert disposition.reason == "owner_execution_rejected"
     execution.graph.require_valid(mode="enforce")
     assert execution.records[0]["visible"] is False
+    assert execution.records[0]["owner_id"] is None
+    assert execution.records[0]["candidate_owner_id"] == owner.owner_id
     assert execution.records[0]["derived_qa_status"] == "review_required"
     assert execution.records[0]["write_authority"] == "revoked"
     assert execution.records[0]["translation_binding_sha256"] == (
