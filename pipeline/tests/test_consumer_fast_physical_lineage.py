@@ -71,6 +71,11 @@ def test_analysis_record_uses_hash_bound_vision_page_journal_and_completes(tmp_p
     )
 
     record = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+    from integration_v1.contracts import AnalysisRecord
+
+    assert AnalysisRecord.build({
+        key: value for key, value in record.items() if key != "analysis_record_sha256"
+    }).analysis_record_sha256 == record["analysis_record_sha256"]
     evidence_path = tmp_path / "consumer_fast" / "vision" / "page_execution_evidence.json"
     assert record["status"] == "complete"
     assert record["publishable"] is False

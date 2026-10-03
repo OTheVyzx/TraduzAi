@@ -10530,6 +10530,8 @@ def _run_pipeline(
         owner_run_id = None
         owner_execution_id = None
         owner_replay_of_execution_id = None
+        vision_stage_cache = None
+        vision_config_sha256 = None
         if effective_owner_graph_mode == "enforce":
             import uuid
 
@@ -10554,6 +10556,41 @@ def _run_pipeline(
                 execution_id=owner_execution_id,
                 replay_of_execution_id=owner_replay_of_execution_id,
             )
+            if verified_owner_replay is None:
+                from vision_runtime.cache_key import visual_config_sha256
+                from vision_runtime.cache_reader import cached_content_lineage, read_verified_chapter_analysis
+
+                vision_config_sha256 = visual_config_sha256(config)
+                vision_cache_result = read_verified_chapter_analysis(
+                    work_dir,
+                    source_tree_sha256=verified_owner_source_manifest.source_tree_sha256,
+                    page_source_sha256s={
+                        page.page_id: page.source_file_sha256
+                        for page in verified_owner_source_manifest.pages
+                    },
+                    visual_config_sha256=vision_config_sha256,
+                )
+                strip_chapter_telemetry["vision_cache"] = {
+                    "status": vision_cache_result["status"],
+                    "reason": vision_cache_result["reason"],
+                }
+                if vision_cache_result["status"] == "hit":
+                    cached_pages = vision_cache_result["pages"]
+                    cached_lineage = cached_content_lineage(cached_pages)
+                    if cached_lineage is not None:
+                        owner_run_id, owner_replay_of_execution_id = cached_lineage
+                        vision_stage_cache = cached_pages
+                        verified_owner_source_manifest = ChapterSourceManifest.from_extracted_pages(
+                            image_files,
+                            extraction_root,
+                            run_id=owner_run_id,
+                            execution_id=owner_execution_id,
+                            replay_of_execution_id=owner_replay_of_execution_id,
+                        )
+                    else:
+                        strip_chapter_telemetry["vision_cache"] = {
+                            "status": "miss", "reason": "cached_page_lineage_inconsistent",
+                        }
             if (
                 verified_owner_replay is not None
                 and verified_owner_replay.verified_inputs.source_manifest.source_tree_sha256
@@ -10597,7 +10634,20 @@ def _run_pipeline(
                 source_manifest=verified_owner_source_manifest,
                 artifact_root=verified_owner_private_root,
                 owner_content_replay=verified_owner_replay,
+                vision_stage_cache=vision_stage_cache,
+                vision_config_sha256=vision_config_sha256,
             )
+        if effective_owner_graph_mode == "enforce":
+            from vision_runtime.page_record import write_chapter_analysis_records
+
+            vision_analysis_index = write_chapter_analysis_records(
+                verified_owner_private_root,
+                output_pages,
+                config,
+                source_manifest_sha256=verified_owner_source_manifest.sha256,
+                source_tree_sha256=verified_owner_source_manifest.source_tree_sha256,
+            )
+            strip_chapter_telemetry["vision_analysis_index"] = vision_analysis_index
         strip_chapter_telemetry.pop("_performance_recorder", None)
         strip_chapter_telemetry["internal_unattributed_sec"] = round(
             max(

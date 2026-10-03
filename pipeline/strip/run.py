@@ -7841,6 +7841,8 @@ def _run_chapter_impl(
     source_manifest=None,
     artifact_root: str | Path | None = None,
     owner_content_replay=None,
+    vision_stage_cache: dict | None = None,
+    vision_config_sha256: str | None = None,
     progress_callback=None,
     _page_map_entry=None,
     _ordered_context_state: dict | None = None,
@@ -7848,6 +7850,17 @@ def _run_chapter_impl(
     """Executa o pipeline strip-based ponta-a-ponta."""
     if not image_files:
         return []
+
+    cache_page_id = (
+        str(_page_map_entry.page_id)
+        if _page_map_entry is not None
+        else None
+    )
+    cached_vision = (
+        vision_stage_cache.get(cache_page_id)
+        if owner_graph_mode == "enforce" and cache_page_id and isinstance(vision_stage_cache, dict)
+        else None
+    )
 
     page_paths = image_files
     identity_nonce = time.time_ns()
@@ -7955,12 +7968,20 @@ def _run_chapter_impl(
     try:
         if progress_callback: progress_callback("detect", 0, 1)
         with _timed(chapter_telemetry, "strip_detect_balloons"):
-            balloons = detect_strip_balloons(strip, detector=detector)
+            balloons = (
+                cached_vision["stage"]["balloons"]
+                if cached_vision is not None
+                else detect_strip_balloons(strip, detector=detector)
+            )
         if chapter_telemetry is not None:
             chapter_telemetry["balloon_count"] = len(balloons)
 
         with _timed(chapter_telemetry, "source_component_discovery"):
-            source_components_by_page = _discover_source_components_for_strip(strip, balloons)
+            source_components_by_page = (
+                {cache_page_id: list(cached_vision["coverage"].components)}
+                if cached_vision is not None
+                else _discover_source_components_for_strip(strip, balloons)
+            )
         if chapter_telemetry is not None:
             chapter_telemetry["source_component_count"] = sum(
                 len(components) for components in source_components_by_page.values()
@@ -7970,13 +7991,17 @@ def _run_chapter_impl(
         page_coverages_by_page: dict[str, PageCoverageResult] = {}
         if owner_graph_mode != "legacy":
             with _timed(chapter_telemetry, "page_ocr_coverage"):
-                page_coverages_by_page = _complete_page_coverages_for_strip(
-                    strip,
-                    source_components_by_page,
-                    runtime=runtime,
-                    run_id=run_id,
-                    origin_execution_id=replay_of_execution_id or execution_id,
-                    idioma_origem=idioma_origem,
+                page_coverages_by_page = (
+                    {cache_page_id: cached_vision["coverage"]}
+                    if cached_vision is not None
+                    else _complete_page_coverages_for_strip(
+                        strip,
+                        source_components_by_page,
+                        runtime=runtime,
+                        run_id=run_id,
+                        origin_execution_id=replay_of_execution_id or execution_id,
+                        idioma_origem=idioma_origem,
+                    )
                 )
             _write_owner_coverage_debug_artifacts(page_coverages_by_page)
             if chapter_telemetry is not None:
@@ -7987,12 +8012,16 @@ def _run_chapter_impl(
 
         with _timed(chapter_telemetry, "strip_group_bands"):
             band_margin = _strip_band_margin_px(idioma_origem)
-            bands = group_balloons_into_bands(
-                balloons,
-                margin=band_margin,
-                page_breaks=list(strip.source_page_breaks or []),
+            bands = (
+                [item["band"] for item in cached_vision["stage"]["bands"]]
+                if cached_vision is not None
+                else group_balloons_into_bands(
+                    balloons,
+                    margin=band_margin,
+                    page_breaks=list(strip.source_page_breaks or []),
+                )
             )
-            if owner_graph_mode == "enforce":
+            if owner_graph_mode == "enforce" and cached_vision is None:
                 bands = _ensure_page_owner_scheduler_bands(
                     strip,
                     bands,
@@ -8016,25 +8045,23 @@ def _run_chapter_impl(
             )
         macro_ocr_precompute_stats: dict = {}
         with _timed(chapter_telemetry, "macro_ocr_precompute_wall"):
-            precomputed_macro_ocr_pages = _build_precomputed_macro_ocr_pages(
-                strip,
-                bands,
-                runtime,
-                idioma_origem=idioma_origem,
-                telemetry=macro_ocr_precompute_stats,
+            precomputed_macro_ocr_pages = (
+                {} if cached_vision is not None
+                else _build_precomputed_macro_ocr_pages(
+                    strip, bands, runtime, idioma_origem=idioma_origem,
+                    telemetry=macro_ocr_precompute_stats,
+                )
             )
         koharu_cjk_precompute_stats: dict = {}
         with _timed(chapter_telemetry, "koharu_cjk_precompute_wall"):
-            precomputed_koharu_cjk_pages = _build_precomputed_koharu_cjk_pages(
-                strip,
-                bands,
-                runtime,
-                page_paths,
-                models_dir=models_dir,
-                idioma_origem=idioma_origem,
-                telemetry=koharu_cjk_precompute_stats,
-                obra=obra,
-                work_title_user_provided=bool(work_title_user_provided),
+            precomputed_koharu_cjk_pages = (
+                {} if cached_vision is not None
+                else _build_precomputed_koharu_cjk_pages(
+                    strip, bands, runtime, page_paths,
+                    models_dir=models_dir, idioma_origem=idioma_origem,
+                    telemetry=koharu_cjk_precompute_stats, obra=obra,
+                    work_title_user_provided=bool(work_title_user_provided),
+                )
             )
         precomputed_ocr_pages = {
             **precomputed_macro_ocr_pages,
@@ -8099,25 +8126,40 @@ def _run_chapter_impl(
                     band,
                     source_page_number=source_page_number,
                 )
-                evidence = collect_band_evidence(
-                    band,
-                    runtime=runtime,
-                    page_idx=index,
-                    tile_projection=projection,
-                    components=list(source_components_by_page.get(page_id) or []),
-                    connected_reasoner_config=connected_reasoner_config,
-                    band_history=[],
-                    source_page_number=source_page_number,
-                    precomputed_ocr_page=precomputed_ocr_pages.get(index),
-                    obra=obra,
-                    work_title_user_provided=work_title_user_provided,
-                    idioma_origem=idioma_origem,
-                    layout_page_image_bgr=cv2.cvtColor(
-                        strip.image[page_y0:page_y1, :, :],
-                        cv2.COLOR_RGB2BGR,
-                    ),
-                    layout_page_y_top=page_y0,
-                )
+                if cached_vision is not None:
+                    cached_band = cached_vision["stage"]["bands"][index]
+                    evidence = BandEvidenceResult(
+                        page_id=page_id,
+                        tile_id=str(projection.tile_id),
+                        band_index=index,
+                        source_page_number=source_page_number,
+                        band=band,
+                        tile_projection=projection,
+                        ocr_page=copy.deepcopy(cached_band["ocr_page"]),
+                        observations=[], components=[],
+                        terminal_reason=cached_band["terminal_reason"],
+                        perf=copy.deepcopy(cached_band["perf"]),
+                    )
+                else:
+                    evidence = collect_band_evidence(
+                        band,
+                        runtime=runtime,
+                        page_idx=index,
+                        tile_projection=projection,
+                        components=list(source_components_by_page.get(page_id) or []),
+                        connected_reasoner_config=connected_reasoner_config,
+                        band_history=[],
+                        source_page_number=source_page_number,
+                        precomputed_ocr_page=precomputed_ocr_pages.get(index),
+                        obra=obra,
+                        work_title_user_provided=work_title_user_provided,
+                        idioma_origem=idioma_origem,
+                        layout_page_image_bgr=cv2.cvtColor(
+                            strip.image[page_y0:page_y1, :, :],
+                            cv2.COLOR_RGB2BGR,
+                        ),
+                        layout_page_y_top=page_y0,
+                    )
                 owner_evidence_by_band[id(band)] = evidence
                 return evidence
 
@@ -8169,6 +8211,45 @@ def _run_chapter_impl(
             # Publish the resolved graph before page execution so a fail-closed
             # layout or mask rejection still leaves its complete evidence chain.
             _write_owner_debug_artifacts(owner_graphs, bands, None)
+
+            if cached_vision is not None:
+                if artifact_root is not None:
+                    from shutil import copy2
+
+                    carried_root = Path(artifact_root) / "vision" / "pre_ocr"
+                    carried_root.mkdir(parents=True, exist_ok=True)
+                    for source in cached_vision["stage_paths"]:
+                        copy2(source, carried_root / source.name)
+                if chapter_telemetry is not None:
+                    chapter_telemetry["vision_pre_ocr_reused"] = True
+                    chapter_telemetry["vision_pre_ocr_provider_calls"] = 0
+            elif (
+                owner_graph_mode == "enforce" and cache_page_id
+                and vision_config_sha256 and source_manifest is not None
+            ):
+                from vision_runtime.stage_cache import save_pre_ocr_stage
+
+                source_page = source_manifest.pages[int(cache_page_id.rsplit("_", 1)[-1]) - 1]
+                try:
+                    save_pre_ocr_stage(
+                        Path(artifact_root),
+                        page_id=cache_page_id,
+                        source_file_sha256=source_page.source_file_sha256,
+                        page_pixel_sha256=page_coverages_by_page[cache_page_id].page_source_sha256,
+                        visual_config_sha256=vision_config_sha256,
+                        balloons=balloons,
+                        bands=bands,
+                        band_evidence_by_index={
+                            index: owner_evidence_by_band[id(band)]
+                            for index, band in enumerate(bands)
+                        },
+                    )
+                    if chapter_telemetry is not None:
+                        chapter_telemetry["vision_pre_ocr_cache_written"] = True
+                except (TypeError, ValueError, OSError) as exc:
+                    if chapter_telemetry is not None:
+                        chapter_telemetry["vision_pre_ocr_cache_written"] = False
+                        chapter_telemetry["vision_pre_ocr_cache_error"] = type(exc).__name__
 
         if chapter_telemetry is not None:
             chapter_telemetry["cross_band_ocr_fragments_reconciled"] = int(
@@ -8247,6 +8328,7 @@ def _run_chapter_impl(
                             enforce_graph=True,
                             translation_result_override=translation_result,
                             style_copy_mode=style_copy_mode,
+                            execution_id_override=request.execution_id,
                             performance_recorder=(
                                 chapter_telemetry.get("_performance_recorder")
                                 if isinstance(chapter_telemetry, dict)
