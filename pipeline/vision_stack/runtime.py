@@ -4135,6 +4135,7 @@ def run_page_coverage_ocr(
     bbox_page: tuple[int, int, int, int] | None,
     variants: tuple[str, ...],
     source_language: str = "en",
+    coverage_blocks: list | None = None,
 ):
     """Run the immutable OCR boundary used by page-global coverage."""
 
@@ -4144,9 +4145,9 @@ def run_page_coverage_ocr(
     if bbox_page is None:
         return engine.recognize_page_with_evidence(
             page_rgb,
-            [],
+            list(coverage_blocks or []),
             request=request,
-            force_full_page=True,
+            force_full_page=not bool(coverage_blocks),
         )
     recognize_region = getattr(type(engine), "recognize_region_with_evidence", None)
     if not callable(recognize_region):

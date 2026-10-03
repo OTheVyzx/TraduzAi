@@ -121,7 +121,7 @@ class OCRRequest:
 class OCRTransformOperation:
     kind: Literal[
         "identity", "crop", "resize", "grayscale_to_rgb", "invert",
-        "rotate_affine", "deskew_affine",
+        "rotate_affine", "deskew_affine", "mask_rectangles",
     ]
     bbox_page: BBox | None = None
     output_size: tuple[int, int] | None = None
@@ -130,6 +130,7 @@ class OCRTransformOperation:
     border_value_rgb: tuple[int, int, int] | None = None
     affine_matrix_fixed_1e6: tuple[int, int, int, int, int, int] | None = None
     algorithm_id: str = ""
+    mask_bboxes: tuple[BBox, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind == "crop":
@@ -151,6 +152,9 @@ class OCRTransformOperation:
                 raise ValueError(f"{self.kind} transform is incomplete")
             if len(self.affine_matrix_fixed_1e6 or ()) != 6:
                 raise ValueError("affine transform requires six fixed-point coefficients")
+        elif self.kind == "mask_rectangles":
+            if not self.mask_bboxes or any(len(box) != 4 or box[2] <= box[0] or box[3] <= box[1] for box in self.mask_bboxes):
+                raise ValueError("mask_rectangles requires valid mask_bboxes")
         elif self.kind not in {"identity", "grayscale_to_rgb", "invert"}:
             raise ValueError(f"unsupported OCR transform operation: {self.kind}")
         if self.output_size is not None and (
@@ -159,7 +163,7 @@ class OCRTransformOperation:
             raise ValueError("transform output_size must contain positive width and height")
 
     def to_json(self) -> dict[str, JSONValue]:
-        return {
+        payload = {
             "affine_matrix_fixed_1e6": list(self.affine_matrix_fixed_1e6) if self.affine_matrix_fixed_1e6 else None,
             "algorithm_id": self.algorithm_id,
             "bbox_page": list(self.bbox_page) if self.bbox_page else None,
@@ -169,6 +173,9 @@ class OCRTransformOperation:
             "kind": self.kind,
             "output_size": list(self.output_size) if self.output_size else None,
         }
+        if self.mask_bboxes:
+            payload["mask_bboxes"] = [list(box) for box in self.mask_bboxes]
+        return payload
 
 
 @dataclass(frozen=True)
@@ -237,6 +244,12 @@ class OCRTransformSpec:
                 current = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
             elif operation.kind == "invert":
                 current = cv2.bitwise_not(current)
+            elif operation.kind == "mask_rectangles":
+                current = current.copy()
+                for x1, y1, x2, y2 in operation.mask_bboxes:
+                    if x1 < 0 or y1 < 0 or x2 > current.shape[1] or y2 > current.shape[0]:
+                        raise ValueError("mask rectangle is outside its parent pixels")
+                    current[y1:y2, x1:x2] = 255
             else:
                 matrix = np.asarray(operation.affine_matrix_fixed_1e6, dtype=np.float64).reshape(2, 3) / 1_000_000.0
                 current = cv2.warpAffine(

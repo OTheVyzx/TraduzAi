@@ -120,6 +120,33 @@ def test_spatially_separate_repetition_and_multiline_remain() -> None:
     assert [item.observation_id for item in selected] == ["first", "second", "third"]
     assert payload == "WAIT WAIT WHAT DO"
 
+
+def test_rotated_card_lines_keep_physical_order_and_adjacent_fragments() -> None:
+    # Measured page-space polygons from CH57/023, first crop OCR invocation.
+    rows = (
+        ("Reference for production.", ((17, 1473), (251, 1356), (262, 1377), (27, 1494))),
+        ("it", ((249, 1497), (260, 1486), (270, 1496), (259, 1507))),
+        ("This is a mock-up cell phone.", ((18, 1518), (289, 1381), (300, 1402), (28, 1540))),
+        ("you inside", ((141, 1549), (246, 1493), (255, 1511), (150, 1567))),
+        ("that has an icon and emoticons", ((20, 1562), (322, 1409), (332, 1429), (30, 1582))),
+        ("Han Yoo-Hyun", ((161, 1632), (303, 1563), (313, 1585), (171, 1653))),
+    )
+    observations = []
+    for index, (text, polygon) in enumerate(rows):
+        xs, ys = zip(*polygon)
+        observations.append(dataclasses.replace(
+            _observation(text, observation_id=f"card-{index}", invocation_id="crop-card", provider="paddle_detected_crop"),
+            bbox_page=(min(xs), min(ys), max(xs), max(ys)),
+            polygons_page=(polygon,),
+        ))
+    selected, payload, decisions = select_ordered_consensus_body_with_decisions((tuple(observations),))
+    assert len(selected) == 6
+    assert payload == (
+        "Reference for production. This is a mock-up cell phone. "
+        "that has an icon and emoticons you inside it Han Yoo-Hyun"
+    )
+    assert not any(value["decision"].startswith("ambiguous") for value in decisions.values())
+
 def test_cross_invocation_spatial_repeat_is_not_a_duplicate_when_boxes_are_separate() -> None:
     first = _observation("WAIT", observation_id="first", invocation_id="full", provider="paddle_full_page")
     second = dataclasses.replace(
