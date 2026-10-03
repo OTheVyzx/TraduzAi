@@ -10668,6 +10668,18 @@ def _run_pipeline(
                 vision_analysis_index = {
                     "status": "not_written", "reason": f"cache_publish_error:{type(exc).__name__}",
                 }
+        if effective_owner_graph_mode == "enforce" and os.getenv(
+            "TRADUZAI_EXPERIMENTAL_VISION_RECORDS", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}:
+            from vision_runtime.page_record import write_chapter_analysis_records
+
+            strip_chapter_telemetry["vision_analysis_records"] = write_chapter_analysis_records(
+                verified_owner_private_root,
+                output_pages,
+                config,
+                source_manifest_sha256=verified_owner_source_manifest.sha256,
+                source_tree_sha256=verified_owner_source_manifest.source_tree_sha256,
+            )
             strip_chapter_telemetry["vision_analysis_index"] = vision_analysis_index
         strip_chapter_telemetry.pop("_performance_recorder", None)
         strip_chapter_telemetry["internal_unattributed_sec"] = round(

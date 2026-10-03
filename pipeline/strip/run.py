@@ -8405,6 +8405,7 @@ def _run_chapter_impl(
                             enforce_graph=True,
                             translation_result_override=translation_result,
                             style_copy_mode=style_copy_mode,
+                            execution_id_override=request.execution_id,
                             performance_recorder=(
                                 chapter_telemetry.get("_performance_recorder")
                                 if isinstance(chapter_telemetry, dict)

@@ -12697,6 +12697,7 @@ def execute_owner_page_graph(
     translation_result_override: OwnerPageTranslationResult | None = None,
     style_copy_mode: str = "shadow",
     performance_recorder: Any | None = None,
+    execution_id_override: str | None = None,
 ) -> OwnerPageExecution:
     """Execute every page owner once against canonical page pixels."""
 
@@ -13488,7 +13489,7 @@ def execute_owner_page_graph(
                 original_rgb=source,
                 mutation=mutation,
                 translation=binding,
-                execution_id=graph.origin_execution_id,
+                execution_id=execution_id_override or graph.origin_execution_id,
                 atomic_options=atomic_kwargs,
             )
             replacement = execute_owner_replacement(
@@ -13616,7 +13617,7 @@ def execute_owner_page_graph(
                             original_rgb=source,
                             mutation=repaired_mutation,
                             translation=translation,
-                            execution_id=graph.origin_execution_id,
+                            execution_id=execution_id_override or graph.origin_execution_id,
                             atomic_options=atomic_kwargs,
                         )
                         repaired_replacement = execute_owner_replacement(
